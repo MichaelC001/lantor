@@ -676,7 +676,7 @@ export function Conversation({
                         <Bookmark size={14} />
                       </button>
                     </div>
-                    {message.delivery_state !== "streaming" && (
+                    {(message.delivery_state !== "streaming" || visibleMessageBody.trim().length > 0) ? (
                       <>
                         <div className={isLongChannelMessage && !isChannelMessageExpanded ? "message-long-preview collapsed" : "message-long-preview"}>
                           <MessageMarkdown body={visibleMessageBody} />
@@ -696,9 +696,12 @@ export function Conversation({
                           </button>
                         )}
                       </>
-                    )}
+                    ) : null}
                     <MessageAttachments attachments={message.attachments} />
                     <MessageArtifacts artifacts={message.artifacts} onOpenArtifact={openArtifact} />
+                    {message.delivery_state === "streaming" && visibleMessageBody.trim().length > 0 && (
+                      <div className="message-stream-state">Streaming response</div>
+                    )}
                     {message.delivery_state === "error" && (
                       <div className="message-stream-state error">Response interrupted</div>
                     )}

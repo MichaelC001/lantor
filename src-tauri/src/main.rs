@@ -14170,7 +14170,9 @@ mod tests {
         assert!(prompt.contains("stable user preferences"));
         assert!(prompt.contains("Before long-running work, update Active Context"));
         assert!(prompt.contains("Turn startup sequence:"));
-        assert!(prompt.contains("Use history-read or message-search only when"));
+        assert!(
+            prompt.contains("Use history-read or message-search when older channel/thread context")
+        );
         assert!(prompt.contains("Reply briefly to direct greetings"));
         assert!(prompt.contains("Agent context tools"));
         assert!(prompt.contains("inbox-list"));

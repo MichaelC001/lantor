@@ -559,7 +559,21 @@ async fn api_events(State(state): State<Arc<WebState>>) -> Result<impl IntoRespo
             }
         }
     };
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    let response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
+    let (mut parts, body) = response.into_parts();
+    parts.headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    parts
+        .headers
+        .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+    parts
+        .headers
+        .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    Ok(Response::from_parts(parts, body))
 }
 
 async fn api_attachment(

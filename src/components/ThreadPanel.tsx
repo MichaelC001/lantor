@@ -449,9 +449,12 @@ export function ThreadPanel({
                           <Bookmark size={14} />
                         </button>
                       </div>
-                      {activeRoot.delivery_state !== "streaming" && <MessageMarkdown body={activeRoot.body} />}
+                      {(activeRoot.delivery_state !== "streaming" || activeRoot.body.trim().length > 0) && <MessageMarkdown body={activeRoot.body} />}
                       <MessageAttachments attachments={activeRoot.attachments} />
                       <MessageArtifacts artifacts={activeRoot.artifacts} onOpenArtifact={openArtifact} />
+                      {activeRoot.delivery_state === "streaming" && activeRoot.body.trim().length > 0 && (
+                        <div className="message-stream-state">Streaming response</div>
+                      )}
                       {activeRoot.delivery_state === "error" && (
                         <div className="message-stream-state error">Response interrupted</div>
                       )}
@@ -673,9 +676,12 @@ export function ThreadPanel({
                           <Bookmark size={14} />
                         </button>
                       </div>
-                      {reply.delivery_state !== "streaming" && <MessageMarkdown body={reply.body} />}
+                      {(reply.delivery_state !== "streaming" || reply.body.trim().length > 0) && <MessageMarkdown body={reply.body} />}
                       <MessageAttachments attachments={reply.attachments} />
                       <MessageArtifacts artifacts={reply.artifacts} onOpenArtifact={openArtifact} />
+                      {reply.delivery_state === "streaming" && reply.body.trim().length > 0 && (
+                        <div className="message-stream-state">Streaming response</div>
+                      )}
                       {reply.delivery_state === "error" && (
                         <div className="message-stream-state error">Response interrupted</div>
                       )}
