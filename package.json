@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "test:message-preview": "rm -rf .test-build && tsc --target ES2020 --module NodeNext --moduleResolution NodeNext --skipLibCheck --strict --outDir .test-build --noEmit false src/message-preview.ts && node --test tests/message-preview.test.mjs",
     "build": "tsc && vite build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

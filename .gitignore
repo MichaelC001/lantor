@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.test-build/
 src-tauri/target/
 .DS_Store
 *.log

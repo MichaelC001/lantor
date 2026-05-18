@@ -21,10 +21,11 @@ import { APP_DISPLAY_NAME } from "../branding";
 import { isCompactFollowupMessage, wasEdited } from "../message-grouping";
 import { messageShareLink, messageToMarkdown } from "../message-share";
 import { Agent, AgentActivity, AgentRun, AgentWorkItem, Artifact, Channel, DraftAttachment, Message, OwnerProfile, TASK_STATUSES, Task, ThreadReplySummary } from "../types";
-import { agentForMessageSender, deletedAgentForMessageSender, firstLines, formatClockTime, formatDateDivider, formatTime, isSameCalendarDay, ownerAsAvatarAgent, visibleAgentDescription, visibleChannelDescription } from "../ui-utils";
+import { agentForMessageSender, deletedAgentForMessageSender, formatClockTime, formatDateDivider, formatTime, isSameCalendarDay, ownerAsAvatarAgent, visibleAgentDescription, visibleChannelDescription } from "../ui-utils";
 import { ActivityProgressDock, activeProgressByAgent } from "./ActivityProgressDock";
 import { AgentAvatar, AgentAvatarWithProfile } from "./AgentAvatar";
 import { DraftAttachmentsPreview } from "./DraftAttachmentsPreview";
+import { ExpandableMessageMarkdown } from "./ExpandableMessageMarkdown";
 import { MessageActionMenu } from "./MessageActionMenu";
 import { MessageAttachments } from "./MessageAttachments";
 import { MessageArtifacts } from "./MessageArtifacts";
@@ -629,7 +630,7 @@ export function Conversation({
                         <Bookmark size={14} />
                       </button>
                     </div>
-                    {message.delivery_state !== "streaming" && <MessageMarkdown body={firstLines(message.body)} />}
+                    {message.delivery_state !== "streaming" && <ExpandableMessageMarkdown body={message.body} />}
                     <MessageAttachments attachments={message.attachments} />
                     <MessageArtifacts artifacts={message.artifacts} onOpenArtifact={openArtifact} />
                     {message.delivery_state === "error" && (

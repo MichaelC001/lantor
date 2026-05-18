@@ -1768,6 +1768,29 @@ mark {
   background: rgba(10, 132, 255, 0.14);
 }
 
+.message-expand-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 2px 0 0;
+  padding: 0 5px 2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #6e6e73;
+  font: inherit;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.message-expand-toggle:hover,
+.message-expand-toggle:focus-visible {
+  background: rgba(10, 132, 255, 0.1);
+  color: var(--accent);
+}
+
 .message-attachments {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(132px, 260px));

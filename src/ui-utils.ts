@@ -1,3 +1,4 @@
+import { createMessagePreview } from "./message-preview";
 import { Agent, AgentForm, Message, OwnerProfile, RUNTIME_PRESETS } from "./types";
 
 export function ownerAsAvatarAgent(profile: OwnerProfile) {
@@ -213,8 +214,8 @@ export function isSameCalendarDay(left: string, right: string) {
 }
 
 export function firstLines(text: string, lines = 8) {
-  const split = text.trim().split("\n");
-  return split.slice(0, lines).join("\n") + (split.length > lines ? "\n..." : "");
+  const preview = createMessagePreview(text, lines);
+  return preview.body + (preview.truncated ? "\n..." : "");
 }
 
 export function agentRequestSourceLabel(sourceKind: string, taskNumber?: number | null) {
