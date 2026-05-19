@@ -71,6 +71,7 @@ const ACTIVITY_PHASE_LABELS: Record<string, string> = {
   task: "Acting",
   event_error: "Error",
   run_error: "Error",
+  run_retry: "Retrying",
 };
 
 const DEFAULT_THREAD_PANEL_WIDTH = 420;

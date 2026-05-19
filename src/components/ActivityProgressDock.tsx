@@ -64,6 +64,8 @@ function phaseLabel(phase: string) {
       return "Using tools";
     case "runtime":
       return "Runtime";
+    case "run_retry":
+      return "Retrying";
     case "work":
       return "Request";
     case "error":

@@ -74,7 +74,7 @@ const UI_REFRESH_EVENT: &str = "lantor://refresh";
 const LANTOR_CONTEXT_TOOL_ENV: &str = "LANTOR_CONTEXT_TOOL";
 const STREAMING_MESSAGE_BODY_LIMIT: usize = 200_000;
 const CLAUDE_MAX_RETRIES_ENV: &str = "ANTHROPIC_MAX_RETRIES";
-const DEFAULT_CLAUDE_MAX_RETRIES: &str = "3";
+const DEFAULT_CLAUDE_MAX_RETRIES: &str = "5";
 const STREAMING_TRUNCATION_MARKER: &str = "\n\n[stream truncated by Lantor]";
 const DISPATCH_MESSAGE_BODY_LIMIT: usize = 4 * 1024;
 const CLAUDE_THREAD_CONTEXT_MESSAGE_LIMIT: i64 = 16;
@@ -6850,7 +6850,7 @@ fn activity_phase(kind: &str) -> &'static str {
         "file_edit" => "file_edit",
         "tools" => "tools",
         "error" | "event_error" | "run_error" => "error",
-        "run" | "usage" => "runtime",
+        "run" | "run_retry" | "usage" => "runtime",
         "dispatch" | "mention" | "dm" | "task" | "schedule" | "channel" | "membership" => "work",
         "profile" | "memory" => "profile",
         _ => "acting",
@@ -6864,6 +6864,7 @@ fn normalize_agent_activity_kind(kind: Option<&str>) -> &'static str {
         Some("file_edit") | Some("editing_file") => "file_edit",
         Some("tools") | Some("tool") => "tools",
         Some("error") => "error",
+        Some("run_retry") => "run_retry",
         Some("task") => "task",
         Some("message") => "message",
         Some("dispatch") => "dispatch",
@@ -6889,7 +6890,7 @@ fn activity_status(kind: &str, title: &str) -> &'static str {
                 || lowered.contains("rejected")))
     {
         "error"
-    } else if lowered.contains("warning") {
+    } else if kind == "run_retry" || lowered.contains("warning") {
         "warning"
     } else if lowered.contains("cancel") || lowered.contains("stop") || lowered.contains("stopping")
     {
@@ -10637,14 +10638,14 @@ fn claude_api_retry_detail(value: &Value) -> String {
         .get("error_status")
         .or_else(|| value.pointer("/error/status"))
         .and_then(Value::as_i64)
-        .map(|status| status.to_string());
+        .map(claude_api_retry_status_label);
     let error = value
         .get("error")
         .or_else(|| value.pointer("/error/type"))
         .or_else(|| value.pointer("/error/error"))
         .and_then(Value::as_str);
 
-    let mut parts = vec!["Claude provider request failed; retrying automatically".to_owned()];
+    let mut parts = vec!["Lantor will retry automatically; no action needed".to_owned()];
     match (attempt, max_retries) {
         (Some(attempt), Some(max_retries)) => {
             parts.push(format!("attempt {attempt}/{max_retries}"));
@@ -10655,7 +10656,7 @@ fn claude_api_retry_detail(value: &Value) -> String {
         _ => {}
     }
     if let Some(status) = status {
-        parts.push(format!("status {status}"));
+        parts.push(status);
     }
     if let Some(error) = error {
         parts.push(format!("error {error}"));
@@ -10664,12 +10665,20 @@ fn claude_api_retry_detail(value: &Value) -> String {
     truncate_activity_detail(&parts.join(" · "))
 }
 
+fn claude_api_retry_status_label(status: i64) -> String {
+    match status {
+        429 => "status 429 (rate limited)".to_owned(),
+        529 => "status 529 (overloaded)".to_owned(),
+        _ => format!("status {status}"),
+    }
+}
+
 fn claude_stream_event_activity(value: &Value) -> Option<(&'static str, &'static str, String)> {
     match value.get("type").and_then(Value::as_str)? {
         "system" => match value.get("subtype").and_then(Value::as_str) {
             Some("init") => Some(("run", "Runtime ready", "Claude stream connected".to_owned())),
             Some("api_retry") => Some((
-                "run_error",
+                "run_retry",
                 "Claude provider retrying",
                 claude_api_retry_detail(value),
             )),
@@ -10685,7 +10694,7 @@ fn claude_stream_event_activity(value: &Value) -> Option<(&'static str, &'static
                 None
             } else {
                 Some((
-                    "run_error",
+                    "run_retry",
                     "Waiting on rate limit",
                     format!("status={status}"),
                 ))
@@ -15980,6 +15989,7 @@ mod tests {
     #[test]
     fn marks_runtime_warning_activity_as_warning_status() {
         assert_eq!(activity_status("run", "Runtime warning"), "warning");
+        assert_eq!(activity_status("run_retry", "Claude provider retrying"), "warning");
         assert_eq!(activity_status("error", "Error output"), "error");
         assert_eq!(
             activity_status("thinking", "Investigating Activity ERROR"),
@@ -16180,10 +16190,18 @@ mod tests {
                 "error": "rate_limit"
             })),
             Some((
-                "run_error",
+                "run_retry",
                 "Claude provider retrying",
-                "Claude provider request failed; retrying automatically · attempt 2/3 · status 529 · error rate_limit"
+                "Lantor will retry automatically; no action needed · attempt 2/3 · status 529 (overloaded) · error rate_limit"
                     .to_owned()
+            ))
+        );
+        assert_eq!(
+            claude_stream_event_activity(&json!({"type": "system", "subtype": "api_retry"})),
+            Some((
+                "run_retry",
+                "Claude provider retrying",
+                "Lantor will retry automatically; no action needed".to_owned()
             ))
         );
         assert_eq!(
@@ -16191,6 +16209,16 @@ mod tests {
                 &json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}})
             ),
             None
+        );
+        assert_eq!(
+            claude_stream_event_activity(
+                &json!({"type": "rate_limit_event", "rate_limit_info": {"status": "limited"}})
+            ),
+            Some((
+                "run_retry",
+                "Waiting on rate limit",
+                "status=limited".to_owned()
+            ))
         );
         assert_eq!(
             claude_stream_event_activity(

@@ -5007,6 +5007,11 @@ body.resizing-column * {
   box-shadow: 0 0 0 3px rgba(255, 212, 59, 0.14);
 }
 
+.activity-dot[data-kind="run_retry"] {
+  background: #ff9f0a;
+  box-shadow: 0 0 0 3px rgba(255, 159, 10, 0.16);
+}
+
 .activity-dot[data-kind="error"],
 .activity-dot[data-kind="event_error"],
 .activity-dot[data-kind="run_error"] {
