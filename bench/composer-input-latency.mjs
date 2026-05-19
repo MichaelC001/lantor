@@ -5,7 +5,7 @@ import { performance } from "node:perf_hooks";
 const LONG_TASK_MS = 50;
 const DEFAULTS = {
   runs: 5,
-  warmup: 2,
+  warmup: 4,
   sampleRepeats: 3,
   seed: 17,
   profile: "all",
