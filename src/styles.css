@@ -3035,13 +3035,21 @@ mark {
 .reply-composer textarea {
   width: 100%;
   min-height: 74px;
-  max-height: 160px;
+  overflow-y: hidden;
   resize: none;
   padding: 14px 15px;
   border: 1px solid rgba(20, 23, 31, 0.16);
   border-radius: 18px;
   background: #fff;
   outline: none;
+}
+
+.composer textarea {
+  max-height: min(40vh, 360px);
+}
+
+.reply-composer textarea {
+  max-height: min(35vh, 280px);
 }
 
 .composer.drag-over textarea,

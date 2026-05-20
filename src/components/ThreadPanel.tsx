@@ -1,5 +1,6 @@
 import { ArrowDown, ArrowLeft, Bookmark, CheckCircle2, Hash, MessageSquare, Paperclip, RotateCcw, Send, X } from "lucide-react";
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useAutoGrowTextarea } from "../hooks/useAutoGrowTextarea";
 import { useMentionPicker } from "../hooks/useMentionPicker";
 import { APP_DISPLAY_NAME } from "../branding";
 import { isImeComposing } from "../input-utils";
@@ -151,6 +152,7 @@ export function ThreadPanel({
     closeMentionPicker,
     focusComposer,
   } = useMentionPicker({ agents, channels, value: replyDraft, setValue: setReplyDraft, textareaRef });
+  useAutoGrowTextarea(textareaRef, replyDraft);
   const lastReply = replies[replies.length - 1] ?? null;
 
   function isThreadScrollAtBottom(element: HTMLDivElement) {

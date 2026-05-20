@@ -15,6 +15,7 @@ import {
   Users,
 } from "lucide-react";
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FocusEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useAutoGrowTextarea } from "../hooks/useAutoGrowTextarea";
 import { useMentionPicker } from "../hooks/useMentionPicker";
 import { isImeComposing } from "../input-utils";
 import { copyText } from "../clipboard";
@@ -191,6 +192,7 @@ export function Conversation({
     closeMentionPicker,
     focusComposer,
   } = useMentionPicker({ agents, channels, value: draft, setValue: setDraft, textareaRef });
+  useAutoGrowTextarea(textareaRef, draft);
   const activeReplyProgressByRoot = useMemo<Record<string, ReturnType<typeof activeProgressByAgent>>>(() => {
     if (!channel) return {};
     return Object.fromEntries(
