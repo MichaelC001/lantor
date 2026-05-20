@@ -29,6 +29,7 @@ import { ActivityFeedModal } from "./components/ActivityFeedModal";
 import { OwnerProfileModal, ownerProfileToForm, type OwnerProfileForm } from "./components/OwnerProfileModal";
 import { SavedMessagesModal } from "./components/SavedMessagesModal";
 import { SearchModal } from "./components/SearchModal";
+import { SettingsModal, type ThemePreference } from "./components/SettingsModal";
 import { Sidebar } from "./components/Sidebar";
 import { ThreadPanel } from "./components/ThreadPanel";
 import { isProgressOnlyMessage } from "./message-grouping";
@@ -143,6 +144,7 @@ const CHANNEL_THREAD_MEMORY_STORAGE_KEY = "lantor.channelThreadMemory";
 const THREAD_PANEL_WIDTH_STORAGE_KEY = "lantor.threadPanelWidth";
 const AGENT_DRAWER_WIDTH_STORAGE_KEY = "lantor.agentDrawerWidth";
 const SIDEBAR_WIDTH_STORAGE_KEY = "lantor.sidebarWidth";
+const THEME_PREFERENCE_STORAGE_KEY = "lantor.themePreference";
 const MOBILE_EDGE_SWIPE_START_PX = 24;
 const MOBILE_EDGE_SWIPE_OPEN_PX = 72;
 const MOBILE_EDGE_SWIPE_MAX_VERTICAL_PX = 48;
@@ -414,6 +416,11 @@ function getStoredNumber(key: string, fallback: number) {
   return stored ? Number(stored) : fallback;
 }
 
+function getStoredThemePreference(): ThemePreference {
+  const stored = window.localStorage.getItem(THEME_PREFERENCE_STORAGE_KEY);
+  return stored === "light" || stored === "dark" || stored === "auto" ? stored : "auto";
+}
+
 async function attachmentUploads(attachments: DraftAttachment[]) {
   return Promise.all(attachments.map(async (attachment) => {
     const buffer = await attachment.file.arrayBuffer();
@@ -580,6 +587,8 @@ function App() {
   const [showActivityFeedModal, setShowActivityFeedModal] = useState(false);
   const [showSavedModal, setShowSavedModal] = useState(false);
   const [showOwnerProfileModal, setShowOwnerProfileModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => getStoredThemePreference());
   const [showMobileSidebar, setShowMobileSidebar] = useState(() => isMobileViewport());
   const [mobileSidebarFocus, setMobileSidebarFocus] = useState<"home" | "dms">("home");
   const [mobileSidebarDragPx, setMobileSidebarDragPx] = useState(0);
@@ -1149,6 +1158,22 @@ function App() {
   }, [channelThreadMemory]);
 
   useEffect(() => {
+    window.localStorage.setItem(THEME_PREFERENCE_STORAGE_KEY, themePreference);
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      const resolvedTheme = themePreference === "auto"
+        ? mediaQuery.matches ? "dark" : "light"
+        : themePreference;
+      document.documentElement.dataset.theme = resolvedTheme;
+      document.documentElement.style.colorScheme = resolvedTheme;
+    };
+    applyTheme();
+    if (themePreference !== "auto") return;
+    mediaQuery.addEventListener("change", applyTheme);
+    return () => mediaQuery.removeEventListener("change", applyTheme);
+  }, [themePreference]);
+
+  useEffect(() => {
     setDismissedActivityFeedItems(data?.dismissed_inbox_items ?? {});
   }, [data?.dismissed_inbox_items]);
 
@@ -1163,6 +1188,12 @@ function App() {
       if (modifier && event.key.toLowerCase() === "k") {
         event.preventDefault();
         openSearchModal();
+        return;
+      }
+
+      if (modifier && event.key === ",") {
+        event.preventDefault();
+        setShowSettingsModal(true);
         return;
       }
 
@@ -1193,6 +1224,7 @@ function App() {
         showActivityFeedModal ||
         showSavedModal ||
         showOwnerProfileModal ||
+        showSettingsModal ||
         Boolean(editingAgentId);
       if (event.key === "Escape" && !modalOpen && !isTextInput(event.target)) {
         if (selectedAgentId) {
@@ -1215,6 +1247,7 @@ function App() {
     showCreateChannelModal,
     showActivityFeedModal,
     showOwnerProfileModal,
+    showSettingsModal,
     showSavedModal,
     showSearchModal,
     showThread,
@@ -1372,6 +1405,7 @@ function App() {
       showCreateChannelModal ||
       showActivityFeedModal ||
       showOwnerProfileModal ||
+      showSettingsModal ||
       showSavedModal ||
       showSearchModal;
     if (!isMobileViewport() || showMobileSidebar || showThread || selectedAgentId || hasOpenModal) return;
@@ -1470,6 +1504,7 @@ function App() {
     showActivityFeedModal,
     showMobileSidebar,
     showOwnerProfileModal,
+    showSettingsModal,
     showSavedModal,
     showSearchModal,
     showThread,
@@ -3026,6 +3061,10 @@ function App() {
           setShowMobileSidebar(false);
           setShowOwnerProfileModal(true);
         }}
+        openSettingsModal={() => {
+          setShowMobileSidebar(false);
+          setShowSettingsModal(true);
+        }}
         onResizeStart={startSidebarResize}
       />
       <SearchModal
@@ -3076,6 +3115,13 @@ function App() {
           setShowOwnerProfileModal(false);
         }}
         onSubmit={saveOwnerProfile}
+      />
+
+      <SettingsModal
+        open={showSettingsModal}
+        themePreference={themePreference}
+        onThemePreferenceChange={setThemePreference}
+        onClose={() => setShowSettingsModal(false)}
       />
 
       <Conversation

@@ -47,6 +47,31 @@ function isNoisyTaskActivity(activity: AgentActivity) {
   return false;
 }
 
+const THREAD_MESSAGE_PREVIEW_LINES = 12;
+const THREAD_MESSAGE_PREVIEW_CHARS = 1800;
+
+function shouldCollapseThreadMessage(body: string) {
+  const text = body.trim();
+  if (!text) return false;
+  return text.split("\n").length > THREAD_MESSAGE_PREVIEW_LINES || text.length > THREAD_MESSAGE_PREVIEW_CHARS;
+}
+
+function closeUnbalancedCodeFence(body: string) {
+  const fenceMatches = body.match(/(^|\n)```/g);
+  if (!fenceMatches || fenceMatches.length % 2 === 0) return body;
+  return `${body.replace(/\s+$/, "")}\n\`\`\``;
+}
+
+function threadMessagePreview(body: string) {
+  const text = body.trim();
+  const lines = text.split("\n");
+  const linePreview = lines.slice(0, THREAD_MESSAGE_PREVIEW_LINES).join("\n");
+  const preview = linePreview.length > THREAD_MESSAGE_PREVIEW_CHARS
+    ? linePreview.slice(0, THREAD_MESSAGE_PREVIEW_CHARS).replace(/\s+\S*$/, "")
+    : linePreview;
+  return closeUnbalancedCodeFence(preview);
+}
+
 type ThreadPanelProps = {
   channel: Channel | null;
   channels: Channel[];
@@ -122,6 +147,7 @@ export function ThreadPanel({
   const [showBackToBottom, setShowBackToBottom] = useState(false);
   const [messageMenu, setMessageMenu] = useState<MessageMenuState>(null);
   const [tapFocusedMessageId, setTapFocusedMessageId] = useState<string | null>(null);
+  const [expandedThreadMessageIds, setExpandedThreadMessageIds] = useState<Set<string>>(() => new Set());
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldFollowThreadRef = useRef(true);
   function openLinkedAgentDetail(handle: string) {
@@ -178,6 +204,7 @@ export function ThreadPanel({
   useEffect(() => {
     setMessageMenu(null);
     setTapFocusedMessageId(null);
+    setExpandedThreadMessageIds(new Set());
   }, [activeRoot?.id]);
 
   useLayoutEffect(() => {
@@ -213,6 +240,15 @@ export function ThreadPanel({
   async function copyMessageLink(message: Message) {
     await copyText(messageShareLink(message, shareBaseUrl));
     setMessageMenu(null);
+  }
+
+  function toggleThreadMessageExpanded(messageId: string) {
+    setExpandedThreadMessageIds((current) => {
+      const next = new Set(current);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      return next;
+    });
   }
 
   const activeTaskAssignee = activeTask
@@ -369,9 +405,34 @@ export function ThreadPanel({
                           <Bookmark size={14} />
                         </button>
                       </div>
-                      {activeRoot.delivery_state !== "streaming" && (
-                        <MessageMarkdown body={activeRoot.body} onLocalAgentLink={openLinkedAgentDetail} />
-                      )}
+                      {activeRoot.delivery_state !== "streaming" && (() => {
+                        const isLongThreadMessage = shouldCollapseThreadMessage(activeRoot.body);
+                        const isThreadMessageExpanded = expandedThreadMessageIds.has(activeRoot.id);
+                        const visibleBody = isLongThreadMessage && !isThreadMessageExpanded
+                          ? threadMessagePreview(activeRoot.body)
+                          : activeRoot.body;
+                        return (
+                          <>
+                            <div className={isLongThreadMessage && !isThreadMessageExpanded ? "message-long-preview collapsed" : "message-long-preview"}>
+                              <MessageMarkdown body={visibleBody} onLocalAgentLink={openLinkedAgentDetail} />
+                            </div>
+                            {isLongThreadMessage && (
+                              <button
+                                type="button"
+                                className="message-expand-button"
+                                aria-expanded={isThreadMessageExpanded}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggleThreadMessageExpanded(activeRoot.id);
+                                }}
+                              >
+                                {isThreadMessageExpanded ? "Show less" : "Show more"}
+                              </button>
+                            )}
+                          </>
+                        );
+                      })()}
                       <MessageAttachments attachments={activeRoot.attachments} />
                       <MessageArtifacts artifacts={activeRoot.artifacts} onOpenArtifact={openArtifact} />
                       {activeRoot.delivery_state === "sending" && (
@@ -608,9 +669,34 @@ export function ThreadPanel({
                           <Bookmark size={14} />
                         </button>
                       </div>
-                      {reply.delivery_state !== "streaming" && (
-                        <MessageMarkdown body={reply.body} onLocalAgentLink={openLinkedAgentDetail} />
-                      )}
+                      {reply.delivery_state !== "streaming" && (() => {
+                        const isLongThreadMessage = shouldCollapseThreadMessage(reply.body);
+                        const isThreadMessageExpanded = expandedThreadMessageIds.has(reply.id);
+                        const visibleBody = isLongThreadMessage && !isThreadMessageExpanded
+                          ? threadMessagePreview(reply.body)
+                          : reply.body;
+                        return (
+                          <>
+                            <div className={isLongThreadMessage && !isThreadMessageExpanded ? "message-long-preview collapsed" : "message-long-preview"}>
+                              <MessageMarkdown body={visibleBody} onLocalAgentLink={openLinkedAgentDetail} />
+                            </div>
+                            {isLongThreadMessage && (
+                              <button
+                                type="button"
+                                className="message-expand-button"
+                                aria-expanded={isThreadMessageExpanded}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggleThreadMessageExpanded(reply.id);
+                                }}
+                              >
+                                {isThreadMessageExpanded ? "Show less" : "Show more"}
+                              </button>
+                            )}
+                          </>
+                        );
+                      })()}
                       <MessageAttachments attachments={reply.attachments} />
                       <MessageArtifacts artifacts={reply.artifacts} onOpenArtifact={openArtifact} />
                       {reply.delivery_state === "sending" && (

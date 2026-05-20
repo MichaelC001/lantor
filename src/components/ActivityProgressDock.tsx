@@ -27,6 +27,8 @@ export type ActiveAgentProgress = {
   key: string;
   agent: Pick<Agent, "handle" | "display_name" | "status"> &
     Partial<Pick<Agent, "id" | "runtime" | "model" | "role" | "avatar" | "description">>;
+  workItem: AgentWorkItem | null;
+  queuedItems: AgentWorkItem[];
   latestActivity: AgentActivity | null;
   history: AgentActivity[];
   latestAt: number;
@@ -65,7 +67,7 @@ function phaseLabel(phase: string) {
     case "runtime":
       return "Runtime";
     case "run_retry":
-      return "Retrying";
+      return "Provider retrying";
     case "work":
       return "Request";
     case "error":
@@ -91,6 +93,10 @@ function progressIcon(activity: AgentActivity | null): LucideIcon {
     default:
       return LoaderCircle;
   }
+}
+
+function isProviderRetryActivity(activity: AgentActivity | null) {
+  return activity?.kind === "run_retry" || activity?.phase === "run_retry";
 }
 
 function activityDetail(activity: AgentActivity) {
@@ -223,6 +229,7 @@ export function activeProgressByAgent(
     });
 
   const runsById = new Map(runs.map((run) => [run.id, run]));
+  const surfaceWorkItems = workItems.filter((workItem) => workItemMatchesSurface(workItem, channelId, threadRootId));
   const candidatesByRun = new Map<string, ProgressCandidate>();
   const addCandidate = (runId: string, candidate: ProgressCandidate) => {
     const current = candidatesByRun.get(runId);
@@ -240,8 +247,8 @@ export function activeProgressByAgent(
     });
   });
 
-  workItems
-    .filter((workItem) => workItem.run_id && workItemMatchesSurface(workItem, channelId, threadRootId))
+  surfaceWorkItems
+    .filter((workItem) => workItem.run_id)
     .forEach((workItem) => {
       const runId = workItem.run_id;
       if (!runId) return;
@@ -283,11 +290,40 @@ export function activeProgressByAgent(
     progressByAgent.set(key, {
       key,
       agent: existing?.agent ?? agentForProgress(handle, latestActivity, agents),
+      workItem: candidate.workItem ?? existing?.workItem ?? null,
+      queuedItems: existing?.queuedItems ?? [],
       latestActivity: existing && existing.latestAt > latestAt ? existing.latestActivity : latestActivity,
       history: compactHistory,
       latestAt: Math.max(existing?.latestAt ?? 0, latestAt),
     });
   });
+
+  surfaceWorkItems
+    .filter((workItem) => workItem.status === "queued")
+    .forEach((workItem) => {
+      const key = workItem.agent_handle || workItem.agent_id;
+      const existing = progressByAgent.get(key);
+      const queuedItems = [...(existing?.queuedItems ?? [])];
+      if (!queuedItems.some((item) => item.id === workItem.id)) queuedItems.push(workItem);
+      const agent = existing?.agent
+        ?? agents.find((candidate) => candidate.id === workItem.agent_id)
+        ?? {
+          id: workItem.agent_id,
+          handle: workItem.agent_handle || "agent",
+          display_name: workItem.agent_handle ? `@${workItem.agent_handle}` : "Agent",
+          status: "idle",
+        };
+
+      progressByAgent.set(key, {
+        key,
+        agent,
+        workItem: existing?.workItem ?? null,
+        queuedItems,
+        latestActivity: existing?.latestActivity ?? null,
+        history: existing?.history ?? [],
+        latestAt: Math.max(existing?.latestAt ?? 0, timestamp(workItem.updated_at)),
+      });
+    });
 
   return Array.from(progressByAgent.values())
     .sort((left, right) => right.latestAt - left.latestAt);
@@ -308,10 +344,16 @@ export function ActivityProgressDock({
   const latest = progress[0];
   const latestActivity = latest.latestActivity;
   const Icon = progressIcon(latestActivity);
+  const providerRetrying = isProviderRetryActivity(latestActivity);
+  const queuedCount = progress.reduce((count, item) => count + item.queuedItems.length, 0);
   const title = progress.length === 1
-    ? `${latest.agent.display_name} is working`
+    ? providerRetrying
+      ? `${latest.agent.display_name} is waiting on provider`
+      : latestActivity
+        ? `${latest.agent.display_name} is working`
+        : `${latest.agent.display_name} has queued work`
     : `${progress.length} agents are working`;
-  const latestTitle = latestActivity ? activityTitle(latestActivity) : "Starting";
+  const latestTitle = latestActivity ? activityTitle(latestActivity) : "Queued";
   const latestDetail = latestActivity ? activityDetail(latestActivity) : "";
   const history = progress
     .flatMap((item) => item.history.map((activity) => ({ activity, agent: item.agent })))
@@ -320,7 +362,7 @@ export function ActivityProgressDock({
 
   return (
     <details className="activity-progress-dock">
-      <summary>
+      <summary data-state={providerRetrying ? "provider-retrying" : latestActivity ? "working" : "queued"}>
         <span className="activity-progress-avatar-stack" aria-hidden="true">
           {progress.slice(0, 3).map((item) => (
             <AgentAvatar key={item.key} agent={item.agent} size="sm" showStatus={false} />
@@ -332,6 +374,7 @@ export function ActivityProgressDock({
             <Icon size={13} />
             <span>{latestTitle}</span>
             {latestDetail && <em>{compact(latestDetail, 80)}</em>}
+            {queuedCount > 0 && <em>{queuedCount} queued on this surface</em>}
           </small>
         </span>
         <ChevronDown className="activity-progress-chevron" size={14} />
@@ -343,6 +386,9 @@ export function ActivityProgressDock({
             return (
               <li key={activity.id} data-status={activity.status}>
                 <time>{formatClockTime(activity.created_at)}</time>
+                <span className="activity-progress-source-chip" data-kind={activity.kind || activity.phase}>
+                  {phaseLabel(activity.phase || activity.kind)}
+                </span>
                 <span>
                   <strong>{agent.display_name}</strong>
                   <b>{activityTitle(activity)}</b>

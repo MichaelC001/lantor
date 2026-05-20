@@ -251,6 +251,19 @@ function workItemLocationLabel(item: AgentWorkItem) {
   return "Agent inbox";
 }
 
+function workItemSurfaceKey(item: AgentWorkItem) {
+  return `${item.channel_id ?? "agent"}:${item.thread_root_id ?? "root"}`;
+}
+
+function isProviderRetryActivity(activity: AgentActivity) {
+  return activity.kind === "run_retry" || activity.phase === "run_retry";
+}
+
+function activityTimestamp(activity: AgentActivity) {
+  const value = new Date(activity.created_at).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
 function formatDuration(value: number | null) {
   if (value === null || Number.isNaN(value)) return "n/a";
   if (value < 1000) return `${Math.round(value)} ms`;
@@ -675,75 +688,155 @@ export function AgentDetailDrawer({
   }
 
   function renderActivityPanel() {
+    const workItemsByRun = new Map(
+      workItems
+        .filter((item) => item.run_id)
+        .map((item) => [item.run_id as string, item]),
+    );
+    const groupedActivities = new Map<string, AgentActivity[]>();
+    activities.forEach((activity) => {
+      const key = activity.run_id ?? `activity:${activity.id}`;
+      groupedActivities.set(key, [...(groupedActivities.get(key) ?? []), activity]);
+    });
+    const activityGroups = Array.from(groupedActivities.entries())
+      .map(([runId, groupActivities]) => {
+        const sorted = [...groupActivities].sort((left, right) => activityTimestamp(right) - activityTimestamp(left));
+        const workItem = runId.startsWith("activity:") ? null : workItemsByRun.get(runId) ?? null;
+        const latest = sorted[0];
+        const queuedBehind = workItem
+          ? workItems.filter((item) =>
+            item.id !== workItem.id
+            && item.status === "queued"
+            && item.agent_id === workItem.agent_id
+            && workItemSurfaceKey(item) === workItemSurfaceKey(workItem))
+          : [];
+        return {
+          runId,
+          workItem,
+          latest,
+          activities: sorted,
+          queuedBehind,
+          providerRetrying: sorted.some(isProviderRetryActivity),
+        };
+      })
+      .sort((left, right) => activityTimestamp(right.latest) - activityTimestamp(left.latest));
+
     return (
       <section className="detail-section live-activity-section">
         <div className="detail-section-head">
           <h4>Recent activity</h4>
-          {activities.length > 0 && <span>Latest {activities.length}</span>}
+          {activityGroups.length > 0 && <span>{activityGroups.length} turns · {activities.length} steps</span>}
         </div>
         {activities.length === 0 && <p className="empty-mini">No activity yet.</p>}
-        {activities.length > 0 && (
-          <div className="activity-timeline" role="log" aria-label={`${agent.handle} activity`}>
-            {activities.map((activity) => {
-              const title = userFacingActivityTitle(activity);
-              const detail = userFacingActivityDetail(activity);
-              const category = userFacingActivityCategory(activity);
-              const visibleMetadata = visibleMetadataEntries(activity);
-              const allMetadata = metadataEntries(activity);
+        {activityGroups.length > 0 && (
+          <div className="activity-run-list" role="log" aria-label={`${agent.handle} activity by run`}>
+            {activityGroups.map((group) => {
+              const sourceLabel = group.workItem
+                ? agentRequestSourceLabel(group.workItem.source_kind, group.workItem.task_number)
+                : "Runtime event";
+              const location = group.workItem ? workItemLocationLabel(group.workItem) : "No source request";
               return (
-                <article
-                  key={activity.id}
-                  className={`activity-timeline-row ${expandedActivityId === activity.id ? "expanded" : ""}`}
-                  data-kind={activity.kind}
-                  data-phase={activity.phase}
-                  data-status={activity.status}
-                  onClick={() => setExpandedActivityId((current) => current === activity.id ? null : activity.id)}
-                >
-                  <time>{formatActivityTime(activity.created_at)}</time>
-                  <span
-                    className="activity-dot"
-                    data-kind={activity.kind}
-                    data-phase={activity.phase}
-                    data-status={activity.status}
-                    aria-hidden="true"
-                  />
-                  <div className="activity-timeline-body">
-                    <div className="activity-timeline-title">
-                      <strong>{title}</strong>
-                      <span className={`activity-status status-${activity.status}`}>
-                        {statusForActivity(activity)}
-                      </span>
-                    </div>
-                    <div className="activity-structure-line">
-                      <span>{category}</span>
-                      {activity.status === "active" && <span>In progress</span>}
-                    </div>
-                    {visibleMetadata.length > 0 && (
-                      <div className="activity-metadata">
-                        {visibleMetadata.map(([key, value]) => (
-                          <span key={key} title={`${key}: ${value}`}>
-                            <b>{key}</b>
-                            {compactValue(value)}
-                          </span>
-                        ))}
+                <article className="activity-run-card" key={group.runId} data-provider-retrying={group.providerRetrying ? "true" : "false"}>
+                  <header className="activity-run-head">
+                    <div>
+                      <div className="activity-run-kicker">
+                        <span>{sourceLabel}</span>
+                        <time>{formatActivityTime(group.latest.created_at)}</time>
+                        {group.providerRetrying && <b>Provider retrying</b>}
                       </div>
+                      <h5>{group.workItem?.title || userFacingActivityTitle(group.latest)}</h5>
+                      <p>{location}{group.workItem?.status ? ` · ${workItemStatusLabel(group.workItem.status)}` : ""}</p>
+                    </div>
+                    {group.workItem && (
+                      <button type="button" onClick={() => onOpenWorkItem(group.workItem as AgentWorkItem)}>
+                        Open
+                      </button>
                     )}
-                    {detail && (
-                      <p title="Click to expand activity detail">{compactValue(detail, 120)}</p>
-                    )}
-                    {expandedActivityId === activity.id && allMetadata.length > 0 && (
-                      <pre className="activity-raw">{JSON.stringify(activity.metadata, null, 2)}</pre>
-                    )}
-                  </div>
+                  </header>
+
+                  {group.providerRetrying && (
+                    <div className="activity-provider-note">
+                      <strong>Lantor is retrying automatically.</strong>
+                      <span>No action needed unless this turns into a stalled request.</span>
+                    </div>
+                  )}
+
+                  {group.queuedBehind.length > 0 && (
+                    <div className="activity-queued-note">
+                      {group.queuedBehind.length} follow-up{group.queuedBehind.length === 1 ? "" : "s"} queued behind this run on the same surface.
+                    </div>
+                  )}
+
+                  <ol className="activity-run-steps">
+                    {group.activities.map((activity) => {
+                      const title = userFacingActivityTitle(activity);
+                      const detail = userFacingActivityDetail(activity);
+                      const category = userFacingActivityCategory(activity);
+                      const visibleMetadata = visibleMetadataEntries(activity);
+                      const allMetadata = metadataEntries(activity);
+                      return (
+                        <li
+                          key={activity.id}
+                          className={`activity-run-step ${expandedActivityId === activity.id ? "expanded" : ""}`}
+                          data-kind={activity.kind}
+                          data-phase={activity.phase}
+                          data-status={activity.status}
+                          onClick={() => setExpandedActivityId((current) => current === activity.id ? null : activity.id)}
+                        >
+                          <time>{formatActivityTime(activity.created_at)}</time>
+                          <span
+                            className="activity-dot"
+                            data-kind={activity.kind}
+                            data-phase={activity.phase}
+                            data-status={activity.status}
+                            aria-hidden="true"
+                          />
+                          <div className="activity-timeline-body">
+                            <div className="activity-timeline-title">
+                              <strong>{title}</strong>
+                              <span className={`activity-status status-${activity.status}`}>
+                                {statusForActivity(activity)}
+                              </span>
+                            </div>
+                            <div className="activity-structure-line">
+                              <span>{category}</span>
+                              {activity.status === "active" && <span>In progress</span>}
+                            </div>
+                            {visibleMetadata.length > 0 && (
+                              <div className="activity-metadata">
+                                {visibleMetadata.map(([key, value]) => (
+                                  <span key={key} title={`${key}: ${value}`}>
+                                    <b>{key}</b>
+                                    {compactValue(value)}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {detail && (
+                              <p title="Click to expand activity detail">{compactValue(detail, 120)}</p>
+                            )}
+                            {expandedActivityId === activity.id && allMetadata.length > 0 && (
+                              <pre className="activity-raw">{JSON.stringify(activity.metadata, null, 2)}</pre>
+                            )}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ol>
                 </article>
               );
             })}
           </div>
         )}
+        {workItems.some((item) => item.status === "queued") && (
+          <div className="activity-queued-summary">
+            <strong>{workItems.filter((item) => item.status === "queued").length} queued</strong>
+            <span>Queued follow-ups stay visible here while the agent is busy or retrying provider requests.</span>
+          </div>
+        )}
       </section>
     );
   }
-
   function renderInboxPanel() {
     return (
       <section className="detail-section agent-inbox-section">
