@@ -7994,25 +7994,8 @@ body.resizing-column * {
 
   .composer-actions,
   .reply-composer-actions {
-    max-height: 0;
-    overflow: hidden;
     justify-content: flex-end;
     gap: 6px;
-    opacity: 0;
-    transform: translateY(-4px);
-    transition:
-      max-height 160ms ease,
-      opacity 140ms ease,
-      transform 160ms ease;
-  }
-
-  .composer:focus-within .composer-actions,
-  .reply-composer:focus-within .reply-composer-actions,
-  .app.mobile-composer-focused .composer .composer-actions,
-  .app.mobile-composer-focused .reply-composer .reply-composer-actions {
-    max-height: 38px;
-    opacity: 1;
-    transform: translateY(0);
   }
 
   .send,
