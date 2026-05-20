@@ -176,6 +176,7 @@ export function Conversation({
   const shouldFollowMessagesRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const channelActionsRef = useRef<HTMLDivElement | null>(null);
   const isDm = channel?.kind === "dm";
   const dmAgent = isDm ? agents.find((agent) => agent.id === channel?.dm_agent_id) ?? null : null;
   function openLinkedAgentDetail(handle: string) {
@@ -379,6 +380,28 @@ export function Conversation({
     setMessageMenu(null);
   }, [channel?.id]);
 
+  useEffect(() => {
+    if (!showChannelActions) return;
+    function handlePointerDown(event: PointerEvent) {
+      const root = channelActionsRef.current;
+      if (!root) return;
+      const target = event.target as Node | null;
+      if (target && root.contains(target)) return;
+      setShowChannelActions(false);
+    }
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setShowChannelActions(false);
+    }
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showChannelActions]);
+
   function handleChannelActionsBlur(event: FocusEvent<HTMLDivElement>) {
     if (event.currentTarget.contains(event.relatedTarget)) return;
     setShowChannelActions(false);
@@ -490,7 +513,7 @@ export function Conversation({
           </div>
         </div>
         {channel && !isDm && (
-          <div className="channel-header-actions" onBlur={handleChannelActionsBlur}>
+          <div className="channel-header-actions" ref={channelActionsRef} onBlur={handleChannelActionsBlur}>
             <button
               type="button"
               className="channel-agent-count-trigger"
