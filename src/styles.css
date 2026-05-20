@@ -8080,9 +8080,9 @@ body.resizing-column * {
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 4px;
     padding: 6px 8px;
-    border: 1px solid rgba(20, 23, 31, 0.1);
+    border: 1px solid var(--border-subtle);
     border-radius: 24px;
-    background: rgba(255, 255, 255, 0.94);
+    background: var(--bg-panel-strong);
     box-shadow:
       0 16px 40px rgba(20, 23, 31, 0.18),
       0 2px 8px rgba(20, 23, 31, 0.08);
@@ -8098,13 +8098,14 @@ body.resizing-column * {
     align-content: center;
     gap: 3px;
     border-radius: 18px;
-    color: #6a717d;
+    background: transparent;
+    color: var(--ink-muted);
     font-size: var(--type-size-caption);
     font-weight: var(--type-weight-semibold);
   }
 
   .mobile-bottom-nav button.active {
-    background: rgba(10, 132, 255, 0.1);
+    background: var(--bg-selected-soft);
     color: var(--accent);
   }
 
