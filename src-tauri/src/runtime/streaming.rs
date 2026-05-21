@@ -362,21 +362,13 @@ pub(crate) async fn finish_streaming_agent_message(
     stream_key: &str,
     delivery_state: &str,
 ) -> CommandResult<()> {
-    if delivery_state == "complete" {
-        if let Some((agent_id, run_id, work_item_id)) =
-            load_streaming_control_context(pool, stream_key).await?
-        {
-            if consume_streaming_agent_control_lines(
-                pool,
-                agent_id,
-                run_id,
-                work_item_id,
-                stream_key,
-            )
+    if let Some((agent_id, run_id, work_item_id)) =
+        load_streaming_control_context(pool, stream_key).await?
+    {
+        if consume_streaming_agent_control_lines(pool, agent_id, run_id, work_item_id, stream_key)
             .await?
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
         }
     }
 
@@ -569,7 +561,7 @@ async fn consume_complete_streaming_agent_control_lines(
     let message_id: Uuid = row.get("id");
     let body: String = row.get("body");
     let (visible_body, event_jsons) = split_complete_streaming_agent_event_lines(&body);
-    if event_jsons.is_empty() {
+    if event_jsons.is_empty() && visible_body == body.trim() {
         return Ok(false);
     }
 
@@ -622,7 +614,7 @@ pub(crate) async fn consume_streaming_agent_control_lines(
     let message_id: Uuid = row.get("id");
     let body: String = row.get("body");
     let (visible_body, event_jsons) = split_streaming_agent_event_lines(&body);
-    if event_jsons.is_empty() {
+    if event_jsons.is_empty() && visible_body == body.trim() {
         return Ok(false);
     }
 

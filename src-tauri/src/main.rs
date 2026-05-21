@@ -2827,6 +2827,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_control_event_split_after_marker_is_consumed() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "split-control-agent").await?;
+            let channel_id = insert_test_channel(&pool, "split-control-channel").await?;
+            let run_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_runs (agent_id, command, status)
+                values ($1, 'codex app-server', 'running')
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let stream_key = format!("{run_id}:split-control");
+            let event = json!({
+                "type": "activity",
+                "kind": "thinking",
+                "title": "Split marker",
+                "detail": "The marker and JSON arrived separately"
+            });
+
+            append_streaming_agent_message(
+                &pool,
+                agent_id,
+                channel_id,
+                None,
+                &stream_key,
+                "LANTOR_EVENT\n",
+            )
+            .await?;
+            let message_id = append_streaming_agent_message(
+                &pool,
+                agent_id,
+                channel_id,
+                None,
+                &stream_key,
+                &event.to_string(),
+            )
+            .await?;
+            finish_streaming_agent_message(&pool, &stream_key, "complete").await?;
+
+            let body: String = sqlx::query_scalar("select body from messages where id = $1")
+                .bind(message_id)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            assert_eq!(body, "");
+
+            let activity_count: i64 = sqlx::query_scalar(
+                "select count(*) from agent_activities where run_id = $1 and title = 'Split marker'",
+            )
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(activity_count, 1);
+
+            let leaked_messages: i64 = sqlx::query_scalar(
+                "select count(*) from messages where body like '%LANTOR_EVENT%'",
+            )
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(leaked_messages, 0);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn streaming_error_finish_drops_incomplete_control_fragment() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "partial-control-agent").await?;
+            let channel_id = insert_test_channel(&pool, "partial-control-channel").await?;
+            let run_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_runs (agent_id, command, status)
+                values ($1, 'codex app-server', 'running')
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let stream_key = format!("{run_id}:partial-control");
+            let message_id = append_streaming_agent_message(
+                &pool,
+                agent_id,
+                channel_id,
+                None,
+                &stream_key,
+                "Visible update\nLANTOR_EVENT {\"type\":\"activity\"",
+            )
+            .await?;
+
+            finish_streaming_agent_message(&pool, &stream_key, "error").await?;
+
+            let row = sqlx::query("select body, delivery_state from messages where id = $1")
+                .bind(message_id)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            assert_eq!(row.get::<String, _>("body"), "Visible update");
+            assert_eq!(row.get::<String, _>("delivery_state"), "error");
+
+            let leaked_messages: i64 = sqlx::query_scalar(
+                "select count(*) from messages where body like '%LANTOR_EVENT%'",
+            )
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(leaked_messages, 0);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[tokio::test]
     async fn visible_reply_replaces_prior_activity_only_status_message() {
         let Some((pool, schema)) = test_pool().await else {
             return;
