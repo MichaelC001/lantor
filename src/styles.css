@@ -124,6 +124,7 @@ button,
   font-weight: var(--type-weight-semibold);
 }
 
+:root,
 .app {
   --bg-app: #eef1f5;
   --bg-sidebar: rgba(246, 247, 249, 0.8);
@@ -320,6 +321,9 @@ button,
   --task-toggle-active-hover-ink: #0c5026;
   --sidebar-width: 292px;
   --thread-width: 560px;
+}
+
+.app {
   display: grid;
   grid-template-columns: minmax(0, var(--sidebar-width)) minmax(0, 1fr) minmax(0, var(--thread-width));
   width: 100%;
@@ -353,6 +357,7 @@ button,
   font-family: var(--font-sans);
 }
 
+:root[data-theme="dark"],
 :root[data-theme="dark"] .app {
   --bg-app: #101318;
   --bg-sidebar: rgba(17, 20, 26, 0.9);
@@ -535,6 +540,9 @@ button,
   --task-toggle-active-hover-bg: var(--status-success-soft);
   --task-toggle-active-hover-border: var(--status-success-border);
   --task-toggle-active-hover-ink: var(--status-success);
+}
+
+:root[data-theme="dark"] .app {
   background:
     linear-gradient(135deg, #0e1117 0%, #151922 52%, #101722 100%);
   color: var(--ink-primary);
