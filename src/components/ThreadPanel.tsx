@@ -255,8 +255,9 @@ export function ThreadPanel({
       threadScrollMetricsRef.current.scrollHeight !== element.scrollHeight
       || threadScrollMetricsRef.current.clientHeight !== element.clientHeight;
     const userScrolling = isUserScrollingThread();
+    const reachedScrollEnd = Math.abs(threadScrollDistanceFromBottom(element)) <= 1;
     let shouldShowBackToBottom = Boolean(activeRoot) && !atBottom && !shouldFollowThreadRef.current;
-    if (atBottom) {
+    if (atBottom && (!userScrolling || reachedScrollEnd)) {
       userThreadScrollUntilRef.current = 0;
       shouldFollowThreadRef.current = true;
       shouldShowBackToBottom = false;
