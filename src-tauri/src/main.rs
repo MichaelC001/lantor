@@ -9,8 +9,10 @@ mod agent_work_dispatch;
 mod agent_workspace;
 mod artifact_store;
 mod attachments;
+mod bootstrap;
 mod channels;
 mod context_tool;
+mod db;
 mod domain;
 mod events;
 mod launch_agent;
@@ -19,6 +21,7 @@ mod models;
 mod owner_inbox;
 mod prompts;
 mod runtime;
+mod system_commands;
 mod task_messages;
 mod task_store;
 mod text;
@@ -27,28 +30,18 @@ mod usage;
 mod web;
 
 use std::{
-    env, fs,
-    net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
-    process::{Command as StdCommand, Stdio},
+    env,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
-    Row, SqlitePool,
-};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
-use std::str::FromStr;
+use sqlx::{Row, SqlitePool};
 use tauri::{Manager, State};
 use tokio::{sync::Semaphore, time::sleep};
 use uuid::Uuid;
 
-use activity_store::{load_agent_activities, load_agent_runs, load_agent_work_items};
 use agent_inbox_wake::{
     agent_has_active_or_pending_start, agent_runtime, build_steer_followup_prompt,
     create_agent_inbox_item, enqueue_agent_work_if_available, ensure_agent_inbox_wake_work_item,
@@ -58,8 +51,7 @@ use agent_inbox_wake::{
 use agent_inbox_wake::{inbox_wake_context, InboxWakeItem, InboxWakeSummary};
 use agent_memory::append_run_log;
 use agent_profile::{
-    create_agent_in_pool, delete_agent_in_pool, load_agents, load_owner_profile,
-    update_agent_in_pool, update_owner_profile_in_pool,
+    create_agent_in_pool, delete_agent_in_pool, update_agent_in_pool, update_owner_profile_in_pool,
 };
 #[cfg(test)]
 use agent_routing::{
@@ -74,17 +66,16 @@ use agent_work_dispatch::{
 use agent_workspace::{agent_workspace_list, agent_workspace_read_file};
 #[cfg(test)]
 use attachments::AgentAttachmentFile;
+use bootstrap::load_bootstrap;
 use channels::{
-    create_channel_with_members, delete_channel_in_pool, load_channel_members, load_channels,
-    normalize_channel_name, open_dm_with_agent_in_pool, set_channel_agent_membership_in_pool,
-    update_channel_in_pool,
+    create_channel_with_members, delete_channel_in_pool, normalize_channel_name,
+    open_dm_with_agent_in_pool, set_channel_agent_membership_in_pool, update_channel_in_pool,
 };
 use context_tool::run_agent_context_tool;
+use db::{acquire_supervisor_lock, db_connect_with_url, db_url, migrate};
 use domain::{
-    reminders::{
-        cancel_reminder, complete_reminder, create_reminder, load_reminders, snooze_reminder,
-    },
-    schedules::{create_agent_schedule, load_agent_schedules, update_agent_schedule_status},
+    reminders::{cancel_reminder, complete_reminder, create_reminder, snooze_reminder},
+    schedules::{create_agent_schedule, update_agent_schedule_status},
     spawn_reminder_worker,
 };
 #[cfg(test)]
@@ -95,17 +86,15 @@ use events::control::{
     claim_agent_event, extract_agent_event_json, handle_agent_event, AgentEvent,
 };
 use message_store::{
-    delete_message_in_pool, load_artifact, load_artifacts, load_messages, load_saved_messages,
-    send_owner_message_in_pool, set_message_saved_in_pool, update_message_in_pool,
+    delete_message_in_pool, load_artifact, send_owner_message_in_pool, set_message_saved_in_pool,
+    update_message_in_pool,
 };
 use models::{
-    Artifact, AttachmentUpload, Bootstrap, LaunchAgentStatus, RuntimeCheck, SupervisorCommand,
-    SupervisorStatus,
+    Artifact, AttachmentUpload, Bootstrap, LaunchAgentStatus, SupervisorCommand, SupervisorStatus,
 };
 use owner_inbox::{
-    dismiss_inbox_items_in_pool, load_dismissed_inbox_items, load_read_inbox_items,
-    mark_all_owner_inbox_read_in_pool, mark_channel_read_in_pool, mark_inbox_items_read_in_pool,
-    update_thread_followed_in_pool,
+    dismiss_inbox_items_in_pool, mark_all_owner_inbox_read_in_pool, mark_channel_read_in_pool,
+    mark_inbox_items_read_in_pool, update_thread_followed_in_pool,
 };
 use prompts::{
     build_streaming_work_item_prompt, build_work_item_prompt, load_agent_memory_context,
@@ -126,32 +115,19 @@ use runtime::supervisor::{
 use runtime::surface::{
     append_claude_thread_context, same_codex_surface, CodexActiveTurnScheduleState,
 };
-use task_store::{load_tasks, update_task_status_in_pool, update_task_title_in_pool};
+use system_commands::{check_runtime, open_external_url};
+use task_store::{update_task_status_in_pool, update_task_title_in_pool};
 use ui_notifications::{
     notify_supervisor_wake, notify_ui_agent_run_changed, notify_ui_refresh,
     notify_ui_work_item_changed, spawn_ui_refresh_listener,
 };
-use usage::{agent_budget_exhausted, backfill_agent_run_usage_from_logs};
+use usage::agent_budget_exhausted;
 
-const DEFAULT_DATABASE_URL: &str = "sqlite://~/Library/Application Support/Lantor/lantor.sqlite";
 const AGENT_CONTEXT_TOOL_MESSAGE_LIMIT: usize = 2_000;
 const SUPERVISOR_COMMAND_CONCURRENCY: usize = 4;
 const SUPERVISOR_IDLE_SLEEP: Duration = Duration::from_secs(2);
 const SUPERVISOR_ERROR_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const SUPERVISOR_ERROR_BACKOFF_MAX: Duration = Duration::from_secs(10);
-pub(crate) fn expand_home_path(value: &str) -> String {
-    let value = value.trim();
-    if value == "~" {
-        return env::var("HOME").unwrap_or_else(|_| value.to_owned());
-    }
-    if let Some(rest) = value.strip_prefix("~/") {
-        if let Ok(home) = env::var("HOME") {
-            return PathBuf::from(home).join(rest).to_string_lossy().to_string();
-        }
-    }
-    value.to_owned()
-}
-
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) pool: SqlitePool,
@@ -173,663 +149,9 @@ struct CreateChannelResult {
     channel_id: Uuid,
 }
 
-fn db_url() -> String {
-    let configured = env::var("LANTOR_DATABASE_URL").unwrap_or_else(|_| {
-        env::var("DATABASE_URL")
-            .ok()
-            .filter(|url| url.trim_start().starts_with("sqlite:"))
-            .unwrap_or_else(|| DEFAULT_DATABASE_URL.to_owned())
-    });
-    if let Some(path) = configured.strip_prefix("sqlite://") {
-        return format!("sqlite://{}", expand_home_path(path));
-    }
-    if let Some(path) = configured.strip_prefix("sqlite:") {
-        return format!("sqlite:{}", expand_home_path(path));
-    }
-    configured
-}
-
-pub(crate) async fn db_connect_with_url(
-    database_url: &str,
-    max_connections: u32,
-) -> Result<SqlitePool, sqlx::Error> {
-    let options = SqliteConnectOptions::from_str(database_url)?
-        .create_if_missing(true)
-        .foreign_keys(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(Duration::from_secs(10));
-    if !database_url.contains(":memory:") {
-        if let Some(parent) = options.get_filename().parent() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-    SqlitePoolOptions::new()
-        .max_connections(max_connections)
-        .connect_with(options)
-        .await
-}
-
-pub(crate) async fn db_connect(max_connections: u32) -> Result<SqlitePool, sqlx::Error> {
-    db_connect_with_url(&db_url(), max_connections).await
-}
-
-fn sqlite_database_file_path(database_url: &str) -> CommandResult<Option<PathBuf>> {
-    if database_url.contains(":memory:") {
-        return Ok(None);
-    }
-    let options = SqliteConnectOptions::from_str(database_url).map_err(to_string)?;
-    Ok(Some(options.get_filename().to_path_buf()))
-}
-
-#[cfg(unix)]
-fn try_lock_supervisor_file(file: &fs::File) -> std::io::Result<()> {
-    const LOCK_EX: i32 = 2;
-    const LOCK_NB: i32 = 4;
-    extern "C" {
-        fn flock(fd: i32, operation: i32) -> i32;
-    }
-    let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(unix))]
-fn try_lock_supervisor_file(_file: &fs::File) -> std::io::Result<()> {
-    Ok(())
-}
-
-fn acquire_supervisor_lock(database_url: &str) -> CommandResult<Option<fs::File>> {
-    let Some(database_path) = sqlite_database_file_path(database_url)? else {
-        return Ok(None);
-    };
-    let lock_path = PathBuf::from(format!("{}.supervisor.lock", database_path.display()));
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent).map_err(to_string)?;
-    }
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(to_string)?;
-    match try_lock_supervisor_file(&file) {
-        Ok(()) => Ok(Some(file)),
-        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Err(format!(
-            "another Lantor supervisor is already running for {}",
-            database_path.display()
-        )),
-        Err(err) => Err(err.to_string()),
-    }
-}
-
-pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    for statement in [
-        r#"
-        create table if not exists owner_profile (
-            id integer primary key default 1 check (id = 1),
-            display_name text not null default 'Me',
-            avatar text not null default 'dicebear:dylan:owner',
-            description text not null default 'local owner',
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists agents (
-            id blob primary key not null default (randomblob(16)),
-            handle text not null unique,
-            display_name text not null,
-            role text not null default 'agent',
-            status text not null default 'idle',
-            runtime text not null default 'codex',
-            model text not null default 'gpt-5.5',
-            avatar text not null default '',
-            description text not null default '',
-            launch_command text not null default '',
-            working_directory text not null default '',
-            daily_budget_micros integer not null default 0,
-            reasoning_effort text not null default 'medium',
-            service_tier text not null default '',
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists channels (
-            id blob primary key not null default (randomblob(16)),
-            name text not null unique,
-            description text not null default '',
-            unread_count integer not null default 0,
-            kind text not null default 'channel',
-            dm_agent_id blob references agents(id) on delete cascade,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists messages (
-            id blob primary key not null default (randomblob(16)),
-            channel_id blob not null references channels(id) on delete cascade,
-            thread_root_id blob references messages(id) on delete cascade,
-            sender_agent_id blob references agents(id) on delete set null,
-            sender_name text not null,
-            sender_role text not null default 'human',
-            body text not null,
-            is_task boolean not null default 0,
-            thread_followed boolean not null default 1,
-            delivery_state text not null default 'complete',
-            stream_key text not null default '',
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists message_attachments (
-            id blob primary key not null default (randomblob(16)),
-            message_id blob not null references messages(id) on delete cascade,
-            original_name text not null,
-            mime_type text not null,
-            size_bytes integer not null,
-            storage_path text not null,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists saved_messages (
-            id blob primary key not null default (randomblob(16)),
-            message_id blob not null unique references messages(id) on delete cascade,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists artifacts (
-            id blob primary key not null default (randomblob(16)),
-            message_id blob not null references messages(id) on delete cascade,
-            channel_id blob not null references channels(id) on delete cascade,
-            thread_root_id blob references messages(id) on delete set null,
-            creator_agent_id blob references agents(id) on delete set null,
-            kind text not null,
-            title text not null,
-            summary text not null default '',
-            content text not null,
-            metadata text not null default '{}',
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists runtime_sessions (
-            id blob primary key not null default (randomblob(16)),
-            agent_id blob not null references agents(id) on delete cascade,
-            runtime text not null,
-            provider_thread_id text not null,
-            status text not null default 'idle',
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            unique(agent_id, runtime)
-        )
-        "#,
-        r#"
-        create table if not exists tasks (
-            number integer primary key autoincrement,
-            id blob not null unique default (randomblob(16)),
-            message_id blob not null unique references messages(id) on delete cascade,
-            channel_id blob not null references channels(id) on delete cascade,
-            title text not null,
-            status text not null default 'todo',
-            assignee_agent_id blob references agents(id) on delete set null,
-            version integer not null default 0,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists reminders (
-            id blob primary key not null default (randomblob(16)),
-            channel_id blob references channels(id) on delete set null,
-            creator_agent_id blob references agents(id) on delete set null,
-            thread_root_id blob references messages(id) on delete set null,
-            message_id blob references messages(id) on delete set null,
-            title text not null,
-            note text not null default '',
-            status text not null default 'scheduled',
-            recurrence text not null default 'none',
-            due_at text not null,
-            fired_at text,
-            completed_at text,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists reminder_events (
-            id blob primary key not null default (randomblob(16)),
-            reminder_id blob not null references reminders(id) on delete cascade,
-            event_type text not null,
-            detail text not null default '',
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists agent_schedules (
-            id blob primary key not null default (randomblob(16)),
-            agent_id blob not null references agents(id) on delete cascade,
-            channel_id blob not null references channels(id) on delete cascade,
-            thread_root_id blob references messages(id) on delete set null,
-            title text not null,
-            prompt text not null default '',
-            cadence text not null default 'daily',
-            status text not null default 'active',
-            next_run_at text not null,
-            last_run_at text,
-            last_work_item_id blob,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists agent_runs (
-            id blob primary key not null default (randomblob(16)),
-            agent_id blob not null references agents(id) on delete cascade,
-            work_item_id blob references agent_work_items(id) on delete set null,
-            command text not null,
-            working_directory text not null default '',
-            status text not null default 'starting',
-            pid integer,
-            exit_code integer,
-            log text not null default '',
-            input_tokens integer not null default 0,
-            output_tokens integer not null default 0,
-            cost_micros integer not null default 0,
-            started_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            stopped_at text
-        )
-        "#,
-        r#"
-        create table if not exists agent_activities (
-            id blob primary key not null default (randomblob(16)),
-            agent_id blob references agents(id) on delete set null,
-            agent_handle text not null default '',
-            run_id blob references agent_runs(id) on delete set null,
-            kind text not null,
-            phase text not null default 'event',
-            status text not null default 'info',
-            title text not null,
-            summary text not null default '',
-            detail text not null default '',
-            metadata text not null default '{}',
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists agent_work_items (
-            id blob primary key not null default (randomblob(16)),
-            agent_id blob not null references agents(id) on delete cascade,
-            channel_id blob references channels(id) on delete set null,
-            thread_root_id blob references messages(id) on delete set null,
-            source_message_id blob references messages(id) on delete set null,
-            inbox_item_id blob,
-            task_id blob references tasks(id) on delete set null,
-            source_kind text not null default 'manual',
-            title text not null,
-            context text not null default '',
-            status text not null default 'queued',
-            run_id blob references agent_runs(id) on delete set null,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            completed_at text
-        )
-        "#,
-        r#"
-        create table if not exists agent_inbox_items (
-            id blob primary key not null default (randomblob(16)),
-            agent_id blob not null references agents(id) on delete cascade,
-            channel_id blob references channels(id) on delete set null,
-            thread_root_id blob references messages(id) on delete set null,
-            source_message_id blob references messages(id) on delete set null,
-            task_id blob references tasks(id) on delete set null,
-            kind text not null,
-            priority integer not null default 50,
-            state text not null default 'unread',
-            title text not null,
-            body_preview text not null default '',
-            payload text not null default '{}',
-            work_item_id blob references agent_work_items(id) on delete set null,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            archived_at text
-        )
-        "#,
-        r#"
-        create table if not exists agent_thread_subscriptions (
-            agent_id blob not null references agents(id) on delete cascade,
-            channel_id blob not null references channels(id) on delete cascade,
-            thread_root_id blob not null references messages(id) on delete cascade,
-            source_kind text not null default 'manual',
-            last_source_message_id blob references messages(id) on delete set null,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            primary key (agent_id, thread_root_id)
-        )
-        "#,
-        r#"
-        create table if not exists agent_event_receipts (
-            run_id blob not null references agent_runs(id) on delete cascade,
-            event_json text not null,
-            event_hash text not null,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            primary key (run_id, event_hash)
-        )
-        "#,
-        r#"
-        create table if not exists supervisor_commands (
-            id blob primary key not null default (randomblob(16)),
-            command_type text not null,
-            agent_id blob references agents(id) on delete cascade,
-            run_id blob references agent_runs(id) on delete cascade,
-            work_item_id blob references agent_work_items(id) on delete set null,
-            status text not null default 'pending',
-            error text not null default '',
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists supervisor_state (
-            id integer primary key default 1 check (id = 1),
-            pid integer,
-            status text not null default 'offline',
-            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists channel_read_state (
-            channel_id blob primary key references channels(id) on delete cascade,
-            last_read_at text not null default '0001-01-01T00:00:00+00:00'
-        )
-        "#,
-        r#"
-        create table if not exists owner_inbox_dismissals (
-            item_id text primary key,
-            dismissed_until text not null,
-            dismissed_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists owner_inbox_read_state (
-            item_id text primary key,
-            read_until text not null,
-            read_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists owner_inbox_hidden_items (
-            item_id text primary key,
-            hidden_until text not null,
-            hidden_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-        r#"
-        create table if not exists channel_members (
-            channel_id blob not null references channels(id) on delete cascade,
-            agent_id blob not null references agents(id) on delete cascade,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-            primary key (channel_id, agent_id)
-        )
-        "#,
-        r#"
-        create table if not exists ui_events (
-            id integer primary key autoincrement,
-            event_json text not null,
-            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
-        )
-        "#,
-    ] {
-        sqlx::query(statement).execute(pool).await?;
-    }
-
-    for statement in [
-        "create unique index if not exists channels_dm_unique on channels(dm_agent_id) where kind = 'dm' and dm_agent_id is not null",
-        "create unique index if not exists messages_stream_key_unique on messages(stream_key) where stream_key <> ''",
-        "create index if not exists message_attachments_message_id_idx on message_attachments(message_id)",
-        "create index if not exists saved_messages_created_at_idx on saved_messages(created_at desc)",
-        "create index if not exists artifacts_message_id_idx on artifacts(message_id)",
-        "create index if not exists artifacts_channel_id_idx on artifacts(channel_id)",
-        "create index if not exists reminders_due_idx on reminders(status, due_at)",
-        "create index if not exists agent_schedules_due_idx on agent_schedules(status, next_run_at)",
-        "create index if not exists agent_inbox_items_agent_state_idx on agent_inbox_items(agent_id, state, priority desc, created_at)",
-        "create unique index if not exists agent_inbox_items_source_unique on agent_inbox_items(agent_id, source_message_id, kind) where source_message_id is not null",
-        "create index if not exists ui_events_created_idx on ui_events(created_at)",
-    ] {
-        sqlx::query(statement).execute(pool).await?;
-    }
-
-    sqlx::query(
-        r#"
-        insert into owner_profile (id, display_name, avatar, description)
-        values (1, 'Me', 'dicebear:dylan:owner', 'local owner')
-        on conflict (id) do nothing
-        "#,
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        update owner_profile
-        set avatar = 'dicebear:dylan:owner'
-        where id = 1 and avatar = 'M'
-        "#,
-    )
-    .execute(pool)
-    .await?;
-    backfill_agent_run_usage_from_logs(pool).await?;
-
-    Ok(())
-}
-
 #[tauri::command]
 async fn bootstrap(state: State<'_, AppState>) -> CommandResult<Bootstrap> {
     load_bootstrap(&state.pool, state.db_url.clone()).await
-}
-
-fn configured_web_base_url() -> Option<String> {
-    if let Ok(value) = env::var("LANTOR_WEB_PUBLIC_URL") {
-        let trimmed = value.trim().trim_end_matches('/').to_owned();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
-    }
-    let bind = crate::web::resolve_web_bind()?;
-    let addr = bind.parse::<SocketAddr>().ok()?;
-    let host = match addr.ip() {
-        IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
-        IpAddr::V4(ip) => ip.to_string(),
-        IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_owned(),
-        IpAddr::V6(ip) => format!("[{ip}]"),
-    };
-    Some(format!("http://{host}:{}", addr.port()))
-}
-
-fn normalize_external_url(url: &str) -> Option<String> {
-    let (scheme, rest) = url.split_once(':')?;
-    let scheme = scheme.to_ascii_lowercase();
-    match scheme.as_str() {
-        "http" | "https" if rest.starts_with("//") => Some(url.to_owned()),
-        "mailto" if !rest.is_empty() => Some(url.to_owned()),
-        "file" if rest.starts_with("//") => Some(url.to_owned()),
-        _ => None,
-    }
-}
-
-fn strip_local_path_line_suffix(value: &str) -> &str {
-    if Path::new(value).exists() {
-        return value;
-    }
-
-    if let Some((path, line)) = value.rsplit_once(':') {
-        if !line.is_empty() && line.chars().all(|c| c.is_ascii_digit()) && Path::new(path).exists()
-        {
-            return path;
-        }
-    }
-
-    if let Some((path, line)) = value.rsplit_once("#L") {
-        if !line.is_empty() && line.chars().all(|c| c.is_ascii_digit()) && Path::new(path).exists()
-        {
-            return path;
-        }
-    }
-
-    value
-}
-
-fn normalize_local_path_link(url: &str) -> Option<String> {
-    let expanded = expand_home_path(url);
-    let without_line_suffix = strip_local_path_line_suffix(&expanded);
-    let path = Path::new(without_line_suffix);
-    if path.is_absolute() && path.exists() {
-        return Some(path.to_string_lossy().to_string());
-    }
-    None
-}
-
-fn normalize_open_link_target(url: &str) -> Option<String> {
-    let trimmed = url.trim();
-    if trimmed.is_empty() || trimmed.len() > 4096 || trimmed.chars().any(char::is_control) {
-        return None;
-    }
-
-    normalize_external_url(trimmed).or_else(|| normalize_local_path_link(trimmed))
-}
-
-fn open_link_target_with_system(target: &str) -> CommandResult<()> {
-    #[cfg(target_os = "macos")]
-    let status = StdCommand::new("open")
-        .arg(target)
-        .status()
-        .map_err(to_string)?;
-
-    #[cfg(target_os = "windows")]
-    let status = StdCommand::new("cmd")
-        .args(["/C", "start", "", target])
-        .status()
-        .map_err(to_string)?;
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let status = StdCommand::new("xdg-open")
-        .arg(target)
-        .status()
-        .map_err(to_string)?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("failed to open link target: {status}"))
-    }
-}
-
-#[tauri::command]
-async fn open_external_url(url: String) -> CommandResult<()> {
-    let target = normalize_open_link_target(&url).ok_or_else(|| {
-        "only http, https, mailto, file, and existing local file links can be opened".to_owned()
-    })?;
-    tauri::async_runtime::spawn_blocking(move || open_link_target_with_system(&target))
-        .await
-        .map_err(to_string)?
-}
-
-pub(crate) async fn load_bootstrap(pool: &SqlitePool, db_url: String) -> CommandResult<Bootstrap> {
-    let owner_profile = load_owner_profile(pool).await?;
-    let channels = load_channels(pool).await?;
-    let channel_members = load_channel_members(pool).await?;
-    let agents = load_agents(pool).await?;
-    let messages = load_messages(pool).await?;
-    let saved_messages = load_saved_messages(pool).await?;
-    let dismissed_inbox_items = load_dismissed_inbox_items(pool).await?;
-    let read_inbox_items = load_read_inbox_items(pool).await?;
-    let artifacts = load_artifacts(pool).await?;
-    let tasks = load_tasks(pool).await?;
-    let reminders = load_reminders(pool).await?;
-    let agent_schedules = load_agent_schedules(pool).await?;
-    let agent_runs = load_agent_runs(pool).await?;
-    let agent_work_items = load_agent_work_items(pool).await?;
-    let agent_activities = load_agent_activities(pool).await?;
-    let supervisor = load_supervisor_status(pool).await?;
-    let launch_agent = launch_agent::load_launch_agent_status()?;
-
-    Ok(Bootstrap {
-        db_url,
-        web_base_url: configured_web_base_url(),
-        owner_profile,
-        channels,
-        channel_members,
-        agents,
-        messages,
-        saved_messages,
-        dismissed_inbox_items,
-        read_inbox_items,
-        artifacts,
-        tasks,
-        reminders,
-        agent_schedules,
-        agent_runs,
-        agent_work_items,
-        agent_activities,
-        supervisor,
-        launch_agent,
-    })
-}
-
-#[tauri::command]
-async fn check_runtime(runtime: String) -> CommandResult<RuntimeCheck> {
-    check_runtime_in_env(runtime).await
-}
-
-pub(crate) async fn check_runtime_in_env(runtime: String) -> CommandResult<RuntimeCheck> {
-    let runtime = runtime.trim().to_owned();
-    let command = match runtime.as_str() {
-        "codex" => "codex",
-        "claude" => "claude",
-        _ => {
-            return Ok(RuntimeCheck {
-                runtime,
-                command: String::new(),
-                available: false,
-                detail: "Unknown runtime".to_owned(),
-            });
-        }
-    };
-
-    let script = format!(
-        "if command -v {command} >/dev/null 2>&1; then {command} --version 2>&1 | head -n 1; else echo '{command} not found in PATH' >&2; exit 127; fi"
-    );
-    let output = StdCommand::new("/bin/zsh")
-        .arg("-lc")
-        .arg(script)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(to_string)?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    let detail = if !stdout.is_empty() {
-        stdout
-    } else if !stderr.is_empty() {
-        stderr
-    } else if output.status.success() {
-        format!("{command} found")
-    } else {
-        format!("{command} unavailable")
-    };
-
-    Ok(RuntimeCheck {
-        runtime,
-        command: command.to_owned(),
-        available: output.status.success(),
-        detail,
-    })
 }
 
 #[tauri::command]
@@ -1224,7 +546,7 @@ async fn update_thread_followed(
     update_thread_followed_in_pool(&state.pool, thread_root_id, followed).await
 }
 
-async fn load_supervisor_status(pool: &SqlitePool) -> CommandResult<SupervisorStatus> {
+pub(crate) async fn load_supervisor_status(pool: &SqlitePool) -> CommandResult<SupervisorStatus> {
     let row = sqlx::query(
         r#"
         select pid, status, updated_at
@@ -1293,12 +615,20 @@ async fn resolve_event_channel(
     channel_name: Option<&str>,
 ) -> CommandResult<Uuid> {
     if let Some(channel_id) = channel_id {
-        let exists: Option<Uuid> = sqlx::query_scalar("select id from channels where id = $1")
-            .bind(channel_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(to_string)?;
-        return exists.ok_or_else(|| format!("channel {channel_id} does not exist"));
+        let resolved: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            select id
+            from channels
+            where id = $1 or (kind = 'dm' and dm_agent_id = $1)
+            order by case when id = $1 then 0 else 1 end
+            limit 1
+            "#,
+        )
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(to_string)?;
+        return resolved.ok_or_else(|| format!("channel {channel_id} does not exist"));
     }
 
     let Some(name) = channel_name else {
@@ -1971,6 +1301,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use crate::agent_memory::{format_memory_index_entry, insert_memory_index_entry};
+    use crate::db::{db_connect_with_url, migrate};
     use crate::message_store::{insert_agent_message, load_messages, send_owner_message_in_pool};
     use crate::prompts::{build_codex_streaming_prompt, claude_system_prompt};
     use crate::runtime::{
@@ -1996,15 +1327,15 @@ mod tests {
             agent_context_message_search, agent_context_workspace_info,
             agent_context_workspace_list, short_id,
         },
-        create_agent_inbox_item, db_connect_with_url,
+        create_agent_inbox_item,
         domain::reminders::load_reminders,
         ensure_agent_workspace, extract_agent_event_json, extract_agent_mentions,
         handle_agent_event, inbox_wake_context, load_agent_memory_context,
-        load_channel_agent_roster, migrate, normalize_open_link_target, open_dm_with_agent_in_pool,
-        queue_mentions_as_work_items, record_agent_activity, same_codex_surface,
-        try_claim_unassigned_task, upsert_agent_thread_subscription, AgentAttachmentFile,
-        AgentEvent, AgentInboxItemInput, InboxWakeItem, InboxWakeSummary, MentionDispatchOrigin,
-        AGENT_MEMORY_CONTEXT_LIMIT, WORK_ITEM_FINISH_PROMPT,
+        load_channel_agent_roster, open_dm_with_agent_in_pool, queue_mentions_as_work_items,
+        record_agent_activity, same_codex_surface, try_claim_unassigned_task,
+        upsert_agent_thread_subscription, AgentAttachmentFile, AgentEvent, AgentInboxItemInput,
+        InboxWakeItem, InboxWakeSummary, MentionDispatchOrigin, AGENT_MEMORY_CONTEXT_LIMIT,
+        WORK_ITEM_FINISH_PROMPT,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use serde_json::{json, Value};
@@ -2029,46 +1360,6 @@ mod tests {
     fn ignores_empty_or_email_like_at_signs() {
         let mentions = extract_agent_mentions("email a@b.com and a lone @ sign");
         assert!(mentions.is_empty());
-    }
-
-    #[test]
-    fn open_link_target_normalization_allows_safe_schemes() {
-        assert_eq!(
-            normalize_open_link_target(" https://example.com/path?q=1 "),
-            Some("https://example.com/path?q=1".to_owned())
-        );
-        assert_eq!(
-            normalize_open_link_target("mailto:hello@example.com"),
-            Some("mailto:hello@example.com".to_owned())
-        );
-        assert_eq!(
-            normalize_open_link_target("file:///tmp/report.txt"),
-            Some("file:///tmp/report.txt".to_owned())
-        );
-        assert!(normalize_open_link_target("javascript:alert(1)").is_none());
-        assert!(normalize_open_link_target("https://example.com/\nopen").is_none());
-    }
-
-    #[test]
-    fn open_link_target_normalization_allows_existing_local_paths_with_line_suffixes() {
-        let dir = std::env::temp_dir().join(format!("lantor-link-test-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("main.rs");
-        std::fs::write(&file, "fn main() {}\n").unwrap();
-        let file = file.to_string_lossy().to_string();
-
-        assert_eq!(normalize_open_link_target(&file), Some(file.clone()));
-        assert_eq!(
-            normalize_open_link_target(&format!("{file}:42")),
-            Some(file.clone())
-        );
-        assert_eq!(
-            normalize_open_link_target(&format!("{file}#L42")),
-            Some(file.clone())
-        );
-        assert!(normalize_open_link_target("/definitely/not/a/lantor/file.rs:1").is_none());
-
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2669,6 +1960,93 @@ mod tests {
             );
 
             let stored_path = std::path::PathBuf::from(&attachment.storage_path);
+            let _ = std::fs::remove_file(&stored_path);
+            if let Some(parent) = stored_path.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn attachment_create_event_accepts_dm_agent_id_as_channel_id() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "dm-attachment-agent").await?;
+            let dm_channel_id =
+                Uuid::parse_str(&open_dm_with_agent_in_pool(&pool, agent_id).await?)
+                    .map_err(|err| err.to_string())?;
+            let run_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_runs (agent_id, command, status)
+                values ($1, 'codex app-server', 'running')
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let dir =
+                std::env::temp_dir().join(format!("lantor-dm-attachment-test-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+            let source_path = dir.join("parked.patch");
+            let source_bytes = b"diff --git a/file b/file\n";
+            std::fs::write(&source_path, source_bytes).map_err(|err| err.to_string())?;
+
+            handle_agent_event(
+                &pool,
+                agent_id,
+                run_id,
+                AgentEvent::AttachmentCreate {
+                    channel: None,
+                    channel_id: Some(agent_id),
+                    thread_root_id: None,
+                    body: Some("Parked supervisor patch".to_owned()),
+                    files: vec![AgentAttachmentFile {
+                        path: source_path.to_string_lossy().to_string(),
+                        name: Some("parked.patch".to_owned()),
+                        mime_type: Some("text/plain".to_owned()),
+                    }],
+                },
+            )
+            .await?;
+
+            let row = sqlx::query(
+                r#"
+                select channel_id, thread_root_id
+                from messages
+                where body = 'Parked supervisor patch'
+                "#,
+            )
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(row.get::<Uuid, _>("channel_id"), dm_channel_id);
+            assert_eq!(row.get::<Option<Uuid>, _>("thread_root_id"), None);
+
+            let stored_path: String = sqlx::query_scalar(
+                r#"
+                select ma.storage_path
+                from message_attachments ma
+                join messages m on m.id = ma.message_id
+                where m.body = 'Parked supervisor patch'
+                  and ma.original_name = 'parked.patch'
+                "#,
+            )
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert!(!stored_path.is_empty());
+
+            let stored_path = std::path::PathBuf::from(stored_path);
             let _ = std::fs::remove_file(&stored_path);
             if let Some(parent) = stored_path.parent() {
                 let _ = std::fs::remove_dir(parent);

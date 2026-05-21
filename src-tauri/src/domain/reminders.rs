@@ -436,7 +436,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::process_due_reminders;
-    use crate::{db_connect_with_url, migrate};
+    use crate::db::{db_connect_with_url, migrate};
 
     #[tokio::test]
     async fn due_reminder_fires_system_message() {

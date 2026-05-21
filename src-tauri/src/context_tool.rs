@@ -9,10 +9,10 @@ use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::agent_routing::resolve_agent_by_handle;
+use crate::db::db_connect;
 use crate::message_store::load_artifact;
 use crate::{
     attachments::{attachment_summary_sql, format_attachment_size},
-    db_connect,
     text::compact_chars_middle,
     to_string, CommandResult, AGENT_CONTEXT_TOOL_MESSAGE_LIMIT,
 };

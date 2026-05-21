@@ -417,7 +417,7 @@ mod tests {
         create_channel_in_pool, delete_channel_in_pool, load_channels, open_dm_with_agent_in_pool,
         set_channel_agent_membership_in_pool, update_channel_in_pool,
     };
-    use crate::{db_connect_with_url, migrate};
+    use crate::db::{db_connect_with_url, migrate};
 
     #[tokio::test]
     async fn channel_unread_count_compares_mixed_timezone_timestamps_by_instant() {

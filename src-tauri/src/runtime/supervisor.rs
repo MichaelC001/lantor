@@ -178,7 +178,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{claim_next_supervisor_command, recover_supervisor_commands_at_startup};
-    use crate::{db_connect_with_url, migrate};
+    use crate::db::{db_connect_with_url, migrate};
 
     #[tokio::test]
     async fn startup_recovery_requeues_running_supervisor_commands_and_skips_terminal_work() {

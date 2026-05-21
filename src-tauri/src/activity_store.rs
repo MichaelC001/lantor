@@ -221,7 +221,7 @@ mod tests {
     use std::fs as std_fs;
     use uuid::Uuid;
 
-    use crate::{db_connect_with_url, migrate};
+    use crate::db::{db_connect_with_url, migrate};
 
     use super::load_agent_activities;
 

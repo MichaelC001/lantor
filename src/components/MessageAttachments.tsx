@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { type MouseEvent, useEffect, useState } from "react";
 import { FileText, X } from "lucide-react";
-import { attachmentAssetUrl } from "../apiClient";
+import { attachmentAssetUrl, isTauriRuntime, openExternalUrl } from "../apiClient";
 import { MessageAttachment } from "../types";
 
 type MessageAttachmentsProps = {
@@ -16,6 +16,17 @@ function formatBytes(value: number) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function openStoredAttachment(event: MouseEvent<HTMLAnchorElement>, attachment: MessageAttachment) {
+  if (attachment.local_url || !isTauriRuntime()) return;
+
+  event.preventDefault();
+  try {
+    await openExternalUrl(attachment.storage_path);
+  } catch (error) {
+    console.error("Failed to open attachment", error);
+  }
 }
 
 export function MessageAttachments({ attachments }: MessageAttachmentsProps) {
@@ -59,6 +70,7 @@ export function MessageAttachments({ attachments }: MessageAttachmentsProps) {
               target="_blank"
               rel="noreferrer"
               title={attachment.original_name}
+              onClick={(event) => void openStoredAttachment(event, attachment)}
             >
               <span className="attachment-icon"><FileText size={18} /></span>
               <span className="attachment-meta">

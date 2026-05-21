@@ -4,8 +4,8 @@ use uuid::Uuid;
 use crate::ui_notifications::notify_ui_refresh;
 use crate::{
     agent_workspace::load_agent_workspace_summary,
+    db::expand_home_path,
     events::activity::record_agent_activity,
-    expand_home_path,
     models::{Agent, OwnerProfile},
     prompts::ensure_agent_workspace,
     to_string, CommandResult,
@@ -426,7 +426,7 @@ pub(crate) async fn load_agents(pool: &SqlitePool) -> CommandResult<Vec<Agent>> 
 #[cfg(test)]
 mod tests {
     use super::delete_agent_in_pool;
-    use crate::{db_connect_with_url, migrate};
+    use crate::db::{db_connect_with_url, migrate};
     use sqlx::{Row, SqlitePool};
     use std::fs;
     use uuid::Uuid;

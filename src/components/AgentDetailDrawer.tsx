@@ -18,6 +18,7 @@ import {
 } from "../types";
 import { AgentAvatar } from "./AgentAvatar";
 import { MessageMarkdown } from "./MessageMarkdown";
+import { Modal } from "./Modal";
 import { agentRequestSourceLabel, formatTime } from "../ui-utils";
 
 type AgentPhase = {
@@ -637,52 +638,40 @@ export function AgentDetailDrawer({
           <h4>Workspace</h4>
           <span>{workspacePath ? agent.workspace_exists ? "Ready" : "Missing" : "Not configured"}</span>
         </div>
-        <div className="workspace-path-card">
-          <div>
-            <span>Path</span>
-            <code title={workspacePath}>{workspacePath ? compactPath(workspacePath) : "Not configured"}</code>
-          </div>
-        </div>
-        <div className={`workspace-memory-card ${agent.workspace_memory_exists ? "ready" : "missing"}`}>
-          <div>
-            <span>MEMORY.md</span>
-            <code title={memoryPath}>{memoryPath ? compactPath(memoryPath) : "Not configured"}</code>
-          </div>
-        </div>
-        {rootWorkspaceEntries.length > 0 ? (
-          <>
-            <p className="workspace-hint">Expand folders or preview text files from this workspace.</p>
-            <div className="workspace-tree" aria-label={`${agent.handle} workspace files`}>
-              {renderWorkspaceEntries(rootWorkspaceEntries)}
+        <div className="workspace-meta-grid">
+          <div className="workspace-path-card">
+            <div>
+              <span>Path</span>
+              <code title={workspacePath}>{workspacePath ? compactPath(workspacePath) : "Not configured"}</code>
             </div>
-          </>
-        ) : (
-          <p className="empty-mini">
-            {workspacePath
-              ? agent.workspace_exists ? "No visible workspace files yet." : "Workspace directory does not exist yet."
-              : "Set a working directory to show workspace files."}
-          </p>
-        )}
-        {workspaceError && <p className="workspace-error">{workspaceError}</p>}
-        {workspacePreview && (
-          <div className="workspace-preview">
-            <div className="workspace-preview-head">
-              <div>
-                <strong>{workspacePreview.name}</strong>
-                <span>
-                  {compactPath(workspacePreview.path)} · {formatEntrySize(workspacePreview.size_bytes)}
-                  {workspacePreview.truncated ? " · truncated" : ""}
-                </span>
+          </div>
+          <div className={`workspace-memory-card ${agent.workspace_memory_exists ? "ready" : "missing"}`}>
+            <div>
+              <span>MEMORY.md</span>
+              <code title={memoryPath}>{memoryPath ? compactPath(memoryPath) : "Not configured"}</code>
+            </div>
+          </div>
+        </div>
+        <div className="workspace-browser">
+          <div className="workspace-tree-pane">
+            <div className="workspace-pane-head">
+              <h5>Files</h5>
+              <span>{rootWorkspaceEntries.length} items</span>
+            </div>
+            {rootWorkspaceEntries.length > 0 ? (
+              <div className="workspace-tree" aria-label={`${agent.handle} workspace files`}>
+                {renderWorkspaceEntries(rootWorkspaceEntries)}
               </div>
-              <button type="button" onClick={() => setWorkspacePreview(null)}>Close</button>
-            </div>
-            {isMarkdownWorkspaceFile(workspacePreview) ? (
-              <MessageMarkdown body={workspacePreview.content} />
             ) : (
-              <pre className="workspace-preview-raw">{workspacePreview.content}</pre>
+              <p className="empty-mini">
+                {workspacePath
+                  ? agent.workspace_exists ? "No visible workspace files yet." : "Workspace directory does not exist yet."
+                  : "Workspace not configured."}
+              </p>
             )}
           </div>
-        )}
+        </div>
+        {workspaceError && <p className="workspace-error">{workspaceError}</p>}
       </section>
     );
   }
@@ -900,6 +889,7 @@ export function AgentDetailDrawer({
   }
 
   return (
+    <>
     <aside className="agent-drawer">
       <button
         type="button"
@@ -996,5 +986,31 @@ export function AgentDetailDrawer({
         </div>
       </div>
     </aside>
+    <Modal
+      open={Boolean(workspacePreview)}
+      title={workspacePreview?.name ?? "Workspace preview"}
+      onClose={() => setWorkspacePreview(null)}
+      width={860}
+    >
+      {workspacePreview && (
+        <div className="workspace-preview">
+          <div className="workspace-preview-head">
+            <div>
+              <strong>{workspacePreview.name}</strong>
+              <span>
+                {compactPath(workspacePreview.path)} · {formatEntrySize(workspacePreview.size_bytes)}
+                {workspacePreview.truncated ? " · truncated" : ""}
+              </span>
+            </div>
+          </div>
+          {isMarkdownWorkspaceFile(workspacePreview) ? (
+            <MessageMarkdown body={workspacePreview.content} />
+          ) : (
+            <pre className="workspace-preview-raw">{workspacePreview.content}</pre>
+          )}
+        </div>
+      )}
+    </Modal>
+    </>
   );
 }

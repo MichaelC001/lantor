@@ -235,7 +235,7 @@ mod tests {
     use std::{fs as std_fs, time::Duration};
     use uuid::Uuid;
 
-    use crate::{db_connect_with_url, migrate};
+    use crate::db::{db_connect_with_url, migrate};
 
     use super::{
         dismiss_inbox_items_in_pool, mark_all_owner_inbox_read_in_pool,

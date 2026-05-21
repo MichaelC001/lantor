@@ -361,7 +361,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::process_due_agent_schedules;
-    use crate::{db_connect_with_url, migrate};
+    use crate::db::{db_connect_with_url, migrate};
 
     #[tokio::test]
     async fn due_agent_schedule_dispatches_work_item() {
