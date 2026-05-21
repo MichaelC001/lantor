@@ -32,6 +32,7 @@ import { SearchModal } from "./components/SearchModal";
 import { SettingsModal, type ChatTextSize, type ThemePreference } from "./components/SettingsModal";
 import { Sidebar } from "./components/Sidebar";
 import { ThreadPanel } from "./components/ThreadPanel";
+import { UnreadBadge } from "./components/UnreadBadge";
 import { isProgressOnlyMessage } from "./message-grouping";
 import {
   ACTIVE_RUN_STATUSES,
@@ -3412,7 +3413,7 @@ function App() {
         >
           <span className="mobile-bottom-nav-icon">
             <Inbox size={20} />
-            {activityFeedUnreadCount > 0 && <strong>{activityFeedUnreadCount}</strong>}
+            {activityFeedUnreadCount > 0 && <UnreadBadge value={activityFeedUnreadCount} />}
           </span>
           <span>Activity</span>
         </button>
@@ -3423,7 +3424,7 @@ function App() {
         >
           <span className="mobile-bottom-nav-icon">
             <Bookmark size={20} />
-            {savedUnreadCount > 0 && <strong>{savedUnreadCount}</strong>}
+            {savedUnreadCount > 0 && <UnreadBadge value={savedUnreadCount} />}
           </span>
           <span>Saved</span>
         </button>

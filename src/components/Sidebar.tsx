@@ -18,6 +18,7 @@ import {
 import { APP_DISPLAY_NAME } from "../branding";
 import { ownerAsAvatarAgent } from "../ui-utils";
 import { AgentAvatar } from "./AgentAvatar";
+import { UnreadBadge } from "./UnreadBadge";
 
 const SIDEBAR_CHANNELS_HEIGHT_STORAGE_KEY = "lantor.sidebarChannelsHeight";
 const DEFAULT_SIDEBAR_CHANNELS_HEIGHT = 260;
@@ -181,7 +182,7 @@ export function Sidebar({
         >
           <Inbox size={18} />
           <span>Activity</span>
-          {activityFeedUnreadCount > 0 && <strong>{activityFeedUnreadCount}</strong>}
+          {activityFeedUnreadCount > 0 && <UnreadBadge value={activityFeedUnreadCount} />}
         </button>
         <button
           className={`sidebar-nav-trigger ${savedUnreadCount ? "has-unread" : ""}`}
@@ -189,7 +190,7 @@ export function Sidebar({
         >
           <Bookmark size={18} />
           <span>Saved</span>
-          {savedUnreadCount > 0 && <strong>{savedUnreadCount}</strong>}
+          {savedUnreadCount > 0 && <UnreadBadge value={savedUnreadCount} />}
         </button>
       </section>
 
@@ -226,7 +227,7 @@ export function Sidebar({
                 >
                   <Hash size={17} />
                   <span className="channel-name">{item.name}</span>
-                  {badge && <strong>{badge}</strong>}
+                  {badge && <UnreadBadge value={badge} />}
                 </button>
               );
             })}
@@ -308,7 +309,7 @@ export function Sidebar({
                       <strong>{agent.display_name}</strong>
                       <span>@{agent.handle}</span>
                     </div>
-                    {badge && <strong className="dm-badge">{badge}</strong>}
+                    {badge && <UnreadBadge value={badge} />}
                   </button>
                   <div className="dm-row-actions">
                     <Circle className={`dot ${agent.status}`} size={10} />

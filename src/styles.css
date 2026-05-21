@@ -732,22 +732,21 @@ button,
   font-size: var(--type-size-body);
 }
 
-.sidebar-nav-trigger strong,
-.channel strong,
-.dm-badge,
-.mobile-bottom-nav strong {
+.unread-badge {
   display: inline-flex;
+  box-sizing: border-box;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   justify-self: end;
   min-width: 18px;
-  min-height: 18px;
-  padding: 2px 7px;
+  height: 18px;
+  padding: 0 6px;
   border-radius: 999px;
   background: var(--badge-bg);
   color: var(--badge-ink);
   font-size: var(--type-size-caption);
-  font-variant-numeric: lining-nums;
+  font-variant-numeric: lining-nums tabular-nums;
   font-weight: var(--type-weight-semibold);
   line-height: 1;
   text-align: center;
@@ -965,7 +964,7 @@ button,
   box-shadow: none;
 }
 
-.channel.selected strong {
+.channel.selected .unread-badge {
   background: var(--bg-control-flat);
   color: var(--ink-muted);
 }
@@ -976,16 +975,16 @@ button,
   color: var(--unread-ink);
 }
 
-.sidebar-nav-trigger.has-unread strong,
-.channel.has-unread strong,
-.dm-row.has-unread .dm-badge,
-.mobile-bottom-nav button.has-unread strong {
+.sidebar-nav-trigger.has-unread .unread-badge,
+.channel.has-unread .unread-badge,
+.dm-row.has-unread .unread-badge,
+.mobile-bottom-nav button.has-unread .unread-badge {
   background: var(--accent);
   color: var(--accent-ink);
 }
 
-.channel.selected.has-unread strong,
-.dm-row.selected.has-unread .dm-badge {
+.channel.selected.has-unread .unread-badge,
+.dm-row.selected.has-unread .unread-badge {
   background: var(--accent);
   color: var(--accent-ink);
 }
@@ -1055,12 +1054,12 @@ button,
   opacity: 0.62;
 }
 
-.dm-badge {
+.dm .unread-badge {
   max-width: 34px;
 }
 
-.dm.selected .dm-badge,
-.dm-row.selected:not(.has-unread) .dm .dm-badge {
+.dm.selected .unread-badge,
+.dm-row.selected:not(.has-unread) .dm .unread-badge {
   background: var(--badge-bg);
   color: var(--badge-ink);
 }
@@ -8877,7 +8876,7 @@ body.resizing-row * {
     place-items: center;
   }
 
-  .mobile-bottom-nav strong {
+  .mobile-bottom-nav .unread-badge {
     position: absolute;
     top: -7px;
     right: -12px;
