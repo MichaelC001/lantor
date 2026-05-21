@@ -1791,6 +1791,7 @@ function App() {
       const currentMessage = unreadCount > 0
         ? replies[unreadStartIndex] ?? latestReply ?? root
         : latestReply ?? root;
+      const latestActivity = latestReply ?? root;
       const unread = unreadCount > 0;
       items.push({
         id: `thread:${root.id}`,
@@ -1800,7 +1801,7 @@ function App() {
         excerpt: currentMessage.body,
         surface: channelLabel(root.channel_id),
         actor: currentMessage.sender_name,
-        timestamp: timestamp(currentMessage.created_at),
+        timestamp: timestamp(latestActivity.created_at),
         unread,
         actorAgentId: currentMessage.sender_agent_id,
         actorRole: currentMessage.sender_role,

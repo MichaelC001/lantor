@@ -1386,12 +1386,12 @@ button,
 }
 
 .agent-avatar-profile-card {
-  --agent-avatar-profile-bg: var(--bg-panel, #ffffff);
-  --agent-avatar-profile-border: var(--border-subtle, rgba(20, 23, 31, 0.1));
-  --agent-avatar-profile-shadow: var(--surface-shadow, 0 24px 64px rgba(15, 23, 42, 0.18));
-  --agent-avatar-profile-ink-primary: var(--ink-primary, #121316);
-  --agent-avatar-profile-ink-secondary: var(--ink-secondary, #24262b);
-  --agent-avatar-profile-ink-muted: var(--ink-muted, #7b7d84);
+  --agent-avatar-profile-bg: var(--bg-panel);
+  --agent-avatar-profile-border: var(--border-subtle);
+  --agent-avatar-profile-shadow: var(--surface-shadow);
+  --agent-avatar-profile-ink-primary: var(--ink-primary);
+  --agent-avatar-profile-ink-secondary: var(--ink-secondary);
+  --agent-avatar-profile-ink-muted: var(--ink-muted);
   position: fixed;
   z-index: 1400;
   display: grid;
@@ -1418,12 +1418,7 @@ button,
 }
 
 :root[data-theme="dark"] .agent-avatar-profile-card {
-  --agent-avatar-profile-bg: #202631;
-  --agent-avatar-profile-border: rgba(226, 232, 240, 0.14);
-  --agent-avatar-profile-shadow: 0 24px 64px rgba(0, 0, 0, 0.38);
-  --agent-avatar-profile-ink-primary: #e6e8ee;
-  --agent-avatar-profile-ink-secondary: #cfd4de;
-  --agent-avatar-profile-ink-muted: #8f98a8;
+  --agent-avatar-profile-bg: var(--bg-panel-strong);
 }
 
 .agent-avatar-profile-image {
