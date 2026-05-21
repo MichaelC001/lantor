@@ -1,10 +1,112 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
+use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::CommandResult;
+use crate::{models::AttachmentUpload, CommandResult};
 
 pub(crate) const ATTACHMENT_SIZE_LIMIT: usize = 25 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AgentAttachmentFile {
+    #[serde(alias = "local_path")]
+    pub(crate) path: String,
+    pub(crate) name: Option<String>,
+    #[serde(alias = "mime")]
+    pub(crate) mime_type: Option<String>,
+}
+
+fn infer_attachment_mime_type(path: &Path, original_name: &str) -> String {
+    let extension = Path::new(original_name)
+        .extension()
+        .or_else(|| path.extension())
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "txt" => "text/plain",
+        "md" | "markdown" => "text/markdown",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
+    .to_owned()
+}
+
+pub(crate) fn load_agent_attachment_uploads(
+    files: Vec<AgentAttachmentFile>,
+) -> CommandResult<Vec<AttachmentUpload>> {
+    if files.is_empty() {
+        return Err("attachment_create requires at least one file".to_owned());
+    }
+    let mut uploads = Vec::with_capacity(files.len());
+    for file in files {
+        let raw_path = file.path.trim();
+        if raw_path.is_empty() {
+            return Err("attachment_create file path is empty".to_owned());
+        }
+        let path = PathBuf::from(raw_path);
+        let metadata = fs::metadata(&path)
+            .map_err(|err| format!("cannot read attachment file {}: {err}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("attachment path is not a file: {}", path.display()));
+        }
+        if metadata.len() > ATTACHMENT_SIZE_LIMIT as u64 {
+            return Err(format!(
+                "attachment file {} is larger than 25MB",
+                path.display()
+            ));
+        }
+        let bytes = fs::read(&path)
+            .map_err(|err| format!("cannot read attachment file {}: {err}", path.display()))?;
+        if bytes.is_empty() {
+            return Err(format!("attachment file is empty: {}", path.display()));
+        }
+        let original_name = file
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "attachment".to_owned());
+        let mime_type = file
+            .mime_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| infer_attachment_mime_type(&path, &original_name));
+        uploads.push(AttachmentUpload {
+            original_name,
+            mime_type,
+            bytes,
+        });
+    }
+    Ok(uploads)
+}
+
+pub(crate) fn default_attachment_message_body(uploads: &[AttachmentUpload]) -> String {
+    if uploads.len() == 1 {
+        format!("Attached file: {}", uploads[0].original_name.trim())
+    } else {
+        format!("Attached {} files.", uploads.len())
+    }
+}
 
 fn attachment_root_dir() -> CommandResult<PathBuf> {
     if let Ok(path) = env::var("LANTOR_ATTACHMENT_DIR") {

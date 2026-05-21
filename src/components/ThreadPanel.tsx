@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowLeft, Bookmark, CheckCircle2, Hash, MessageSquare, Paperclip, RotateCcw, Send, X } from "lucide-react";
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { useAutoGrowTextarea } from "../hooks/useAutoGrowTextarea";
 import { useMentionPicker } from "../hooks/useMentionPicker";
 import { APP_DISPLAY_NAME } from "../branding";
@@ -149,7 +149,12 @@ export function ThreadPanel({
   const [tapFocusedMessageId, setTapFocusedMessageId] = useState<string | null>(null);
   const [expandedThreadMessageIds, setExpandedThreadMessageIds] = useState<Set<string>>(() => new Set());
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
+  const threadBottomAnchorRef = useRef<HTMLDivElement | null>(null);
+  const threadScrollFrameRef = useRef<number | null>(null);
+  const threadScrollTimeoutRef = useRef<number | null>(null);
   const shouldFollowThreadRef = useRef(true);
+  const userThreadScrollUntilRef = useRef(0);
+  const threadScrollMetricsRef = useRef({ scrollHeight: 0, scrollTop: 0, clientHeight: 0 });
   function openLinkedAgentDetail(handle: string) {
     const agent = agents.find((candidate) => candidate.handle.toLowerCase() === handle.toLowerCase());
     if (agent) openAgentDetail(agent);
@@ -167,22 +172,113 @@ export function ThreadPanel({
   const lastReply = replies[replies.length - 1] ?? null;
 
   function isThreadScrollAtBottom(element: HTMLDivElement) {
-    return element.scrollHeight - element.scrollTop - element.clientHeight < 32;
+    return threadScrollDistanceFromBottom(element) < 32;
+  }
+
+  function wasThreadPreviouslyAtBottom() {
+    const metrics = threadScrollMetricsRef.current;
+    if (metrics.scrollHeight === 0 && metrics.clientHeight === 0) return true;
+    return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight < 32;
+  }
+
+  function threadScrollDistanceFromBottom(element: HTMLDivElement) {
+    return element.scrollHeight - element.scrollTop - element.clientHeight;
+  }
+
+  function rememberThreadScrollMetrics(element: HTMLDivElement) {
+    threadScrollMetricsRef.current = {
+      scrollHeight: element.scrollHeight,
+      scrollTop: element.scrollTop,
+      clientHeight: element.clientHeight,
+    };
+  }
+
+  function cancelPendingThreadBottomScroll() {
+    if (threadScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(threadScrollFrameRef.current);
+      threadScrollFrameRef.current = null;
+    }
+    if (threadScrollTimeoutRef.current !== null) {
+      window.clearTimeout(threadScrollTimeoutRef.current);
+      threadScrollTimeoutRef.current = null;
+    }
+  }
+
+  function isUserScrollingThread() {
+    return Date.now() < userThreadScrollUntilRef.current;
+  }
+
+  function stopFollowingThread(element = threadScrollRef.current) {
+    userThreadScrollUntilRef.current = Date.now() + 650;
+    shouldFollowThreadRef.current = false;
+    cancelPendingThreadBottomScroll();
+    if (element) rememberThreadScrollMetrics(element);
+  }
+
+  function isPointerOnThreadScrollbar(event: ReactPointerEvent<HTMLDivElement>) {
+    const element = event.currentTarget;
+    const scrollbarWidth = element.offsetWidth - element.clientWidth;
+    if (scrollbarWidth <= 0) return false;
+    return event.clientX >= element.getBoundingClientRect().right - scrollbarWidth - 2;
+  }
+
+  function scrollThreadToBottomNow(behavior: ScrollBehavior = "auto") {
+    const element = threadScrollRef.current;
+    if (!element) return;
+    userThreadScrollUntilRef.current = 0;
+    element.scrollTo({ top: element.scrollHeight, behavior });
+    if (behavior === "auto") {
+      shouldFollowThreadRef.current = true;
+      rememberThreadScrollMetrics(element);
+    }
   }
 
   function scrollThreadToBottom(behavior: ScrollBehavior = "auto") {
-    const element = threadScrollRef.current;
-    if (!element) return;
-    element.scrollTo({ top: element.scrollHeight, behavior });
+    scrollThreadToBottomNow(behavior);
+    if (behavior !== "auto") return;
+    cancelPendingThreadBottomScroll();
+    threadScrollFrameRef.current = window.requestAnimationFrame(() => {
+      threadScrollFrameRef.current = null;
+      if (shouldFollowThreadRef.current) scrollThreadToBottomNow();
+    });
+    threadScrollTimeoutRef.current = window.setTimeout(() => {
+      threadScrollTimeoutRef.current = null;
+      if (shouldFollowThreadRef.current) scrollThreadToBottomNow();
+    }, 50);
   }
 
   function handleThreadScroll() {
     const element = threadScrollRef.current;
     if (!element) return;
     const atBottom = isThreadScrollAtBottom(element);
-    shouldFollowThreadRef.current = atBottom;
-    const shouldShow = Boolean(activeRoot) && !atBottom;
-    setShowBackToBottom((current) => current === shouldShow ? current : shouldShow);
+    const layoutChanged =
+      threadScrollMetricsRef.current.scrollHeight !== element.scrollHeight
+      || threadScrollMetricsRef.current.clientHeight !== element.clientHeight;
+    const userScrolling = isUserScrollingThread();
+    let shouldShowBackToBottom = Boolean(activeRoot) && !atBottom && !shouldFollowThreadRef.current;
+    if (atBottom && !userScrolling) {
+      shouldFollowThreadRef.current = true;
+      shouldShowBackToBottom = false;
+    } else if (!userScrolling && shouldFollowThreadRef.current && layoutChanged && wasThreadPreviouslyAtBottom()) {
+      scrollThreadToBottom();
+      shouldShowBackToBottom = false;
+    }
+    setShowBackToBottom((current) => current === shouldShowBackToBottom ? current : shouldShowBackToBottom);
+    rememberThreadScrollMetrics(element);
+  }
+
+  function handleThreadWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (event.deltaY >= 0) return;
+    stopFollowingThread();
+  }
+
+  function handleThreadPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!isPointerOnThreadScrollbar(event)) return;
+    stopFollowingThread(event.currentTarget);
+  }
+
+  function handleThreadTouchMove() {
+    stopFollowingThread();
   }
 
   function handleThreadContentLoad() {
@@ -207,6 +303,42 @@ export function ThreadPanel({
     setExpandedThreadMessageIds(new Set());
   }, [activeRoot?.id]);
 
+  useEffect(() => () => {
+    if (threadScrollFrameRef.current !== null) window.cancelAnimationFrame(threadScrollFrameRef.current);
+    if (threadScrollTimeoutRef.current !== null) window.clearTimeout(threadScrollTimeoutRef.current);
+  }, []);
+
+  useEffect(() => {
+    const root = threadScrollRef.current;
+    const bottomAnchor = threadBottomAnchorRef.current;
+    if (!root || !bottomAnchor) return;
+    function keepBottomVisible() {
+      const scrollRoot = threadScrollRef.current;
+      if (!scrollRoot) return;
+      if (shouldFollowThreadRef.current && !isUserScrollingThread()) {
+        scrollThreadToBottom();
+        setShowBackToBottom(false);
+      } else {
+        rememberThreadScrollMetrics(scrollRoot);
+      }
+    }
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(keepBottomVisible);
+    const intersectionObserver = typeof IntersectionObserver === "undefined"
+      ? null
+      : new IntersectionObserver((entries) => {
+        if (!shouldFollowThreadRef.current) return;
+        if (entries.some((entry) => !entry.isIntersecting || entry.intersectionRatio < 1)) {
+          keepBottomVisible();
+        }
+      }, { root, threshold: 1 });
+    observer?.observe(root);
+    intersectionObserver?.observe(bottomAnchor);
+    return () => {
+      observer?.disconnect();
+      intersectionObserver?.disconnect();
+    };
+  }, [activeRoot?.id]);
+
   useLayoutEffect(() => {
     shouldFollowThreadRef.current = true;
     setShowBackToBottom(false);
@@ -222,7 +354,7 @@ export function ThreadPanel({
     if (!focusedMessageId) return;
     const element = threadScrollRef.current?.querySelector<HTMLElement>(`[data-message-id="${focusedMessageId}"]`);
     element?.scrollIntoView({ block: "center" });
-  }, [activeRoot?.id, focusedMessageId, replies.length]);
+  }, [activeRoot?.id, focusedMessageId]);
 
   function hasSelectedText() {
     return Boolean(window.getSelection()?.toString().trim());
@@ -305,6 +437,9 @@ export function ThreadPanel({
           ref={threadScrollRef}
           className="thread-scroll"
           onScroll={handleThreadScroll}
+          onWheelCapture={handleThreadWheel}
+          onPointerDownCapture={handleThreadPointerDown}
+          onTouchMoveCapture={handleThreadTouchMove}
           onLoadCapture={handleThreadContentLoad}
         >
           <ActivityProgressDock
@@ -711,6 +846,7 @@ export function ThreadPanel({
               );
             })}
           </section>
+          <div ref={threadBottomAnchorRef} className="thread-bottom-anchor" aria-hidden="true" />
           {messageMenu && (
             <MessageActionMenu
               x={messageMenu.x}
@@ -971,6 +1107,10 @@ function ThreadReplyComposer({
       <textarea
         ref={textareaRef}
         value={text}
+        autoCapitalize="none"
+        autoComplete="off"
+        autoCorrect="off"
+        spellCheck={false}
         onChange={(event) => {
           updateText(event.target.value);
           refreshMentionState(event.target.value, event.target.selectionStart);

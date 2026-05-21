@@ -124,14 +124,20 @@ const ACTIVITY_PHASE_LABELS: Record<string, string> = {
   run_retry: "Retrying",
 };
 
-const DEFAULT_THREAD_PANEL_WIDTH = 420;
+const LEGACY_DEFAULT_THREAD_PANEL_WIDTH = 420;
+const DEFAULT_THREAD_PANEL_WIDTH = 560;
 const MIN_THREAD_PANEL_WIDTH = 320;
-const DEFAULT_AGENT_DRAWER_WIDTH = 420;
-const MIN_AGENT_DRAWER_WIDTH = 320;
+const LEGACY_DEFAULT_AGENT_DRAWER_WIDTH = 420;
+const DEFAULT_AGENT_DRAWER_WIDTH = 560;
+const MIN_AGENT_DRAWER_WIDTH = 420;
 const DEFAULT_SIDEBAR_WIDTH = 292;
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 460;
 const MIN_CONVERSATION_WIDTH = 480;
+const MIN_AGENT_DETAIL_CONVERSATION_WIDTH = 360;
+const COMPACT_LAYOUT_BREAKPOINT = 1100;
+const MIN_COMPACT_CONTENT_WIDTH = 320;
+const MIN_COMPACT_SIDEBAR_VISIBLE_WIDTH = 220;
 const MOBILE_BREAKPOINT = 760;
 const UI_REFRESH_DEBOUNCE_MS = 80;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -234,6 +240,10 @@ function isMobileViewport() {
   return window.innerWidth <= MOBILE_BREAKPOINT;
 }
 
+function isCompactDesktopViewport() {
+  return window.innerWidth > MOBILE_BREAKPOINT && window.innerWidth <= COMPACT_LAYOUT_BREAKPOINT;
+}
+
 function isAppHistoryState(value: unknown): value is AppHistoryState {
   if (!value || typeof value !== "object") return false;
   const state = value as Record<string, unknown>;
@@ -309,15 +319,26 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, AppErrorBounda
   }
 }
 
-function maxRightPanelWidth(sidebarWidth: number, minPanelWidth: number, capToViewport = true) {
+function maxRightPanelWidth(
+  sidebarWidth: number,
+  minPanelWidth: number,
+  capToViewport = true,
+  minConversationWidth = MIN_CONVERSATION_WIDTH,
+) {
+  if (isMobileViewport()) return minPanelWidth;
+  if (isCompactDesktopViewport()) {
+    const availableWidth = Math.max(minPanelWidth, window.innerWidth - MIN_COMPACT_SIDEBAR_VISIBLE_WIDTH);
+    return capToViewport
+      ? Math.max(minPanelWidth, Math.min(Math.floor(window.innerWidth * (2 / 3)), availableWidth))
+      : availableWidth;
+  }
   const contentWidth = Math.max(0, window.innerWidth - sidebarWidth);
-  const preserveConversationMax = contentWidth - MIN_CONVERSATION_WIDTH;
+  const preserveConversationMax = contentWidth - minConversationWidth;
   const viewportMax = Math.floor(window.innerWidth * (2 / 3));
   const maxWidth = capToViewport
     ? Math.min(viewportMax, preserveConversationMax)
     : preserveConversationMax;
-  const fallbackWidth = Math.min(minPanelWidth, Math.max(0, preserveConversationMax));
-  return Math.max(fallbackWidth, maxWidth);
+  return Math.max(minPanelWidth, maxWidth);
 }
 
 function maxThreadPanelWidth(sidebarWidth = DEFAULT_SIDEBAR_WIDTH) {
@@ -325,7 +346,12 @@ function maxThreadPanelWidth(sidebarWidth = DEFAULT_SIDEBAR_WIDTH) {
 }
 
 function maxAgentDrawerWidth(sidebarWidth = DEFAULT_SIDEBAR_WIDTH) {
-  return maxRightPanelWidth(sidebarWidth, MIN_AGENT_DRAWER_WIDTH);
+  return maxRightPanelWidth(
+    sidebarWidth,
+    MIN_AGENT_DRAWER_WIDTH,
+    true,
+    MIN_AGENT_DETAIL_CONVERSATION_WIDTH,
+  );
 }
 
 function matchesSearchTime(value: string | null, range: SearchTimeRange) {
@@ -567,6 +593,7 @@ function App() {
   const [searchScope, setSearchScope] = useState<SearchScope>("all");
   const [searchTimeRange, setSearchTimeRange] = useState<SearchTimeRange>("any");
   const [newChannel, setNewChannel] = useState("");
+  const [newChannelNameSubmitError, setNewChannelNameSubmitError] = useState<string | null>(null);
   const [newChannelAgentIds, setNewChannelAgentIds] = useState<Set<string>>(() => new Set());
   const [channelNameDraft, setChannelNameDraft] = useState("");
   const [channelDescriptionDraft, setChannelDescriptionDraft] = useState("");
@@ -583,6 +610,7 @@ function App() {
   const [showChannelSettingsModal, setShowChannelSettingsModal] = useState(false);
   const [showChannelAgentsModal, setShowChannelAgentsModal] = useState(false);
   const [showCreateAgentModal, setShowCreateAgentModal] = useState(false);
+  const [returnToCreateChannelAfterAgent, setReturnToCreateChannelAfterAgent] = useState(false);
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [showActivityFeedModal, setShowActivityFeedModal] = useState(false);
   const [showSavedModal, setShowSavedModal] = useState(false);
@@ -603,18 +631,24 @@ function App() {
       THREAD_PANEL_WIDTH_STORAGE_KEY,
       DEFAULT_THREAD_PANEL_WIDTH,
     );
-    return Number.isFinite(value)
-      ? Math.min(maxThreadPanelWidth(DEFAULT_SIDEBAR_WIDTH), Math.max(MIN_THREAD_PANEL_WIDTH, value))
-      : DEFAULT_THREAD_PANEL_WIDTH;
+    const maxWidth = maxThreadPanelWidth(DEFAULT_SIDEBAR_WIDTH);
+    if (!Number.isFinite(value)) return Math.min(maxWidth, DEFAULT_THREAD_PANEL_WIDTH);
+    const preferredWidth = value <= LEGACY_DEFAULT_THREAD_PANEL_WIDTH
+      ? DEFAULT_THREAD_PANEL_WIDTH
+      : value;
+    return Math.min(maxWidth, Math.max(MIN_THREAD_PANEL_WIDTH, preferredWidth));
   });
   const [agentDrawerWidth, setAgentDrawerWidth] = useState(() => {
     const value = getStoredNumber(
       AGENT_DRAWER_WIDTH_STORAGE_KEY,
       DEFAULT_AGENT_DRAWER_WIDTH,
     );
-    return Number.isFinite(value)
-      ? Math.min(maxAgentDrawerWidth(DEFAULT_SIDEBAR_WIDTH), Math.max(MIN_AGENT_DRAWER_WIDTH, value))
-      : DEFAULT_AGENT_DRAWER_WIDTH;
+    const maxWidth = maxAgentDrawerWidth(DEFAULT_SIDEBAR_WIDTH);
+    if (!Number.isFinite(value)) return Math.min(maxWidth, DEFAULT_AGENT_DRAWER_WIDTH);
+    const preferredWidth = value <= LEGACY_DEFAULT_AGENT_DRAWER_WIDTH
+      ? DEFAULT_AGENT_DRAWER_WIDTH
+      : value;
+    return Math.min(maxWidth, Math.max(MIN_AGENT_DRAWER_WIDTH, preferredWidth));
   });
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const value = getStoredNumber(
@@ -2067,6 +2101,31 @@ function App() {
     return data?.tasks.find((task) => task.message_id === messageId) ?? null;
   }
 
+  function normalizedChannelNameInput(value: string) {
+    return value.trim().replace(/^#+/, "").toLowerCase().replace(/ /g, "-");
+  }
+
+  function channelNameExists(normalizedName: string, excludeChannelId?: string) {
+    return Boolean(data?.channels.some((item) => (
+      item.id !== excludeChannelId &&
+      item.name === normalizedName
+    )));
+  }
+
+  function duplicateChannelNameMessage(normalizedName: string) {
+    return `Channel #${normalizedName} already exists`;
+  }
+
+  function isDuplicateChannelNameError(message: string) {
+    return message.startsWith("channel #") && message.endsWith(" already exists");
+  }
+
+  const normalizedNewChannelName = normalizedChannelNameInput(newChannel);
+  const newChannelDuplicateError = normalizedNewChannelName && channelNameExists(normalizedNewChannelName)
+    ? duplicateChannelNameMessage(normalizedNewChannelName)
+    : null;
+  const newChannelNameError = newChannelDuplicateError || newChannelNameSubmitError;
+
   useEffect(() => {
     setChannelNameDraft(channel?.name ?? "");
     setChannelDescriptionDraft(channel ? visibleChannelDescription(channel.description) : "");
@@ -2085,14 +2144,29 @@ function App() {
   }, [activeChannelId, activeChannelMessageCount]);
 
   async function createChannel() {
-    const name = newChannel.trim().replace(/^#/, "");
+    const name = normalizedChannelNameInput(newChannel);
     if (!name) return;
+    if (channelNameExists(name)) {
+      setNewChannelNameSubmitError(duplicateChannelNameMessage(name));
+      return;
+    }
     const agentIds = Array.from(newChannelAgentIds);
-    const result = await mutate<{ channelId?: string }>("create_channel", {
-      name,
-      agentIds: agentIds.length > 0 ? agentIds : undefined,
-    });
+    let result: { channelId?: string };
+    try {
+      result = await mutate<{ channelId?: string }>("create_channel", {
+        name,
+        agentIds: agentIds.length > 0 ? agentIds : undefined,
+      });
+    } catch (err) {
+      const message = errorMessage(err, "create_channel failed");
+      if (isDuplicateChannelNameError(message)) {
+        setNewChannelNameSubmitError(duplicateChannelNameMessage(name));
+        setAppError(null);
+      }
+      return;
+    }
     setNewChannel("");
+    setNewChannelNameSubmitError(null);
     setNewChannelAgentIds(new Set());
     setShowCreateChannelModal(false);
     if (result.channelId) {
@@ -2101,15 +2175,21 @@ function App() {
   }
 
   async function saveChannel() {
-    if (!channel || !channelNameDraft.trim()) return;
+    if (!channel) return;
+    const name = normalizedChannelNameInput(channelNameDraft);
+    if (!name) return;
     if (channel.kind === "dm") {
       setAppError("Direct message settings are managed by the agent profile");
       setShowChannelSettingsModal(false);
       return;
     }
+    if (channelNameExists(name, channel.id)) {
+      setAppError(`Channel #${name} already exists`);
+      return;
+    }
     await mutate("update_channel", {
       channelId: channel.id,
-      name: channelNameDraft,
+      name,
       description: channelDescriptionDraft,
     });
     setShowChannelSettingsModal(false);
@@ -2476,6 +2556,7 @@ function App() {
   async function createAgent() {
     const preferredHandle = agentDraft.handle.trim() || agentDraft.displayName.trim();
     if (!preferredHandle) return;
+    const shouldReturnToCreateChannel = returnToCreateChannelAfterAgent;
     const handle = availableAgentHandle(preferredHandle, data?.agents ?? []);
     const displayName = agentDraft.displayName.trim() || handle;
     const nextForm = {
@@ -2485,7 +2566,7 @@ function App() {
       launchCommand: buildPresetCommand({ ...agentDraft, handle, displayName }),
       workingDirectory: agentDraft.workingDirectory.trim() || defaultAgentWorkspace(handle),
     };
-    const agentId = await apiInvoke<string>("create_agent", {
+    await apiInvoke<string>("create_agent", {
       handle,
       displayName: nextForm.displayName,
       role: nextForm.role,
@@ -2499,18 +2580,13 @@ function App() {
       workingDirectory: nextForm.workingDirectory,
       dailyBudgetMicros: budgetMicrosFromForm(nextForm.dailyBudgetUsd),
     });
-    if (channel) {
-      if (channel.kind !== "dm") {
-        await apiInvoke("set_channel_agent_membership", {
-          channelId: channel.id,
-          agentId,
-          member: true,
-        });
-      }
-    }
     await refresh();
     setAgentDraft(newAgentDraft());
     setShowCreateAgentModal(false);
+    setReturnToCreateChannelAfterAgent(false);
+    if (shouldReturnToCreateChannel) {
+      setShowCreateChannelModal(true);
+    }
   }
 
   function updateDraftRuntime(runtime: string) {
@@ -2909,7 +2985,18 @@ function App() {
 
     function onPointerMove(moveEvent: PointerEvent) {
       const delta = moveEvent.clientX - startX;
-      const maxWidth = Math.min(MAX_SIDEBAR_WIDTH, window.innerWidth - MIN_CONVERSATION_WIDTH - MIN_THREAD_PANEL_WIDTH);
+      const rightPanelMinWidth = selectedAgent
+        ? MIN_AGENT_DRAWER_WIDTH
+        : showThread
+          ? MIN_THREAD_PANEL_WIDTH
+          : 0;
+      const reservedWidth = isCompactDesktopViewport()
+        ? MIN_COMPACT_CONTENT_WIDTH
+        : MIN_CONVERSATION_WIDTH + rightPanelMinWidth;
+      const maxWidth = Math.min(
+        MAX_SIDEBAR_WIDTH,
+        Math.max(MIN_SIDEBAR_WIDTH, window.innerWidth - reservedWidth),
+      );
       const next = Math.min(maxWidth, Math.max(MIN_SIDEBAR_WIDTH, startWidth + delta));
       setSidebarWidth(next);
     }
@@ -3015,7 +3102,7 @@ function App() {
 
   return (
     <main
-      className={`app theme-liquid ${selectedAgent || showThread ? "" : "thread-hidden"} ${showMobileSidebar ? "mobile-sidebar-open" : ""} ${mobileSidebarDragPx > 0 ? "mobile-sidebar-dragging" : ""} ${mobileComposerFocused ? "mobile-composer-focused" : ""}`}
+      className={`app theme-liquid ${selectedAgent || showThread ? "" : "thread-hidden"} ${selectedAgent || activeThreadId ? "right-panel-active" : ""} ${showMobileSidebar ? "mobile-sidebar-open" : ""} ${mobileSidebarDragPx > 0 ? "mobile-sidebar-dragging" : ""} ${mobileComposerFocused ? "mobile-composer-focused" : ""}`}
       style={{
         "--sidebar-width": `${sidebarWidth}px`,
         "--thread-width": `${selectedAgent ? agentDrawerWidth : threadPanelWidth}px`,
@@ -3034,6 +3121,7 @@ function App() {
         mobileFocus={mobileSidebarFocus}
         openCreateChannelModal={() => {
           setShowMobileSidebar(false);
+          setReturnToCreateChannelAfterAgent(false);
           setShowCreateChannelModal(true);
         }}
         selectChannel={(channelId) => {
@@ -3044,6 +3132,7 @@ function App() {
         }}
         openCreateAgentModal={() => {
           setAgentDraft(newAgentDraft());
+          setReturnToCreateChannelAfterAgent(false);
           setShowMobileSidebar(false);
           setShowCreateAgentModal(true);
         }}
@@ -3285,9 +3374,13 @@ function App() {
       <CreateChannelModal
         open={showCreateChannelModal}
         channelName={newChannel}
+        nameError={newChannelNameError}
         agents={data.agents}
         selectedAgentIds={newChannelAgentIds}
-        onChange={setNewChannel}
+        onChange={(value) => {
+          setNewChannel(value);
+          setNewChannelNameSubmitError(null);
+        }}
         onToggleAgent={(agentId, member) => {
           setNewChannelAgentIds((current) => {
             const next = new Set(current);
@@ -3296,8 +3389,17 @@ function App() {
             return next;
           });
         }}
+        onCreateAgent={() => {
+          setAgentDraft(newAgentDraft());
+          setReturnToCreateChannelAfterAgent(true);
+          setNewChannelNameSubmitError(null);
+          setShowCreateChannelModal(false);
+          setShowCreateAgentModal(true);
+        }}
         onCancel={() => {
           setShowCreateChannelModal(false);
+          setReturnToCreateChannelAfterAgent(false);
+          setNewChannelNameSubmitError(null);
           setNewChannelAgentIds(new Set());
         }}
         onSubmit={createChannel}
@@ -3306,14 +3408,10 @@ function App() {
       <ChannelSettingsModal
         open={showChannelSettingsModal}
         channel={channel}
-        agents={data.agents}
-        channelMemberIds={channelMemberIds}
         nameDraft={channelNameDraft}
         descriptionDraft={channelDescriptionDraft}
         onNameChange={setChannelNameDraft}
         onDescriptionChange={setChannelDescriptionDraft}
-        onSetMember={setChannelMember}
-        onDelete={deleteChannel}
         onCancel={() => setShowChannelSettingsModal(false)}
         onSave={saveChannel}
       />
@@ -3335,6 +3433,7 @@ function App() {
         onSetMember={setChannelMember}
         onCreateAgent={() => {
           setAgentDraft(newAgentDraft());
+          setReturnToCreateChannelAfterAgent(false);
           setShowChannelAgentsModal(false);
           setShowCreateAgentModal(true);
         }}
@@ -3351,8 +3450,13 @@ function App() {
         onChange={setAgentDraft}
         onRuntimeChange={updateDraftRuntime}
         onCancel={() => {
+          const shouldReturnToCreateChannel = returnToCreateChannelAfterAgent;
           setAgentDraft(newAgentDraft());
           setShowCreateAgentModal(false);
+          setReturnToCreateChannelAfterAgent(false);
+          if (shouldReturnToCreateChannel) {
+            setShowCreateChannelModal(true);
+          }
         }}
         onSubmit={createAgent}
       />
