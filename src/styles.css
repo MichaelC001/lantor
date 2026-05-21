@@ -4901,31 +4901,31 @@ body.resizing-row * {
 
 .agent-drawer-head .agent-head-action[data-tooltip]::after {
   position: absolute;
-  top: calc(100% + 10px);
-  right: 0;
+  top: calc(100% + 8px);
+  right: 50%;
   z-index: 4;
-  max-width: 220px;
+  max-width: 140px;
   padding: 5px 8px;
-  border-radius: 8px;
+  border-radius: 6px;
   background: var(--surface-tooltip);
   color: var(--ink-on-tooltip);
   content: attr(data-tooltip);
-  font-size: 11px;
-  font-weight: var(--type-weight-medium);
-  line-height: 1.35;
+  font-size: var(--type-size-caption);
+  font-weight: var(--type-weight-semibold);
+  line-height: 14px;
   opacity: 0;
   pointer-events: none;
-  overflow-wrap: anywhere;
-  transform: translateY(-2px);
+  transform: translate(50%, -2px);
   transition:
     opacity 90ms ease,
     transform 90ms ease;
+  white-space: nowrap;
 }
 
 .agent-drawer-head .agent-head-action[data-tooltip]::before {
   position: absolute;
-  top: calc(100% + 6px);
-  right: calc(50% - 4px);
+  top: calc(100% + 3px);
+  right: 50%;
   z-index: 4;
   width: 8px;
   height: 8px;
@@ -4933,7 +4933,7 @@ body.resizing-row * {
   content: "";
   opacity: 0;
   pointer-events: none;
-  transform: translateY(-2px) rotate(45deg);
+  transform: translate(50%, -2px) rotate(45deg);
   transition:
     opacity 90ms ease,
     transform 90ms ease;
@@ -4944,12 +4944,12 @@ body.resizing-row * {
 .agent-drawer-head .agent-head-action[data-tooltip]:hover::before,
 .agent-drawer-head .agent-head-action[data-tooltip]:focus-visible::before {
   opacity: 1;
-  transform: translateY(0);
+  transform: translate(50%, 0) rotate(45deg);
 }
 
-.agent-drawer-head .agent-head-action[data-tooltip]:hover::before,
-.agent-drawer-head .agent-head-action[data-tooltip]:focus-visible::before {
-  transform: translateY(0) rotate(45deg);
+.agent-drawer-head .agent-head-action[data-tooltip]:hover::after,
+.agent-drawer-head .agent-head-action[data-tooltip]:focus-visible::after {
+  transform: translate(50%, 0);
 }
 
 .agent-drawer-head .agent-mobile-back {
