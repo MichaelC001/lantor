@@ -53,8 +53,9 @@ use agent_routing::{
 };
 use agent_work_dispatch::{
     cancel_agent_work, cancel_agent_work_in_pool, claim_task, claim_task_in_pool,
-    dispatch_agent_work, dispatch_task_assignment_to_agent, mark_task_after_work_item_finished,
-    retry_agent_work, retry_agent_work_in_pool, try_claim_unassigned_task,
+    dispatch_agent_restart_backlog, dispatch_agent_work, dispatch_task_assignment_to_agent,
+    mark_task_after_work_item_finished, retry_agent_work, retry_agent_work_in_pool,
+    try_claim_unassigned_task,
 };
 use agent_workspace::{agent_workspace_list, agent_workspace_read_file};
 #[cfg(test)]
@@ -302,30 +303,54 @@ async fn start_agent(agent_id: Uuid, state: State<'_, AppState>) -> CommandResul
         return Err("agent already has a pending start command".to_owned());
     }
 
-    sqlx::query(
-        r#"
-        insert into supervisor_commands (command_type, agent_id)
-        values ('start_agent', $1)
-        "#,
-    )
-    .bind(agent_id)
-    .execute(&state.pool)
-    .await
-    .map_err(to_string)?;
-    let _ = notify_supervisor_wake(&state.pool).await;
-    let _ = notify_ui_refresh(&state.pool, "supervisor_command").await;
     sqlx::query("update agents set status = 'queued' where id = $1")
         .bind(agent_id)
         .execute(&state.pool)
         .await
         .map_err(to_string)?;
+    let (redispatched_tasks, inbox_wake_available) =
+        dispatch_agent_restart_backlog(&state.pool, agent_id).await?;
+    let pending_start_after_backlog: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        select id
+        from supervisor_commands
+        where command_type = 'start_agent'
+          and agent_id = $1
+          and status in ('pending', 'running')
+        limit 1
+        "#,
+    )
+    .bind(agent_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(to_string)?;
+    if pending_start_after_backlog.is_none() {
+        sqlx::query(
+            r#"
+            insert into supervisor_commands (command_type, agent_id)
+            values ('start_agent', $1)
+            "#,
+        )
+        .bind(agent_id)
+        .execute(&state.pool)
+        .await
+        .map_err(to_string)?;
+        let _ = notify_supervisor_wake(&state.pool).await;
+        let _ = notify_ui_refresh(&state.pool, "supervisor_command").await;
+    }
     record_agent_activity(
         &state.pool,
         Some(agent_id),
         None,
         "run",
         "Start queued",
-        "Waiting for supervisor to launch the agent",
+        if redispatched_tasks > 0 || inbox_wake_available {
+            format!(
+                "Waiting for supervisor to launch the agent; redispatched {redispatched_tasks} unfinished task(s)"
+            )
+        } else {
+            "Waiting for supervisor to launch the agent".to_owned()
+        },
     )
     .await?;
 
@@ -751,7 +776,7 @@ mod tests {
             agent_context_message_search, agent_context_workspace_info,
             agent_context_workspace_list, short_id,
         },
-        create_agent_inbox_item,
+        create_agent_inbox_item, dispatch_agent_restart_backlog,
         domain::reminders::load_reminders,
         ensure_agent_workspace, extract_agent_event_json, extract_agent_mentions,
         handle_agent_event, inbox_wake_context, open_dm_with_agent_in_pool,
@@ -2299,6 +2324,102 @@ mod tests {
         .fetch_one(pool)
         .await
         .map_err(|err| err.to_string())
+    }
+
+    #[tokio::test]
+    async fn restart_backlog_redispatches_assigned_in_progress_tasks() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "restart-backlog-agent").await?;
+            let channel_id = insert_test_channel(&pool, "restart-backlog").await?;
+            let message_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Martin', 'owner', 'Finish restart backlog task', true)
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let task_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into tasks (message_id, channel_id, title, status, assignee_agent_id)
+                values ($1, $2, 'Finish restart backlog task', 'in_progress', $3)
+                returning id
+                "#,
+            )
+            .bind(message_id)
+            .bind(channel_id)
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into agent_work_items (
+                    agent_id, channel_id, thread_root_id, source_message_id,
+                    task_id, source_kind, title, context, status, completed_at
+                )
+                values (
+                    $1, $2, $3, $3, $4, 'task', 'Old failed attempt', 'old context',
+                    'failed', strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                )
+                "#,
+            )
+            .bind(agent_id)
+            .bind(channel_id)
+            .bind(message_id)
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let (redispatched_tasks, _) = dispatch_agent_restart_backlog(&pool, agent_id).await?;
+            assert_eq!(redispatched_tasks, 1);
+
+            let queued_work_items: i64 = sqlx::query_scalar(
+                r#"
+                select count(*)
+                from agent_work_items
+                where agent_id = $1
+                  and task_id = $2
+                  and status = 'queued'
+                "#,
+            )
+            .bind(agent_id)
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(queued_work_items, 1);
+
+            let pending_task_starts: i64 = sqlx::query_scalar(
+                r#"
+                select count(*)
+                from supervisor_commands c
+                join agent_work_items w on w.id = c.work_item_id
+                where c.agent_id = $1
+                  and c.command_type = 'start_agent'
+                  and c.status = 'pending'
+                  and w.task_id = $2
+                "#,
+            )
+            .bind(agent_id)
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(pending_task_starts, 1);
+
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
     }
 
     #[tokio::test]

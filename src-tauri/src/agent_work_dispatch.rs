@@ -282,6 +282,44 @@ pub(crate) async fn dispatch_task_assignment_to_agent(
     Ok(())
 }
 
+pub(crate) async fn dispatch_agent_restart_backlog(
+    pool: &SqlitePool,
+    agent_id: Uuid,
+) -> CommandResult<(usize, bool)> {
+    let rows = sqlx::query(
+        r#"
+        select id
+        from tasks t
+        where t.assignee_agent_id = $1
+          and t.status in ('todo', 'in_progress')
+          and not exists (
+              select 1
+              from agent_work_items w
+              where w.agent_id = $1
+                and w.task_id = t.id
+                and w.status in ('queued', 'running', 'cancelling')
+          )
+        order by t.updated_at asc, t.created_at asc
+        "#,
+    )
+    .bind(agent_id)
+    .fetch_all(pool)
+    .await
+    .map_err(to_string)?;
+
+    let mut task_count = 0;
+    for row in rows {
+        let task_id: Uuid = row.get("id");
+        dispatch_task_assignment_to_agent(pool, task_id, agent_id, "agent_restart").await?;
+        task_count += 1;
+    }
+
+    let inbox_wake = ensure_agent_inbox_wake_work_item(pool, agent_id)
+        .await?
+        .is_some();
+    Ok((task_count, inbox_wake))
+}
+
 pub(crate) async fn dispatch_unassigned_task_availability(
     pool: &SqlitePool,
     task_id: Uuid,
