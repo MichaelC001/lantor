@@ -152,6 +152,7 @@ export function ThreadPanel({
   const threadBottomAnchorRef = useRef<HTMLDivElement | null>(null);
   const threadScrollFrameRef = useRef<number | null>(null);
   const threadScrollTimeoutRef = useRef<number | null>(null);
+  const threadResumeFollowTimeoutRef = useRef<number | null>(null);
   const shouldFollowThreadRef = useRef(true);
   const userThreadScrollUntilRef = useRef(0);
   const threadScrollMetricsRef = useRef({ scrollHeight: 0, scrollTop: 0, clientHeight: 0 });
@@ -204,6 +205,13 @@ export function ThreadPanel({
     }
   }
 
+  function cancelPendingThreadFollowResume() {
+    if (threadResumeFollowTimeoutRef.current !== null) {
+      window.clearTimeout(threadResumeFollowTimeoutRef.current);
+      threadResumeFollowTimeoutRef.current = null;
+    }
+  }
+
   function isUserScrollingThread() {
     return Date.now() < userThreadScrollUntilRef.current;
   }
@@ -212,6 +220,7 @@ export function ThreadPanel({
     userThreadScrollUntilRef.current = Date.now() + 650;
     shouldFollowThreadRef.current = false;
     cancelPendingThreadBottomScroll();
+    cancelPendingThreadFollowResume();
     if (element) rememberThreadScrollMetrics(element);
   }
 
@@ -225,12 +234,25 @@ export function ThreadPanel({
   function scrollThreadToBottomNow(behavior: ScrollBehavior = "auto") {
     const element = threadScrollRef.current;
     if (!element) return;
+    cancelPendingThreadFollowResume();
     userThreadScrollUntilRef.current = 0;
     element.scrollTo({ top: element.scrollHeight, behavior });
     if (behavior === "auto") {
       shouldFollowThreadRef.current = true;
       rememberThreadScrollMetrics(element);
     }
+  }
+
+  function scheduleThreadFollowResume() {
+    cancelPendingThreadFollowResume();
+    // Give a manual scroll a beat to settle at the bottom before follow mode resumes.
+    threadResumeFollowTimeoutRef.current = window.setTimeout(() => {
+      threadResumeFollowTimeoutRef.current = null;
+      const element = threadScrollRef.current;
+      if (!element || !isThreadScrollAtBottom(element)) return;
+      scrollThreadToBottom();
+      setShowBackToBottom(false);
+    }, 120);
   }
 
   function scrollThreadToBottom(behavior: ScrollBehavior = "auto") {
@@ -250,18 +272,28 @@ export function ThreadPanel({
   function handleThreadScroll() {
     const element = threadScrollRef.current;
     if (!element) return;
+    const previousMetrics = threadScrollMetricsRef.current;
     const atBottom = isThreadScrollAtBottom(element);
     const layoutChanged =
-      threadScrollMetricsRef.current.scrollHeight !== element.scrollHeight
-      || threadScrollMetricsRef.current.clientHeight !== element.clientHeight;
+      previousMetrics.scrollHeight !== element.scrollHeight
+      || previousMetrics.clientHeight !== element.clientHeight;
     const userScrolling = isUserScrollingThread();
     let shouldShowBackToBottom = Boolean(activeRoot) && !atBottom && !shouldFollowThreadRef.current;
-    if (atBottom && !userScrolling) {
-      shouldFollowThreadRef.current = true;
+    if (atBottom) {
+      if (userScrolling) {
+        scheduleThreadFollowResume();
+      } else {
+        cancelPendingThreadFollowResume();
+        userThreadScrollUntilRef.current = 0;
+        shouldFollowThreadRef.current = true;
+      }
       shouldShowBackToBottom = false;
     } else if (!userScrolling && shouldFollowThreadRef.current && layoutChanged && wasThreadPreviouslyAtBottom()) {
+      cancelPendingThreadFollowResume();
       scrollThreadToBottom();
       shouldShowBackToBottom = false;
+    } else {
+      cancelPendingThreadFollowResume();
     }
     setShowBackToBottom((current) => current === shouldShowBackToBottom ? current : shouldShowBackToBottom);
     rememberThreadScrollMetrics(element);
@@ -306,6 +338,7 @@ export function ThreadPanel({
   useEffect(() => () => {
     if (threadScrollFrameRef.current !== null) window.cancelAnimationFrame(threadScrollFrameRef.current);
     if (threadScrollTimeoutRef.current !== null) window.clearTimeout(threadScrollTimeoutRef.current);
+    if (threadResumeFollowTimeoutRef.current !== null) window.clearTimeout(threadResumeFollowTimeoutRef.current);
   }, []);
 
   useEffect(() => {
@@ -862,13 +895,13 @@ export function ThreadPanel({
               onClose={() => setMessageMenu(null)}
             />
           )}
-          {activeRoot && showBackToBottom && (
-            <button type="button" className="thread-back-to-bottom" onClick={returnThreadToBottom}>
-              <ArrowDown size={15} />
-              Back to bottom
-            </button>
-          )}
         </div>
+        {activeRoot && showBackToBottom && (
+          <button type="button" className="thread-back-to-bottom" onClick={returnThreadToBottom}>
+            <ArrowDown size={15} />
+            Back to bottom
+          </button>
+        )}
         </div>
 
         <ThreadReplyComposer
