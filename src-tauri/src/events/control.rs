@@ -305,6 +305,9 @@ fn extract_agent_event_json_with_remainder(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     let payload = &trimmed[payload_start..];
+    if payload.is_empty() {
+        return None;
+    }
     match complete_json_object_end(payload) {
         Some(end) => Some((&payload[..end], &payload[end..])),
         None => Some((payload.trim(), "")),
@@ -333,7 +336,10 @@ fn find_agent_event_marker(text: &str) -> Option<(usize, usize)> {
     None
 }
 
-fn split_agent_event_jsons_from_text(text: &str, drop_incomplete: bool) -> (String, Vec<String>) {
+fn split_agent_event_jsons_from_text(
+    text: &str,
+    strip_incomplete_tail: bool,
+) -> (String, Vec<String>) {
     let mut visible = String::new();
     let mut events = Vec::new();
     let mut rest = text;
@@ -342,7 +348,7 @@ fn split_agent_event_jsons_from_text(text: &str, drop_incomplete: bool) -> (Stri
         visible.push_str(&rest[..marker_index]);
         let payload = &rest[payload_start..];
         let Some(end) = complete_json_object_end(payload) else {
-            if !drop_incomplete {
+            if !strip_incomplete_tail {
                 visible.push_str(&rest[marker_index..]);
             }
             return (visible.trim().to_owned(), events);
@@ -409,11 +415,15 @@ pub(crate) fn silent_reply_reason(body: &str) -> Option<String> {
 }
 
 pub(crate) fn split_streaming_agent_event_lines(body: &str) -> (String, Vec<String>) {
-    split_agent_event_jsons_from_text(body, true)
+    split_agent_event_jsons_from_text(body, false)
 }
 
 pub(crate) fn split_complete_streaming_agent_event_lines(body: &str) -> (String, Vec<String>) {
-    split_agent_event_jsons_from_text(body, false)
+    split_streaming_agent_event_lines(body)
+}
+
+pub(crate) fn split_terminal_streaming_agent_event_lines(body: &str) -> (String, Vec<String>) {
+    split_agent_event_jsons_from_text(body, true)
 }
 
 fn control_event_creates_visible_chat_message(json: &str) -> bool {
@@ -1259,7 +1269,7 @@ pub(crate) async fn handle_agent_event(
 mod tests {
     use super::{
         silent_reply_reason, split_complete_streaming_agent_event_lines,
-        split_streaming_agent_event_lines,
+        split_streaming_agent_event_lines, split_terminal_streaming_agent_event_lines,
     };
 
     #[test]
@@ -1321,6 +1331,29 @@ mod tests {
     }
 
     #[test]
+    fn consumes_control_events_when_json_starts_on_next_line() {
+        let (visible, events) = split_streaming_agent_event_lines(
+            "Status update\nLANTOR_EVENT\n{\"type\":\"activity\",\"title\":\"Step\",\"detail\":\"one\"}\nDone",
+        );
+
+        assert_eq!(
+            events,
+            vec![r#"{"type":"activity","title":"Step","detail":"one"}"#]
+        );
+        assert_eq!(visible, "Status update\n\nDone");
+    }
+
+    #[test]
+    fn terminal_split_strips_incomplete_control_tail() {
+        let (visible, events) = split_terminal_streaming_agent_event_lines(
+            "Working patch.\nLANTOR_EVENT\n{\"type\":\"activity\",\"title\":\"Step\"",
+        );
+
+        assert!(events.is_empty());
+        assert_eq!(visible, "Working patch.");
+    }
+
+    #[test]
     fn strips_control_event_with_multiple_whitespace_chars() {
         let (visible, events) = split_streaming_agent_event_lines(
             "LANTOR_EVENT  \t\r\n {\"type\":\"activity\",\"title\":\"x\"}",
@@ -1332,8 +1365,9 @@ mod tests {
 
     #[test]
     fn drops_unclosed_control_event_at_terminal_split() {
-        let (visible, events) =
-            split_streaming_agent_event_lines("Hello there.\nLANTOR_EVENT {\"type\":\"activity\"");
+        let (visible, events) = split_terminal_streaming_agent_event_lines(
+            "Hello there.\nLANTOR_EVENT {\"type\":\"activity\"",
+        );
 
         assert_eq!(visible, "Hello there.");
         assert!(events.is_empty());
@@ -1352,9 +1386,12 @@ mod tests {
     fn preserves_text_when_event_marker_appears_in_prose() {
         let body = "我刚提到 LANTOR_EVENT 是系统级控制行，看附录。";
         let (visible, events) = split_streaming_agent_event_lines(body);
+        let (terminal_visible, terminal_events) = split_terminal_streaming_agent_event_lines(body);
 
         assert_eq!(visible, body);
         assert!(events.is_empty());
+        assert_eq!(terminal_visible, body);
+        assert!(terminal_events.is_empty());
     }
 
     #[test]
