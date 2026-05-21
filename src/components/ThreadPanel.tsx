@@ -256,7 +256,8 @@ export function ThreadPanel({
       || threadScrollMetricsRef.current.clientHeight !== element.clientHeight;
     const userScrolling = isUserScrollingThread();
     let shouldShowBackToBottom = Boolean(activeRoot) && !atBottom && !shouldFollowThreadRef.current;
-    if (atBottom && !userScrolling) {
+    if (atBottom) {
+      userThreadScrollUntilRef.current = 0;
       shouldFollowThreadRef.current = true;
       shouldShowBackToBottom = false;
     } else if (!userScrolling && shouldFollowThreadRef.current && layoutChanged && wasThreadPreviouslyAtBottom()) {
