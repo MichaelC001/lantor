@@ -1786,28 +1786,23 @@ function App() {
     for (const root of allThreadRootMessages) {
       const replies = repliesByRoot.get(root.id) ?? [];
       const unreadCount = threadUnreadCounts[root.id] ?? 0;
-      const unreadStartIndex = Math.max(0, replies.length - unreadCount);
-      const latestReply = replies.length > 0 ? replies[replies.length - 1] : null;
-      const currentMessage = unreadCount > 0
-        ? replies[unreadStartIndex] ?? latestReply ?? root
-        : latestReply ?? root;
-      const latestActivity = latestReply ?? root;
+      const latestActivity = replies.length > 0 ? replies[replies.length - 1] : root;
       const unread = unreadCount > 0;
       items.push({
         id: `thread:${root.id}`,
         dismissId: `thread:${root.id}`,
         kind: "thread",
-        title: firstLines(currentMessage.body, 1),
-        excerpt: currentMessage.body,
+        title: firstLines(latestActivity.body, 1),
+        excerpt: latestActivity.body,
         surface: channelLabel(root.channel_id),
-        actor: currentMessage.sender_name,
+        actor: latestActivity.sender_name,
         timestamp: timestamp(latestActivity.created_at),
         unread,
-        actorAgentId: currentMessage.sender_agent_id,
-        actorRole: currentMessage.sender_role,
+        actorAgentId: latestActivity.sender_agent_id,
+        actorRole: latestActivity.sender_role,
         channelId: root.channel_id,
         threadId: root.id,
-        messageId: currentMessage.id,
+        messageId: latestActivity.id,
         taskId: null,
         reminderId: null,
         replyCount: threadReplyCounts[root.id] ?? 0,
