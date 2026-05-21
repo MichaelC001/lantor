@@ -433,46 +433,47 @@ export function ThreadPanel({
       </header>
 
       <section className="thread-focus">
-        <div
-          ref={threadScrollRef}
-          className="thread-scroll"
-          onScroll={handleThreadScroll}
-          onWheelCapture={handleThreadWheel}
-          onPointerDownCapture={handleThreadPointerDown}
-          onTouchMoveCapture={handleThreadTouchMove}
-          onLoadCapture={handleThreadContentLoad}
-        >
-          <ActivityProgressDock
-            messages={replies}
-            activities={agentActivities}
-            runs={agentRuns}
-            workItems={agentWorkItems}
-            agents={agents}
-            channelId={activeRoot ? channel?.id ?? null : null}
-            threadRootId={activeRoot?.id ?? null}
-          />
-          {activeRoot && (
-            <Fragment>
-              <div className="message-date-divider" role="separator">
-                <span />
-                <time dateTime={activeRoot.created_at}>{formatDateDivider(activeRoot.created_at)}</time>
-                <span />
-              </div>
-              <article
-                data-message-id={activeRoot.id}
-                className={`thread-root ${activeRoot.sender_role === "system" ? "system-message" : ""} ${tapFocusedMessageId === activeRoot.id ? "tap-focused" : ""} ${rootSaved ? "saved" : ""}`}
-                data-jump-focused={focusedMessageId === activeRoot.id ? "true" : "false"}
-                onClick={() => {
-                  if (hasSelectedText()) return;
-                  if (activeRoot.sender_role !== "system") setTapFocusedMessageId(activeRoot.id);
-                }}
-                onContextMenu={(event) => {
-                  if (activeRoot.sender_role === "system") return;
-                  if (shouldUseNativeMessageSelection()) return;
-                  event.preventDefault();
-                  setMessageMenu({ x: event.clientX, y: event.clientY, message: activeRoot });
-                }}
-              >
+        <div className="thread-scroll-shell">
+          <div
+            ref={threadScrollRef}
+            className="thread-scroll"
+            onScroll={handleThreadScroll}
+            onWheelCapture={handleThreadWheel}
+            onPointerDownCapture={handleThreadPointerDown}
+            onTouchMoveCapture={handleThreadTouchMove}
+            onLoadCapture={handleThreadContentLoad}
+          >
+            <ActivityProgressDock
+              messages={replies}
+              activities={agentActivities}
+              runs={agentRuns}
+              workItems={agentWorkItems}
+              agents={agents}
+              channelId={activeRoot ? channel?.id ?? null : null}
+              threadRootId={activeRoot?.id ?? null}
+            />
+            {activeRoot && (
+              <Fragment>
+                <div className="message-date-divider" role="separator">
+                  <span />
+                  <time dateTime={activeRoot.created_at}>{formatDateDivider(activeRoot.created_at)}</time>
+                  <span />
+                </div>
+                <article
+                  data-message-id={activeRoot.id}
+                  className={`thread-root ${activeRoot.sender_role === "system" ? "system-message" : ""} ${tapFocusedMessageId === activeRoot.id ? "tap-focused" : ""} ${rootSaved ? "saved" : ""}`}
+                  data-jump-focused={focusedMessageId === activeRoot.id ? "true" : "false"}
+                  onClick={() => {
+                    if (hasSelectedText()) return;
+                    if (activeRoot.sender_role !== "system") setTapFocusedMessageId(activeRoot.id);
+                  }}
+                  onContextMenu={(event) => {
+                    if (activeRoot.sender_role === "system") return;
+                    if (shouldUseNativeMessageSelection()) return;
+                    event.preventDefault();
+                    setMessageMenu({ x: event.clientX, y: event.clientY, message: activeRoot });
+                  }}
+                >
                 {activeRoot.sender_role === "system" ? (
                   <div className="system-message-line">
                     <MessageMarkdown body={activeRoot.body} onLocalAgentLink={openLinkedAgentDetail} />
@@ -867,6 +868,7 @@ export function ThreadPanel({
               Back to bottom
             </button>
           )}
+        </div>
         </div>
 
         <ThreadReplyComposer
