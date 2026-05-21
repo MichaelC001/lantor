@@ -6,7 +6,10 @@ export type ThemePreference = "auto" | "light" | "dark";
 type SettingsModalProps = {
   open: boolean;
   themePreference: ThemePreference;
+  chatFontSize: number;
+  chatFontSizeOptions: readonly number[];
   onThemePreferenceChange: (value: ThemePreference) => void;
+  onChatFontSizeChange: (value: number) => void;
   onClose: () => void;
 };
 
@@ -24,7 +27,10 @@ const THEME_OPTIONS: Array<{
 export function SettingsModal({
   open,
   themePreference,
+  chatFontSize,
+  chatFontSizeOptions,
   onThemePreferenceChange,
+  onChatFontSizeChange,
   onClose,
 }: SettingsModalProps) {
   return (
@@ -55,6 +61,23 @@ export function SettingsModal({
                 </button>
               );
             })}
+          </div>
+        </fieldset>
+        <fieldset className="settings-fieldset">
+          <legend>Chat text</legend>
+          <div className="chat-size-choice-grid">
+            {chatFontSizeOptions.map((size) => (
+              <button
+                type="button"
+                key={size}
+                className={chatFontSize === size ? "selected" : ""}
+                aria-pressed={chatFontSize === size}
+                onClick={() => onChatFontSizeChange(size)}
+              >
+                <strong style={{ fontSize: size }}>Aa</strong>
+                <small>{size}px</small>
+              </button>
+            ))}
           </div>
         </fieldset>
       </section>

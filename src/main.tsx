@@ -151,6 +151,9 @@ const THREAD_PANEL_WIDTH_STORAGE_KEY = "lantor.threadPanelWidth";
 const AGENT_DRAWER_WIDTH_STORAGE_KEY = "lantor.agentDrawerWidth";
 const SIDEBAR_WIDTH_STORAGE_KEY = "lantor.sidebarWidth";
 const THEME_PREFERENCE_STORAGE_KEY = "lantor.themePreference";
+const CHAT_FONT_SIZE_STORAGE_KEY = "lantor.chatFontSize";
+const CHAT_FONT_SIZE_OPTIONS = [15, 16, 17, 18] as const;
+const DEFAULT_CHAT_FONT_SIZE = 15;
 const MOBILE_EDGE_SWIPE_START_PX = 24;
 const MOBILE_EDGE_SWIPE_OPEN_PX = 72;
 const MOBILE_EDGE_SWIPE_MAX_VERTICAL_PX = 48;
@@ -447,6 +450,21 @@ function getStoredThemePreference(): ThemePreference {
   return stored === "light" || stored === "dark" || stored === "auto" ? stored : "auto";
 }
 
+function getStoredChatFontSize() {
+  const stored = Number(window.localStorage.getItem(CHAT_FONT_SIZE_STORAGE_KEY));
+  return CHAT_FONT_SIZE_OPTIONS.includes(stored as typeof CHAT_FONT_SIZE_OPTIONS[number])
+    ? stored
+    : DEFAULT_CHAT_FONT_SIZE;
+}
+
+function nextChatFontSize(current: number, direction: -1 | 1) {
+  const index = CHAT_FONT_SIZE_OPTIONS.findIndex((size) => size === current);
+  const fallbackIndex = CHAT_FONT_SIZE_OPTIONS.findIndex((size) => size === DEFAULT_CHAT_FONT_SIZE);
+  const currentIndex = index === -1 ? fallbackIndex : index;
+  const nextIndex = Math.min(CHAT_FONT_SIZE_OPTIONS.length - 1, Math.max(0, currentIndex + direction));
+  return CHAT_FONT_SIZE_OPTIONS[nextIndex];
+}
+
 async function attachmentUploads(attachments: DraftAttachment[]) {
   return Promise.all(attachments.map(async (attachment) => {
     const buffer = await attachment.file.arrayBuffer();
@@ -617,6 +635,7 @@ function App() {
   const [showOwnerProfileModal, setShowOwnerProfileModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => getStoredThemePreference());
+  const [chatFontSize, setChatFontSize] = useState(() => getStoredChatFontSize());
   const [showMobileSidebar, setShowMobileSidebar] = useState(() => isMobileViewport());
   const [mobileSidebarFocus, setMobileSidebarFocus] = useState<"home" | "dms">("home");
   const [mobileSidebarDragPx, setMobileSidebarDragPx] = useState(0);
@@ -1192,6 +1211,10 @@ function App() {
   }, [channelThreadMemory]);
 
   useEffect(() => {
+    window.localStorage.setItem(CHAT_FONT_SIZE_STORAGE_KEY, String(chatFontSize));
+  }, [chatFontSize]);
+
+  useEffect(() => {
     window.localStorage.setItem(THEME_PREFERENCE_STORAGE_KEY, themePreference);
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
     const applyTheme = () => {
@@ -1218,6 +1241,19 @@ function App() {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const modifier = event.metaKey || event.ctrlKey;
+
+      if (modifier && !event.altKey) {
+        const increase = event.key === "+" || event.key === "=" || event.code === "NumpadAdd";
+        const decrease = event.key === "-" || event.key === "_" || event.code === "NumpadSubtract";
+        const reset = event.key === "0" || event.code === "Numpad0";
+        if (increase || decrease || reset) {
+          event.preventDefault();
+          setChatFontSize((current) => (
+            reset ? DEFAULT_CHAT_FONT_SIZE : nextChatFontSize(current, increase ? 1 : -1)
+          ));
+          return;
+        }
+      }
 
       if (modifier && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -3107,6 +3143,7 @@ function App() {
         "--sidebar-width": `${sidebarWidth}px`,
         "--thread-width": `${selectedAgent ? agentDrawerWidth : threadPanelWidth}px`,
         "--mobile-sidebar-drag": `${mobileSidebarDragPx}px`,
+        "--chat-font-size": `${chatFontSize}px`,
       } as CSSProperties}
     >
       <Sidebar
@@ -3209,7 +3246,10 @@ function App() {
       <SettingsModal
         open={showSettingsModal}
         themePreference={themePreference}
+        chatFontSize={chatFontSize}
+        chatFontSizeOptions={CHAT_FONT_SIZE_OPTIONS}
         onThemePreferenceChange={setThemePreference}
+        onChatFontSizeChange={setChatFontSize}
         onClose={() => setShowSettingsModal(false)}
       />
 
