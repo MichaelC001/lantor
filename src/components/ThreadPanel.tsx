@@ -862,13 +862,13 @@ export function ThreadPanel({
               onClose={() => setMessageMenu(null)}
             />
           )}
+          </div>
           {activeRoot && showBackToBottom && (
             <button type="button" className="thread-back-to-bottom" onClick={returnThreadToBottom}>
               <ArrowDown size={15} />
               Back to bottom
             </button>
           )}
-        </div>
         </div>
 
         <ThreadReplyComposer
