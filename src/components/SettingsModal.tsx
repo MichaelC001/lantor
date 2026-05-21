@@ -7,6 +7,9 @@ export type ChatTextSize = "compact" | "default" | "large" | "xlarge";
 export type RefreshMetricsSummary = {
   started_at: string;
   total: number;
+  retained: number;
+  retention_minutes: number;
+  max_events: number;
   last_minute: number;
   rate_per_minute_1m: number;
   by_kind: Record<string, number>;
@@ -134,7 +137,10 @@ export function SettingsModal({
               <span className="refresh-metrics-icon" aria-hidden="true"><Activity size={17} /></span>
               <span>
                 <strong>UI refresh metrics</strong>
-                <small>Counts and reasons for app-level refreshes in this session.</small>
+                <small>
+                  Counts and reasons for app-level refreshes in this session.
+                  Keeps {refreshMetricsSummary?.retention_minutes ?? 60} min, max {refreshMetricsSummary?.max_events ?? 500} events.
+                </small>
               </span>
               <button type="button" onClick={onRefreshMetricsReset} title="Reset refresh metrics" aria-label="Reset refresh metrics">
                 <RotateCcw size={15} />
@@ -142,8 +148,8 @@ export function SettingsModal({
             </div>
             <div className="refresh-metrics-stats">
               <span>
-                <strong>{refreshMetricsSummary?.total ?? 0}</strong>
-                <small>Total</small>
+                <strong>{refreshMetricsSummary?.retained ?? 0}</strong>
+                <small>Retained</small>
               </span>
               <span>
                 <strong>{refreshMetricsSummary?.last_minute ?? 0}</strong>

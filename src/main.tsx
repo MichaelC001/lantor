@@ -98,6 +98,9 @@ type UiRefreshMetricEvent = {
 type UiRefreshMetricsSummary = {
   started_at: string;
   total: number;
+  retained: number;
+  retention_minutes: number;
+  max_events: number;
   last_minute: number;
   rate_per_minute_1m: number;
   by_kind: Record<string, number>;
@@ -123,6 +126,7 @@ declare global {
 }
 
 const UI_REFRESH_METRICS_MAX_EVENTS = 500;
+const UI_REFRESH_METRICS_RETENTION_MS = 60 * 60 * 1000;
 const UI_REFRESH_METRICS_RATE_WINDOW_MS = 60_000;
 const UI_REFRESH_METRICS_LOG_INTERVAL_MS = 15_000;
 
@@ -141,13 +145,30 @@ function countMetricValues(events: UiRefreshMetricEvent[], key: "kind" | "reason
   return counts;
 }
 
+function pruneUiRefreshMetrics(now = Date.now()) {
+  const firstRetained = uiRefreshMetricsState.events.findIndex((event) =>
+    now - Date.parse(event.at) <= UI_REFRESH_METRICS_RETENTION_MS);
+  if (firstRetained === -1) {
+    uiRefreshMetricsState.events.splice(0);
+  } else if (firstRetained > 0) {
+    uiRefreshMetricsState.events.splice(0, firstRetained);
+  }
+  if (uiRefreshMetricsState.events.length > UI_REFRESH_METRICS_MAX_EVENTS) {
+    uiRefreshMetricsState.events.splice(0, uiRefreshMetricsState.events.length - UI_REFRESH_METRICS_MAX_EVENTS);
+  }
+}
+
 function summarizeUiRefreshMetrics(): UiRefreshMetricsSummary {
   const now = Date.now();
+  pruneUiRefreshMetrics(now);
   const recentEvents = uiRefreshMetricsState.events.filter((event) =>
     now - Date.parse(event.at) <= UI_REFRESH_METRICS_RATE_WINDOW_MS);
   return {
     started_at: new Date(uiRefreshMetricsState.startedAtMs).toISOString(),
     total: uiRefreshMetricsState.nextId - 1,
+    retained: uiRefreshMetricsState.events.length,
+    retention_minutes: Math.round(UI_REFRESH_METRICS_RETENTION_MS / 60_000),
+    max_events: UI_REFRESH_METRICS_MAX_EVENTS,
     last_minute: recentEvents.length,
     rate_per_minute_1m: recentEvents.length,
     by_kind: countMetricValues(uiRefreshMetricsState.events, "kind"),
@@ -167,6 +188,7 @@ function ensureUiRefreshMetricsStore() {
         uiRefreshMetricsState.nextId = 1;
       },
       recent(limit = 25) {
+        pruneUiRefreshMetrics();
         return uiRefreshMetricsState.events.slice(-limit);
       },
       summary() {
@@ -196,9 +218,7 @@ function recordUiRefreshMetric(event: Omit<UiRefreshMetricEvent, "id" | "at" | "
   };
   uiRefreshMetricsState.nextId += 1;
   uiRefreshMetricsState.events.push(entry);
-  if (uiRefreshMetricsState.events.length > UI_REFRESH_METRICS_MAX_EVENTS) {
-    uiRefreshMetricsState.events.splice(0, uiRefreshMetricsState.events.length - UI_REFRESH_METRICS_MAX_EVENTS);
-  }
+  pruneUiRefreshMetrics(now);
   if (shouldLogUiRefreshMetrics() && now - uiRefreshMetricsState.lastLogAtMs >= UI_REFRESH_METRICS_LOG_INTERVAL_MS) {
     uiRefreshMetricsState.lastLogAtMs = now;
     console.info("[Lantor UI refresh metrics]", summarizeUiRefreshMetrics());
