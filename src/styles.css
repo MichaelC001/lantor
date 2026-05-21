@@ -1386,7 +1386,7 @@ button,
 }
 
 .agent-avatar-profile-card {
-  --agent-avatar-profile-bg: var(--bg-panel-strong, #ffffff);
+  --agent-avatar-profile-bg: var(--bg-panel, #ffffff);
   --agent-avatar-profile-border: var(--border-subtle, rgba(20, 23, 31, 0.1));
   --agent-avatar-profile-shadow: var(--surface-shadow, 0 24px 64px rgba(15, 23, 42, 0.18));
   --agent-avatar-profile-ink-primary: var(--ink-primary, #121316);
