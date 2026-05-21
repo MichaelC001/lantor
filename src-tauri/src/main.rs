@@ -37,10 +37,12 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     Row, SqlitePool,
 };
+use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::str::FromStr;
@@ -139,6 +141,9 @@ const SUPERVISOR_COMMAND_CONCURRENCY: usize = 4;
 const SUPERVISOR_IDLE_SLEEP: Duration = Duration::from_secs(2);
 const SUPERVISOR_ERROR_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const SUPERVISOR_ERROR_BACKOFF_MAX: Duration = Duration::from_secs(10);
+const UI_REFRESH_METRICS_LOG_FILE: &str = "ui-refresh-metrics.jsonl";
+const UI_REFRESH_METRICS_TTL_SECS: i64 = 24 * 60 * 60;
+const UI_REFRESH_METRICS_MAX_BYTES: usize = 5 * 1024 * 1024;
 pub(crate) fn expand_home_path(value: &str) -> String {
     let value = value.trim();
     if value == "~" {
@@ -220,6 +225,104 @@ fn sqlite_database_file_path(database_url: &str) -> CommandResult<Option<PathBuf
     }
     let options = SqliteConnectOptions::from_str(database_url).map_err(to_string)?;
     Ok(Some(options.get_filename().to_path_buf()))
+}
+
+fn should_keep_ui_refresh_metric_line(line: &str, cutoff: DateTime<Utc>) -> bool {
+    let Ok(entry) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    entry
+        .get("logged_at")
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|logged_at| logged_at.with_timezone(&Utc) >= cutoff)
+        .unwrap_or(false)
+}
+
+fn trim_ui_refresh_metric_lines_to_size(lines: Vec<String>) -> Vec<String> {
+    let mut total_bytes = 0usize;
+    let mut retained = Vec::new();
+    for line in lines.into_iter().rev() {
+        let line_bytes = line.len() + 1;
+        if total_bytes + line_bytes > UI_REFRESH_METRICS_MAX_BYTES && !retained.is_empty() {
+            break;
+        }
+        total_bytes += line_bytes;
+        retained.push(line);
+    }
+    retained.reverse();
+    retained
+}
+
+fn prune_ui_refresh_metrics_log(log_path: &Path) -> CommandResult<()> {
+    if !log_path.is_file() {
+        return Ok(());
+    }
+
+    let cutoff = Utc::now() - chrono::Duration::seconds(UI_REFRESH_METRICS_TTL_SECS);
+    let file = fs::File::open(log_path).map_err(to_string)?;
+    let mut retained = Vec::new();
+    let mut changed = false;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(to_string)?;
+        if line.trim().is_empty() {
+            changed = true;
+            continue;
+        }
+        if should_keep_ui_refresh_metric_line(&line, cutoff) {
+            retained.push(line);
+        } else {
+            changed = true;
+        }
+    }
+
+    let size_before = retained.iter().map(|line| line.len() + 1).sum::<usize>();
+    let retained = trim_ui_refresh_metric_lines_to_size(retained);
+    if retained.iter().map(|line| line.len() + 1).sum::<usize>() != size_before {
+        changed = true;
+    }
+    if !changed {
+        return Ok(());
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(log_path)
+        .map_err(to_string)?;
+    for line in retained {
+        writeln!(file, "{line}").map_err(to_string)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn append_ui_refresh_metrics_log(
+    database_url: &str,
+    metric: Value,
+) -> CommandResult<()> {
+    let Some(database_path) = sqlite_database_file_path(database_url)? else {
+        eprintln!("[lantor-refresh] {metric}");
+        return Ok(());
+    };
+    let log_path = database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(UI_REFRESH_METRICS_LOG_FILE);
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).map_err(to_string)?;
+    }
+    prune_ui_refresh_metrics_log(&log_path)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(to_string)?;
+    let entry = serde_json::json!({
+        "logged_at": Utc::now(),
+        "metric": metric,
+    });
+    writeln!(file, "{entry}").map_err(to_string)?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -631,6 +734,11 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 #[tauri::command]
 async fn bootstrap(state: State<'_, AppState>) -> CommandResult<Bootstrap> {
     load_bootstrap(&state.pool, state.db_url.clone()).await
+}
+
+#[tauri::command]
+fn record_ui_refresh_metric(state: State<'_, AppState>, metric: Value) -> CommandResult<()> {
+    append_ui_refresh_metrics_log(&state.db_url, metric)
 }
 
 fn configured_web_base_url() -> Option<String> {
@@ -1918,6 +2026,7 @@ pub fn run() {
             mark_channel_read,
             open_dm_with_agent,
             open_external_url,
+            record_ui_refresh_metric,
             retry_agent_work,
             send_message,
             set_message_saved,

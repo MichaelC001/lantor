@@ -19,7 +19,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
 use tokio::{
     net::TcpListener,
@@ -47,8 +47,8 @@ use crate::owner_inbox::{
 use crate::task_store::{update_task_status_in_pool, update_task_title_in_pool};
 use crate::ui_notifications::notify_ui_refresh;
 use crate::{
-    cancel_agent_work_in_pool, check_runtime_in_env, claim_task_in_pool, load_bootstrap,
-    retry_agent_work_in_pool, to_string,
+    append_ui_refresh_metrics_log, cancel_agent_work_in_pool, check_runtime_in_env,
+    claim_task_in_pool, load_bootstrap, retry_agent_work_in_pool, to_string,
 };
 
 const WEB_SEND_MESSAGE_BODY_LIMIT: usize = 128 * 1024 * 1024;
@@ -79,6 +79,11 @@ struct SendMessageRequest {
 #[serde(rename_all = "camelCase")]
 struct RuntimeCheckRequest {
     runtime: String,
+}
+
+#[derive(Deserialize)]
+struct UiRefreshMetricRequest {
+    metric: Value,
 }
 
 #[derive(Deserialize)]
@@ -288,6 +293,10 @@ fn web_router(state: Arc<WebState>, dist_dir: PathBuf) -> Router {
         .route("/api/health", get(api_health))
         .route("/api/bootstrap", get(api_bootstrap))
         .route("/api/check_runtime", post(api_check_runtime))
+        .route(
+            "/api/record_ui_refresh_metric",
+            post(api_record_ui_refresh_metric),
+        )
         .route("/api/events", get(api_events))
         .route("/api/attachments/{attachment_id}", get(api_attachment))
         .route(
@@ -400,6 +409,15 @@ async fn api_check_runtime(
     check_runtime_in_env(request.runtime)
         .await
         .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_record_ui_refresh_metric(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<UiRefreshMetricRequest>,
+) -> Result<impl IntoResponse, Response> {
+    append_ui_refresh_metrics_log(&state.db_url, request.metric)
+        .map(|_| Json(json!({ "ok": true })))
         .map_err(api_error)
 }
 

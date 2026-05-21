@@ -68,12 +68,41 @@ type BenchmarkCommit = {
   commitTime: number;
 };
 
+type RefreshMetricsSnapshot = {
+  startedAt: number;
+  bootstrapCount: number;
+  bootstrapByReason: Record<string, number>;
+  bootstrapBySource: Record<string, number>;
+  requestCount: number;
+  requestByReason: Record<string, number>;
+  coalescedRequestCount: number;
+  coalescedRequestByReason: Record<string, number>;
+  queuedRequestCount: number;
+  queuedRequestByReason: Record<string, number>;
+  stateUpdateCount: number;
+  stateUpdateByReason: Record<string, number>;
+  lastBootstrapAt: number | null;
+  lastBootstrapReason: string | null;
+};
+
+type RefreshMetrics = RefreshMetricsSnapshot & {
+  lastSummaryAt: number;
+};
+
+type RefreshRequest = {
+  reason: string;
+  source: string;
+  fallback: string;
+  includeOptimistic: boolean;
+};
+
 declare global {
   interface Window {
     __LANTOR_BENCH_PROFILER__?: {
       commits: BenchmarkCommit[];
       reset: () => void;
     };
+    __LANTOR_REFRESH_METRICS__?: RefreshMetricsSnapshot;
   }
 }
 
@@ -105,6 +134,63 @@ const recordBenchCommit: ProfilerOnRenderCallback = (id, phase, actualDuration, 
     commitTime,
   });
 };
+
+function createRefreshMetrics(): RefreshMetrics {
+  const now = Date.now();
+  return {
+    startedAt: now,
+    bootstrapCount: 0,
+    bootstrapByReason: {},
+    bootstrapBySource: {},
+    requestCount: 0,
+    requestByReason: {},
+    coalescedRequestCount: 0,
+    coalescedRequestByReason: {},
+    queuedRequestCount: 0,
+    queuedRequestByReason: {},
+    stateUpdateCount: 0,
+    stateUpdateByReason: {},
+    lastBootstrapAt: null,
+    lastBootstrapReason: null,
+    lastSummaryAt: now,
+  };
+}
+
+function incrementMetric(bucket: Record<string, number>, key: string) {
+  bucket[key] = (bucket[key] ?? 0) + 1;
+}
+
+function metricRatePerMinute(count: number, startedAt: number, now: number) {
+  const minutes = Math.max((now - startedAt) / 60_000, 1 / 60);
+  return Number((count / minutes).toFixed(2));
+}
+
+function topMetricEntries(bucket: Record<string, number>) {
+  return Object.fromEntries(
+    Object.entries(bucket)
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 12),
+  );
+}
+
+function refreshMetricsSnapshot(metrics: RefreshMetrics): RefreshMetricsSnapshot {
+  return {
+    startedAt: metrics.startedAt,
+    bootstrapCount: metrics.bootstrapCount,
+    bootstrapByReason: { ...metrics.bootstrapByReason },
+    bootstrapBySource: { ...metrics.bootstrapBySource },
+    requestCount: metrics.requestCount,
+    requestByReason: { ...metrics.requestByReason },
+    coalescedRequestCount: metrics.coalescedRequestCount,
+    coalescedRequestByReason: { ...metrics.coalescedRequestByReason },
+    queuedRequestCount: metrics.queuedRequestCount,
+    queuedRequestByReason: { ...metrics.queuedRequestByReason },
+    stateUpdateCount: metrics.stateUpdateCount,
+    stateUpdateByReason: { ...metrics.stateUpdateByReason },
+    lastBootstrapAt: metrics.lastBootstrapAt,
+    lastBootstrapReason: metrics.lastBootstrapReason,
+  };
+}
 
 const ACTIVITY_PHASE_LABELS: Record<string, string> = {
   thinking: "Thinking",
@@ -158,6 +244,7 @@ const MOBILE_EDGE_SWIPE_MAX_VERTICAL_PX = 48;
 const MOBILE_SIDEBAR_PEEK_PX = 18;
 const MOBILE_SIDEBAR_FLING_VELOCITY = 0.45;
 const SAVED_MESSAGES_READ_DISMISS_ID = "saved-messages";
+const REFRESH_METRICS_SUMMARY_MS = 30_000;
 const CHAT_TEXT_SIZE_OPTIONS: ChatTextSize[] = ["compact", "default", "large", "xlarge"];
 const UI_TYPE_SCALE: Record<ChatTextSize, Record<string, string>> = {
   compact: {
@@ -731,11 +818,13 @@ function App() {
   const [dismissedActivityFeedItems, setDismissedActivityFeedItems] = useState<Record<string, string>>({});
   const [readActivityFeedItems, setReadActivityFeedItems] = useState<Record<string, string>>({});
   const [locallyUnfollowedThreadIds, setLocallyUnfollowedThreadIds] = useState<Set<string>>(() => new Set());
+  const refreshMetricsRef = useRef<RefreshMetrics>(createRefreshMetrics());
   const knownMessageIdsRef = useRef<Set<string> | null>(null);
   const refreshTimerRef = useRef<number | null>(null);
   const refreshInFlightRef = useRef(false);
-  const refreshQueuedRef = useRef(false);
-  const messageDeltaBufferRef = useRef<Map<string, { append: string; deliveryState: Message["delivery_state"] }>>(new Map());
+  const refreshQueuedRequestRef = useRef<RefreshRequest | null>(null);
+  const pendingRefreshRequestRef = useRef<RefreshRequest | null>(null);
+  const messageDeltaBufferRef = useRef<Map<string, { append: string; deliveryState: Message["delivery_state"]; reason: string }>>(new Map());
   const optimisticMessagesRef = useRef<Map<string, Message>>(new Map());
   const optimisticAttachmentUrlsRef = useRef<Map<string, string[]>>(new Map());
   const messageDeltaFlushTimerRef = useRef<number | null>(null);
@@ -816,9 +905,118 @@ function App() {
     };
   }
 
-  async function refresh(includeOptimistic = true) {
+  function publishRefreshMetrics() {
+    window.__LANTOR_REFRESH_METRICS__ = refreshMetricsSnapshot(refreshMetricsRef.current);
+  }
+
+  function writeRefreshMetric(metric: Record<string, unknown>) {
+    void apiInvoke("record_ui_refresh_metric", { metric }).catch((err) => {
+      console.warn("Failed to write Lantor refresh metric", err);
+    });
+  }
+
+  function normalizeRefreshRequest(request: Partial<RefreshRequest> = {}): RefreshRequest {
+    return {
+      reason: request.reason ?? "manual",
+      source: request.source ?? "direct",
+      fallback: request.fallback ?? `Failed to refresh ${APP_DISPLAY_NAME} state`,
+      includeOptimistic: request.includeOptimistic ?? true,
+    };
+  }
+
+  function recordRefreshRequest(request: RefreshRequest) {
+    const metrics = refreshMetricsRef.current;
+    metrics.requestCount += 1;
+    incrementMetric(metrics.requestByReason, request.reason);
+    publishRefreshMetrics();
+  }
+
+  function recordCoalescedRefreshRequest(request: RefreshRequest) {
+    const metrics = refreshMetricsRef.current;
+    metrics.coalescedRequestCount += 1;
+    incrementMetric(metrics.coalescedRequestByReason, request.reason);
+    publishRefreshMetrics();
+  }
+
+  function recordQueuedRefreshRequest(request: RefreshRequest) {
+    const metrics = refreshMetricsRef.current;
+    metrics.queuedRequestCount += 1;
+    incrementMetric(metrics.queuedRequestByReason, request.reason);
+    publishRefreshMetrics();
+  }
+
+  function recordStateUpdate(reason: string) {
+    const metrics = refreshMetricsRef.current;
+    metrics.stateUpdateCount += 1;
+    incrementMetric(metrics.stateUpdateByReason, reason);
+    publishRefreshMetrics();
+  }
+
+  function recordBootstrapRefresh(request: RefreshRequest, durationMs: number) {
+    const metrics = refreshMetricsRef.current;
+    const now = Date.now();
+    const previousBootstrapAt = metrics.lastBootstrapAt;
+    metrics.bootstrapCount += 1;
+    metrics.lastBootstrapAt = now;
+    metrics.lastBootstrapReason = request.reason;
+    incrementMetric(metrics.bootstrapByReason, request.reason);
+    incrementMetric(metrics.bootstrapBySource, request.source);
+    publishRefreshMetrics();
+    const metric = {
+      type: "bootstrap",
+      count: metrics.bootstrapCount,
+      reason: request.reason,
+      source: request.source,
+      durationMs: Number(durationMs.toFixed(1)),
+      intervalMs: previousBootstrapAt === null ? null : now - previousBootstrapAt,
+      perMinute: metricRatePerMinute(metrics.bootstrapCount, metrics.startedAt, now),
+    };
+    console.info("[lantor-refresh] bootstrap", metric);
+    writeRefreshMetric(metric);
+  }
+
+  function logRefreshMetricsSummary(label = "periodic") {
+    const metrics = refreshMetricsRef.current;
+    const now = Date.now();
+    metrics.lastSummaryAt = now;
+    publishRefreshMetrics();
+    const metric = {
+      type: "summary",
+      label,
+      uptimeMs: now - metrics.startedAt,
+      bootstrap: {
+        count: metrics.bootstrapCount,
+        perMinute: metricRatePerMinute(metrics.bootstrapCount, metrics.startedAt, now),
+        byReason: topMetricEntries(metrics.bootstrapByReason),
+        bySource: topMetricEntries(metrics.bootstrapBySource),
+        lastReason: metrics.lastBootstrapReason,
+      },
+      requests: {
+        count: metrics.requestCount,
+        coalesced: metrics.coalescedRequestCount,
+        queued: metrics.queuedRequestCount,
+        byReason: topMetricEntries(metrics.requestByReason),
+        coalescedByReason: topMetricEntries(metrics.coalescedRequestByReason),
+        queuedByReason: topMetricEntries(metrics.queuedRequestByReason),
+      },
+      stateUpdates: {
+        count: metrics.stateUpdateCount,
+        perMinute: metricRatePerMinute(metrics.stateUpdateCount, metrics.startedAt, now),
+        byReason: topMetricEntries(metrics.stateUpdateByReason),
+      },
+    };
+    console.info("[lantor-refresh] summary", metric);
+    writeRefreshMetric(metric);
+  }
+
+  async function refresh(request: Partial<RefreshRequest> | boolean = {}) {
+    const normalizedRequest = typeof request === "boolean"
+      ? normalizeRefreshRequest({ includeOptimistic: request })
+      : normalizeRefreshRequest(request);
+    const startedAt = performance.now();
     const next = normalizeBootstrap(await apiInvoke<Bootstrap>("bootstrap"));
-    setData(includeOptimistic ? withOptimisticMessages(next) : next);
+    recordBootstrapRefresh(normalizedRequest, performance.now() - startedAt);
+    setData(normalizedRequest.includeOptimistic ? withOptimisticMessages(next) : next);
     setActiveChannelId((prev) => {
       if (next.channels.some((item) => item.id === prev)) return prev;
       return next.channels[0]?.id || "";
@@ -830,39 +1028,54 @@ function App() {
     });
   }
 
-  function refreshWithError(fallback: string) {
+  function refreshWithError(request: RefreshRequest) {
     if (refreshInFlightRef.current) {
-      refreshQueuedRef.current = true;
+      refreshQueuedRequestRef.current = request;
+      recordQueuedRefreshRequest(request);
       return;
     }
     refreshInFlightRef.current = true;
-    refresh()
+    refresh(request)
       .catch((err) => {
-        setAppError(errorMessage(err, fallback));
+        setAppError(errorMessage(err, request.fallback));
         console.error(err);
       })
       .finally(() => {
         refreshInFlightRef.current = false;
-        if (refreshQueuedRef.current) {
-          refreshQueuedRef.current = false;
-          requestRefresh(fallback);
+        if (refreshQueuedRequestRef.current) {
+          const queuedRequest = refreshQueuedRequestRef.current;
+          refreshQueuedRequestRef.current = null;
+          requestRefresh(queuedRequest);
         }
       });
   }
 
-  function requestRefresh(fallback = `Failed to refresh ${APP_DISPLAY_NAME} state`) {
-    if (refreshTimerRef.current !== null) return;
+  function requestRefresh(request: Partial<RefreshRequest> = {}) {
+    const normalizedRequest = normalizeRefreshRequest(request);
+    recordRefreshRequest(normalizedRequest);
+    if (refreshTimerRef.current !== null) {
+      recordCoalescedRefreshRequest(normalizedRequest);
+      return;
+    }
+    pendingRefreshRequestRef.current = normalizedRequest;
     refreshTimerRef.current = window.setTimeout(() => {
+      const pendingRequest = pendingRefreshRequestRef.current ?? normalizedRequest;
+      pendingRefreshRequestRef.current = null;
       refreshTimerRef.current = null;
-      refreshWithError(fallback);
+      refreshWithError(pendingRequest);
     }, UI_REFRESH_DEBOUNCE_MS);
   }
 
-  function applyMessageUpsert(message: Message) {
+  function applyMessageUpsert(message: Message, reason: string) {
     messageDeltaBufferRef.current.delete(message.id);
+    recordStateUpdate(reason);
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message update`);
+        requestRefresh({
+          reason: `${reason}:missing_local_data`,
+          source: "backend_event",
+          fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after message update`,
+        });
         return current;
       }
       const existingIndex = current.messages.findIndex((item) => item.id === message.id);
@@ -890,9 +1103,15 @@ function App() {
     if (messageDeltaBufferRef.current.size === 0) return;
     const deltas = messageDeltaBufferRef.current;
     messageDeltaBufferRef.current = new Map();
+    const deltaReasons = new Set(Array.from(deltas.values()).map((delta) => delta.reason));
+    recordStateUpdate(deltaReasons.size === 1 ? (deltaReasons.values().next().value ?? "message_delta") : "message_delta:mixed");
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message delta`);
+        requestRefresh({
+          reason: "message_delta:missing_local_data",
+          source: "backend_event",
+          fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after message delta`,
+        });
         return current;
       }
       let missing = false;
@@ -910,18 +1129,23 @@ function App() {
         }
       }
       if (missing) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message delta`);
+        requestRefresh({
+          reason: "message_delta:missing_message",
+          source: "backend_event",
+          fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after message delta`,
+        });
       }
       if (!changed) return current;
       return { ...current, messages };
     });
   }
 
-  function queueMessageDelta(messageId: string, append: string, deliveryState: Message["delivery_state"]) {
+  function queueMessageDelta(messageId: string, append: string, deliveryState: Message["delivery_state"], reason: string) {
     const existing = messageDeltaBufferRef.current.get(messageId);
     messageDeltaBufferRef.current.set(messageId, {
       append: `${existing?.append ?? ""}${append}`,
       deliveryState,
+      reason,
     });
     if (messageDeltaFlushTimerRef.current !== null) return;
     messageDeltaFlushTimerRef.current = window.setTimeout(() => {
@@ -929,21 +1153,31 @@ function App() {
     }, 50);
   }
 
-  function applyMessageDelete(messageId: string) {
+  function applyMessageDelete(messageId: string, reason: string) {
     messageDeltaBufferRef.current.delete(messageId);
+    recordStateUpdate(reason);
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message deletion`);
+        requestRefresh({
+          reason: `${reason}:missing_local_data`,
+          source: "backend_event",
+          fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after message deletion`,
+        });
         return current;
       }
       return { ...current, messages: current.messages.filter((item) => item.id !== messageId) };
     });
   }
 
-  function applyActivityUpsert(activity: AgentActivity) {
+  function applyActivityUpsert(activity: AgentActivity, reason: string) {
+    recordStateUpdate(reason);
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after activity update`);
+        requestRefresh({
+          reason: `${reason}:missing_local_data`,
+          source: "backend_event",
+          fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after activity update`,
+        });
         return current;
       }
       const existingIndex = current.agent_activities.findIndex((item) => item.id === activity.id);
@@ -954,10 +1188,15 @@ function App() {
     });
   }
 
-  function applyAgentRunUpsert(patch: Omit<AgentRun, "log"> & { log?: string }) {
+  function applyAgentRunUpsert(patch: Omit<AgentRun, "log"> & { log?: string }, reason: string) {
+    recordStateUpdate(reason);
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after run update`);
+        requestRefresh({
+          reason: `${reason}:missing_local_data`,
+          source: "backend_event",
+          fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after run update`,
+        });
         return current;
       }
       const existing = current.agent_runs.find((item) => item.id === patch.id);
@@ -973,10 +1212,15 @@ function App() {
     });
   }
 
-  function applyWorkItemUpsert(patch: Omit<AgentWorkItem, "context"> & { context?: string }) {
+  function applyWorkItemUpsert(patch: Omit<AgentWorkItem, "context"> & { context?: string }, reason: string) {
+    recordStateUpdate(reason);
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after agent request update`);
+        requestRefresh({
+          reason: `${reason}:missing_local_data`,
+          source: "backend_event",
+          fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after agent request update`,
+        });
         return current;
       }
       const existing = current.agent_work_items.find((item) => item.id === patch.id);
@@ -993,14 +1237,23 @@ function App() {
     });
   }
 
-  function applyArtifactUpsert(artifact: Artifact) {
+  function applyArtifactUpsert(artifact: Artifact, reason: string) {
     if (!artifact || typeof artifact.id !== "string" || typeof artifact.message_id !== "string") {
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`);
+      requestRefresh({
+        reason: `${reason}:invalid_payload`,
+        source: "backend_event",
+        fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`,
+      });
       return;
     }
+    recordStateUpdate(reason);
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`);
+        requestRefresh({
+          reason: `${reason}:missing_local_data`,
+          source: "backend_event",
+          fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`,
+        });
         return current;
       }
       const currentArtifacts = Array.isArray(current.artifacts) ? current.artifacts : [];
@@ -1036,7 +1289,11 @@ function App() {
   function handleBackendEvent(payload: unknown) {
     try {
       if (typeof payload !== "string") {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`);
+        requestRefresh({
+          reason: "backend_event:non_string_payload",
+          source: "backend_event",
+          fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after backend update`,
+        });
         return;
       }
       const parsed = JSON.parse(payload) as UiBackendEvent;
@@ -1046,46 +1303,64 @@ function App() {
         }
         return;
       }
+      const eventReason = parsed.reason ?? parsed.type;
+      if (parsed.type === "refresh") {
+        requestRefresh({
+          reason: eventReason,
+          source: "backend_event",
+          fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after backend update`,
+        });
+        return;
+      }
       if (parsed.type === "message_upsert") {
-        applyMessageUpsert(parsed.message);
+        applyMessageUpsert(parsed.message, eventReason);
         return;
       }
       if (parsed.type === "message_delta") {
-        queueMessageDelta(parsed.message_id, parsed.append, parsed.delivery_state);
+        queueMessageDelta(parsed.message_id, parsed.append, parsed.delivery_state, eventReason);
         return;
       }
       if (parsed.type === "message_delete") {
-        applyMessageDelete(parsed.message_id);
+        applyMessageDelete(parsed.message_id, eventReason);
         return;
       }
       if (parsed.type === "activity_upsert") {
-        applyActivityUpsert(parsed.activity);
+        applyActivityUpsert(parsed.activity, eventReason);
         return;
       }
       if (parsed.type === "agent_run_upsert") {
-        applyAgentRunUpsert(parsed.run);
+        applyAgentRunUpsert(parsed.run, eventReason);
         return;
       }
       if (parsed.type === "work_item_upsert") {
-        applyWorkItemUpsert(parsed.work_item);
+        applyWorkItemUpsert(parsed.work_item, eventReason);
         return;
       }
       if (parsed.type === "artifact_upsert") {
-        applyArtifactUpsert(parsed.artifact);
+        applyArtifactUpsert(parsed.artifact, eventReason);
         return;
       }
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`);
+      const unknownEventType = String((parsed as { type?: unknown }).type ?? "unknown");
+      requestRefresh({
+        reason: `backend_event:unknown:${unknownEventType}`,
+        source: "backend_event",
+        fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after backend update`,
+      });
     } catch (err) {
       setAppError(errorMessage(err, `Failed to apply ${APP_DISPLAY_NAME} backend update`));
       console.error(`Failed to apply ${APP_DISPLAY_NAME} backend update`, err, payload);
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`);
+      requestRefresh({
+        reason: "backend_event:parse_or_apply_error",
+        source: "backend_event",
+        fallback: `Failed to refresh ${APP_DISPLAY_NAME} state after backend update`,
+      });
     }
   }
 
   async function mutate<T = unknown>(command: string, args: Record<string, unknown> = {}): Promise<T> {
     try {
       const result = await apiInvoke<T>(command, args);
-      await refresh();
+      await refresh({ reason: `mutation:${command}`, source: "mutation" });
       return result;
     } catch (err) {
       const message = errorMessage(err, `${command} failed`);
@@ -1096,7 +1371,8 @@ function App() {
   }
 
   useEffect(() => {
-    refresh().catch((err) => {
+    publishRefreshMetrics();
+    refresh({ reason: "initial_load", source: "startup" }).catch((err) => {
       setAppError(errorMessage(err, `Failed to load ${APP_DISPLAY_NAME} state`));
       console.error(err);
     });
@@ -1110,6 +1386,16 @@ function App() {
     if (!data || showOwnerProfileModal) return;
     setOwnerProfileDraft(ownerProfileToForm(data.owner_profile));
   }, [data?.owner_profile, showOwnerProfileModal]);
+
+  useEffect(() => {
+    const summaryTimer = window.setInterval(() => {
+      logRefreshMetricsSummary();
+    }, REFRESH_METRICS_SUMMARY_MS);
+    return () => {
+      logRefreshMetricsSummary("shutdown");
+      window.clearInterval(summaryTimer);
+    };
+  }, []);
 
   useEffect(() => {
     function isFileDrag(event: DragEvent) {
@@ -1152,7 +1438,11 @@ function App() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state`);
+      requestRefresh({
+        reason: "poll_5s",
+        source: "poll",
+        fallback: `Failed to refresh ${APP_DISPLAY_NAME} state`,
+      });
     }, 5000);
     return () => window.clearInterval(timer);
   }, []);
@@ -2650,7 +2940,7 @@ function App() {
       workingDirectory: nextForm.workingDirectory,
       dailyBudgetMicros: budgetMicrosFromForm(nextForm.dailyBudgetUsd),
     });
-    await refresh();
+    await refresh({ reason: "mutation:create_agent", source: "mutation" });
     setAgentDraft(newAgentDraft());
     setShowCreateAgentModal(false);
     setReturnToCreateChannelAfterAgent(false);
@@ -2784,7 +3074,7 @@ function App() {
         asTask: sendAsTask,
         attachments: await attachmentUploads(attachments),
       });
-      await refresh(false);
+      await refresh({ reason: "mutation:send_message:root", source: "mutation", includeOptimistic: false });
       finalizeOptimisticMessage(optimisticId);
     } catch (err) {
       removeOptimisticMessage(optimisticId);
@@ -2798,7 +3088,7 @@ function App() {
   async function openDmWithAgent(agent: Agent) {
     try {
       const channelId = await apiInvoke<string>("open_dm_with_agent", { agentId: agent.id });
-      await refresh();
+      await refresh({ reason: "mutation:open_dm_with_agent", source: "mutation" });
       setActiveChannelId(channelId);
       restoreRememberedThreadForChannel(channelId);
       setActiveTab("chat");
@@ -2825,7 +3115,7 @@ function App() {
         asTask: false,
         attachments: await attachmentUploads(attachments),
       });
-      await refresh(false);
+      await refresh({ reason: "mutation:send_message:reply", source: "mutation", includeOptimistic: false });
       finalizeOptimisticMessage(optimisticId);
     } catch (err) {
       removeOptimisticMessage(optimisticId);
@@ -2978,14 +3268,14 @@ function App() {
       operations.push(apiInvoke("mark_channel_read", { channelId: item.channelId }));
     }
     await Promise.all(operations);
-    await refresh();
+    await refresh({ reason: "mutation:activity_feed_item_read", source: "mutation" });
   }
 
   async function dismissActivityFeedItem(item: ActivityFeedItem) {
     const dismissedUntil = activityFeedItemCutoff(item);
     setDismissedActivityFeedItems((current) => ({ ...current, [item.dismissId]: dismissedUntil }));
     await persistDismissedActivityFeedItems([item], dismissedUntil);
-    await refresh();
+    await refresh({ reason: "mutation:activity_feed_item_dismiss", source: "mutation" });
   }
 
   async function dismissActivityFeedItems(items: ActivityFeedItem[]) {
@@ -3006,7 +3296,7 @@ function App() {
       return next;
     });
     await persistDismissedActivityFeedItems(items, (item) => cutoffByDismissId.get(item.dismissId) ?? item.timestamp);
-    await refresh();
+    await refresh({ reason: "mutation:activity_feed_items_dismiss", source: "mutation" });
   }
 
   async function markAllActivityFeedRead(items: ActivityFeedItem[]) {
@@ -3045,7 +3335,7 @@ function App() {
         (channelId) => apiInvoke("mark_channel_read", { channelId }),
       ),
     ]);
-    await refresh();
+    await refresh({ reason: "mutation:activity_feed_mark_all_read", source: "mutation" });
   }
 
   function startSidebarResize(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -3160,7 +3450,14 @@ function App() {
           {appError ? (
             <>
               <p>{appError}</p>
-              <button type="button" onClick={() => refreshWithError(`Failed to load ${APP_DISPLAY_NAME} state`)}>
+              <button
+                type="button"
+                onClick={() => refreshWithError(normalizeRefreshRequest({
+                  reason: "retry_initial_load",
+                  source: "manual",
+                  fallback: `Failed to load ${APP_DISPLAY_NAME} state`,
+                }))}
+              >
                 Retry
               </button>
             </>
