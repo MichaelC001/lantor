@@ -2884,15 +2884,27 @@ mark {
 }
 
 .activity-progress-dock {
+  --activity-progress-bg: var(--bg-panel);
+  --activity-progress-border: var(--border-strong);
+  --activity-progress-shadow: var(--surface-shadow);
+  --activity-progress-ink: var(--ink-secondary);
+  --activity-progress-title-ink: var(--ink-primary);
+  --activity-progress-muted-ink: var(--ink-muted);
+  --activity-progress-avatar-ring: var(--bg-panel);
   position: sticky;
   top: 10px;
   z-index: 5;
   width: min(520px, calc(100% - 32px));
   margin: 8px auto;
-  color: #4f5f72;
+  color: var(--activity-progress-ink);
   font-size: var(--type-size-meta);
   container-type: inline-size;
   container-name: activity-progress-dock;
+}
+
+:root[data-theme="dark"] .activity-progress-dock {
+  --activity-progress-bg: var(--bg-panel-strong);
+  --activity-progress-avatar-ring: var(--bg-panel-strong);
 }
 
 .activity-progress-dock summary {
@@ -2902,21 +2914,18 @@ mark {
   gap: 9px;
   min-height: 42px;
   padding: 7px 9px 7px 7px;
-  border: 1px solid var(--surface-border);
+  border: 1px solid var(--activity-progress-border);
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.1);
+  background: var(--activity-progress-bg);
+  box-shadow: var(--activity-progress-shadow);
   cursor: pointer;
   list-style: none;
-  backdrop-filter: blur(14px);
 }
 
 .activity-progress-dock summary[data-state="provider-retrying"] {
-  border-color: rgba(255, 159, 10, 0.28);
-  background: linear-gradient(180deg, rgba(255, 250, 238, 0.98), rgba(255, 255, 255, 0.94));
-  box-shadow:
-    0 12px 30px rgba(15, 23, 42, 0.1),
-    inset 0 0 0 1px rgba(255, 159, 10, 0.08);
+  border-color: var(--status-warning-border);
+  background: var(--activity-progress-bg);
+  box-shadow: var(--activity-progress-shadow);
 }
 
 .activity-progress-dock summary[data-state="queued"] {
@@ -2936,7 +2945,7 @@ mark {
 .activity-progress-avatar-stack .agent-avatar {
   flex: 0 0 auto;
   box-shadow:
-    0 0 0 2px rgba(255, 255, 255, 0.95),
+    0 0 0 2px var(--activity-progress-avatar-ring),
     0 8px 18px rgba(20, 22, 28, 0.16);
 }
 
@@ -2952,7 +2961,7 @@ mark {
 
 .activity-progress-copy strong {
   overflow: hidden;
-  color: #253143;
+  color: var(--activity-progress-title-ink);
   font-size: var(--type-size-meta);
   font-weight: var(--type-weight-semibold);
   line-height: 18px;
@@ -2966,7 +2975,7 @@ mark {
   gap: 5px;
   min-width: 0;
   min-height: 18px;
-  color: rgba(79, 95, 114, 0.82);
+  color: var(--activity-progress-muted-ink);
   font-size: var(--type-size-caption);
   font-style: normal;
   line-height: 18px;
@@ -2990,7 +2999,7 @@ mark {
 .activity-progress-copy small span {
   flex: 0 1 auto;
   max-width: 24ch;
-  color: rgba(37, 49, 67, 0.88);
+  color: var(--activity-progress-title-ink);
   font-style: normal;
   font-weight: var(--type-weight-semibold);
 }
@@ -2998,7 +3007,7 @@ mark {
 .activity-progress-copy small em {
   flex: 1 1 0;
   min-width: 0;
-  color: rgba(79, 95, 114, 0.72);
+  color: var(--activity-progress-muted-ink);
   font-style: normal;
 }
 
@@ -3013,7 +3022,7 @@ mark {
 }
 
 .activity-progress-chevron {
-  color: rgba(79, 95, 114, 0.7);
+  color: var(--activity-progress-muted-ink);
   transition: transform 120ms ease;
 }
 
@@ -3032,15 +3041,14 @@ mark {
   max-height: min(360px, calc(100vh - 160px));
   margin: 0;
   padding: 8px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--activity-progress-border);
   border-radius: var(--radius-md);
-  background: var(--surface-floating);
-  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.12);
+  background: var(--activity-progress-bg);
+  box-shadow: var(--activity-progress-shadow);
   list-style: none;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  backdrop-filter: blur(14px);
   scroll-snap-type: y proximity;
   scroll-padding-top: 8px;
 }
