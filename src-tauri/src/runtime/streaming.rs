@@ -9,7 +9,7 @@ use crate::events::{
     control::{
         control_event_hides_empty_streaming_reply, handle_streaming_agent_event_json,
         silent_reply_reason, split_complete_streaming_agent_event_lines,
-        split_streaming_agent_event_lines,
+        split_terminal_streaming_agent_event_lines,
     },
 };
 use crate::message_store::load_message;
@@ -362,13 +362,21 @@ pub(crate) async fn finish_streaming_agent_message(
     stream_key: &str,
     delivery_state: &str,
 ) -> CommandResult<()> {
-    if let Some((agent_id, run_id, work_item_id)) =
-        load_streaming_control_context(pool, stream_key).await?
-    {
-        if consume_streaming_agent_control_lines(pool, agent_id, run_id, work_item_id, stream_key)
-            .await?
+    if delivery_state != "streaming" {
+        if let Some((agent_id, run_id, work_item_id)) =
+            load_streaming_control_context(pool, stream_key).await?
         {
-            return Ok(());
+            if consume_streaming_agent_control_lines(
+                pool,
+                agent_id,
+                run_id,
+                work_item_id,
+                stream_key,
+            )
+            .await?
+            {
+                return Ok(());
+            }
         }
     }
 
@@ -561,7 +569,7 @@ async fn consume_complete_streaming_agent_control_lines(
     let message_id: Uuid = row.get("id");
     let body: String = row.get("body");
     let (visible_body, event_jsons) = split_complete_streaming_agent_event_lines(&body);
-    if event_jsons.is_empty() && visible_body == body.trim() {
+    if event_jsons.is_empty() {
         return Ok(false);
     }
 
@@ -613,8 +621,9 @@ pub(crate) async fn consume_streaming_agent_control_lines(
     };
     let message_id: Uuid = row.get("id");
     let body: String = row.get("body");
-    let (visible_body, event_jsons) = split_streaming_agent_event_lines(&body);
-    if event_jsons.is_empty() && visible_body == body.trim() {
+    let (visible_body, event_jsons) = split_terminal_streaming_agent_event_lines(&body);
+    let body_changed = visible_body != body;
+    if event_jsons.is_empty() && !body_changed {
         return Ok(false);
     }
 
@@ -623,9 +632,10 @@ pub(crate) async fn consume_streaming_agent_control_lines(
     }
 
     if visible_body.is_empty()
-        && event_jsons
-            .iter()
-            .any(|json| control_event_hides_empty_streaming_reply(json))
+        && (body_changed
+            || event_jsons
+                .iter()
+                .any(|json| control_event_hides_empty_streaming_reply(json)))
     {
         delete_streaming_agent_message(pool, message_id, "stream_event_consumed").await?;
         return Ok(true);
