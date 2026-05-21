@@ -1,4 +1,4 @@
-import { ArrowLeft, Clock3, Inbox, Pencil, Trash2, X } from "lucide-react";
+import { ArrowLeft, Clock3, Inbox, Pencil, RotateCcw, Trash2, X } from "lucide-react";
 import { useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { apiInvoke } from "../apiClient";
 import { APP_DISPLAY_NAME } from "../branding";
@@ -48,6 +48,7 @@ type AgentDetailDrawerProps = {
   onClose: () => void;
   onDelete: (agent: Agent) => void;
   onEdit: (agent: Agent) => void;
+  onRestart: (agent: Agent) => void;
   onOpenWorkItem: (item: AgentWorkItem) => void;
   onCancelWorkItem: (item: AgentWorkItem) => void;
   onRetryWorkItem: (item: AgentWorkItem) => void;
@@ -336,6 +337,7 @@ export function AgentDetailDrawer({
   onClose,
   onDelete,
   onEdit,
+  onRestart,
   onOpenWorkItem,
   onCancelWorkItem,
   onRetryWorkItem,
@@ -349,6 +351,20 @@ export function AgentDetailDrawer({
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [activeDetailTab, setActiveDetailTab] = useState<AgentDetailTab>("activity");
   const deleteDisabled = Boolean(activeRun);
+  const agentStatus = agent.status.toLowerCase();
+  const restartDisabledReason = activeRun
+    ? "Stop the active run before restarting this agent"
+    : agentStatus === "queued" || agentStatus === "starting"
+      ? "Agent is already starting"
+      : agentStatus === "running"
+        ? "Agent is already running"
+        : agentStatus === "stopping"
+          ? "Wait for the agent to stop before restarting"
+          : agentStatus === "deleted"
+            ? "Deleted agents cannot be restarted"
+            : "";
+  const restartDisabled = Boolean(restartDisabledReason);
+  const restartLabel = agentStatus === "error" ? `Restart @${agent.handle}` : `Start @${agent.handle}`;
   const workspacePath = agent.working_directory.trim();
   const rootWorkspaceEntries = workspaceNodes[""] ?? agent.workspace_entries ?? [];
   const memoryPath = agent.workspace_memory_path || (workspacePath ? `${workspacePath}/MEMORY.md` : "");
@@ -923,6 +939,16 @@ export function AgentDetailDrawer({
             onClick={() => onEdit(agent)}
           >
             <Pencil size={16} />
+          </button>
+          <button
+            type="button"
+            className="agent-head-action"
+            disabled={restartDisabled}
+            aria-label={restartLabel}
+            title={restartDisabledReason || restartLabel}
+            onClick={() => onRestart(agent)}
+          >
+            <RotateCcw size={16} />
           </button>
           <button
             type="button"

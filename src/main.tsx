@@ -2769,6 +2769,10 @@ function App() {
     });
   }
 
+  async function restartAgent(agent: Agent) {
+    await mutate("start_agent", { agentId: agent.id });
+  }
+
   async function sendRootMessage(asTask = false, bodyOverride?: string, attachmentsOverride?: DraftAttachment[]) {
     const rawBody = bodyOverride ?? draft;
     const attachments = attachmentsOverride ?? draftAttachments;
@@ -3350,6 +3354,7 @@ function App() {
           onEdit={(agent) => {
             startEditAgent(agent);
           }}
+          onRestart={restartAgent}
           onOpenWorkItem={(item) => {
             openWorkItem(item);
             setSelectedAgentId(null);
