@@ -171,7 +171,7 @@ export function Sidebar({
       <section className="quick-actions">
         <button className="search-trigger" onClick={openSearch}>
           <Search size={18} />
-          <span>Search</span>
+          <span className="search-trigger-label">Search</span>
           <kbd>⌘K</kbd>
         </button>
         <button
@@ -179,7 +179,7 @@ export function Sidebar({
           onClick={openActivityFeed}
         >
           <Inbox size={18} />
-          <span>Activity</span>
+          <span className="sidebar-nav-trigger-label">Activity</span>
           {activityFeedUnreadCount > 0 && <UnreadBadge value={activityFeedUnreadCount} />}
         </button>
         <button
@@ -187,7 +187,7 @@ export function Sidebar({
           onClick={openSaved}
         >
           <Bookmark size={18} />
-          <span>Saved</span>
+          <span className="sidebar-nav-trigger-label">Saved</span>
           {savedUnreadCount > 0 && <UnreadBadge value={savedUnreadCount} />}
         </button>
       </section>

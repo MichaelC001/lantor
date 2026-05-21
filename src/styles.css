@@ -706,8 +706,8 @@ button,
   color: var(--muted);
 }
 
-.search-trigger span,
-.sidebar-nav-trigger span {
+.search-trigger-label,
+.sidebar-nav-trigger-label {
   color: var(--ink);
   font-size: var(--type-size-message);
   font-weight: var(--type-weight-semibold);
@@ -720,7 +720,7 @@ button,
   color: var(--accent);
 }
 
-.sidebar-nav-trigger.active span {
+.sidebar-nav-trigger.active .sidebar-nav-trigger-label {
   color: var(--accent);
 }
 
