@@ -747,7 +747,7 @@ button,
   background: var(--badge-bg);
   color: var(--badge-ink);
   font-size: var(--type-size-caption);
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: lining-nums;
   font-weight: var(--type-weight-semibold);
   line-height: 1;
   text-align: center;
