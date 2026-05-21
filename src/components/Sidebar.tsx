@@ -27,7 +27,6 @@ const SIDEBAR_SECTION_HANDLE_SPACE = 14;
 type SidebarProps = {
   data: Bootstrap;
   channel: Channel | null;
-  channelAlertIds: Set<string>;
   activityFeedUnreadCount: number;
   savedUnreadCount: number;
   openSearch: () => void;
@@ -63,7 +62,6 @@ function clampSidebarChannelsHeight(height: number, containerHeight: number) {
 export function Sidebar({
   data,
   channel,
-  channelAlertIds,
   activityFeedUnreadCount,
   savedUnreadCount,
   openSearch,
@@ -217,7 +215,7 @@ export function Sidebar({
           </div>
           <div className="sidebar-section-scroll">
             {!collapsedSections.channels && normalChannels.map((item) => {
-              const badge = item.unread_count > 0 ? String(item.unread_count) : channelAlertIds.has(item.id) ? "1" : "";
+              const badge = item.unread_count > 0 ? String(item.unread_count) : "";
               return (
                 <button
                   key={item.id}
@@ -279,13 +277,7 @@ export function Sidebar({
           </div>
           <div className="sidebar-section-scroll">
             {!collapsedSections.dms && dmRows.map(({ agent, item }) => {
-              const badge = item
-                ? item.unread_count > 0
-                  ? String(item.unread_count)
-                  : channelAlertIds.has(item.id)
-                    ? "1"
-                    : ""
-                : "";
+              const badge = item && item.unread_count > 0 ? String(item.unread_count) : "";
               return (
                 <div
                   key={agent.id}
