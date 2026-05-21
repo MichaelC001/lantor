@@ -1,15 +1,39 @@
-import { Monitor, Moon, Sun, Type } from "lucide-react";
+import { Activity, Monitor, Moon, RotateCcw, Sun, Type } from "lucide-react";
 import { Modal } from "./Modal";
 
 export type ThemePreference = "auto" | "light" | "dark";
 export type ChatTextSize = "compact" | "default" | "large" | "xlarge";
 
+export type RefreshMetricsSummary = {
+  started_at: string;
+  total: number;
+  last_minute: number;
+  rate_per_minute_1m: number;
+  by_kind: Record<string, number>;
+  by_reason: Record<string, number>;
+};
+
+export type RefreshMetricEvent = {
+  id: number;
+  at: string;
+  kind: string;
+  reason: string;
+  status: string;
+  detail?: string;
+  duration_ms?: number;
+  batch_size?: number;
+  rate_per_minute_1m: number;
+};
+
 type SettingsModalProps = {
   open: boolean;
   themePreference: ThemePreference;
   chatTextSize: ChatTextSize;
+  refreshMetricsSummary: RefreshMetricsSummary | null;
+  refreshMetricEvents: RefreshMetricEvent[];
   onThemePreferenceChange: (value: ThemePreference) => void;
   onChatTextSizeChange: (value: ChatTextSize) => void;
+  onRefreshMetricsReset: () => void;
   onClose: () => void;
 };
 
@@ -39,10 +63,19 @@ export function SettingsModal({
   open,
   themePreference,
   chatTextSize,
+  refreshMetricsSummary,
+  refreshMetricEvents,
   onThemePreferenceChange,
   onChatTextSizeChange,
+  onRefreshMetricsReset,
   onClose,
 }: SettingsModalProps) {
+  const topReasons = refreshMetricsSummary
+    ? Object.entries(refreshMetricsSummary.by_reason)
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 6)
+    : [];
+
   return (
     <Modal open={open} title="Settings" onClose={onClose} width={560}>
       <section className="settings-panel">
@@ -93,6 +126,62 @@ export function SettingsModal({
             ))}
           </div>
           <p className="settings-hint">Applies across messages, inputs, panels, and modals. Use Command +/- or Ctrl +/- to adjust without opening Settings. Command/Ctrl+0 resets.</p>
+        </fieldset>
+        <fieldset className="settings-fieldset">
+          <legend>Diagnostics</legend>
+          <section className="refresh-metrics-panel">
+            <div className="refresh-metrics-head">
+              <span className="refresh-metrics-icon" aria-hidden="true"><Activity size={17} /></span>
+              <span>
+                <strong>UI refresh metrics</strong>
+                <small>Counts and reasons for app-level refreshes in this session.</small>
+              </span>
+              <button type="button" onClick={onRefreshMetricsReset} title="Reset refresh metrics" aria-label="Reset refresh metrics">
+                <RotateCcw size={15} />
+              </button>
+            </div>
+            <div className="refresh-metrics-stats">
+              <span>
+                <strong>{refreshMetricsSummary?.total ?? 0}</strong>
+                <small>Total</small>
+              </span>
+              <span>
+                <strong>{refreshMetricsSummary?.last_minute ?? 0}</strong>
+                <small>Last minute</small>
+              </span>
+              <span>
+                <strong>{refreshMetricsSummary?.rate_per_minute_1m ?? 0}/min</strong>
+                <small>Rate</small>
+              </span>
+            </div>
+            {topReasons.length > 0 && (
+              <div className="refresh-metrics-reasons">
+                {topReasons.map(([reason, count]) => (
+                  <span key={reason}>
+                    <b>{reason}</b>
+                    <small>{count}</small>
+                  </span>
+                ))}
+              </div>
+            )}
+            <ol className="refresh-metrics-events">
+              {refreshMetricEvents.length === 0 ? (
+                <li className="empty">No refresh events recorded yet.</li>
+              ) : refreshMetricEvents.map((event) => (
+                <li key={event.id}>
+                  <time>{new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
+                  <span>
+                    <strong>{event.reason}</strong>
+                    <small>
+                      {event.kind} · {event.status}
+                      {typeof event.duration_ms === "number" ? ` · ${event.duration_ms}ms` : ""}
+                      {typeof event.batch_size === "number" ? ` · ${event.batch_size} item batch` : ""}
+                    </small>
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </section>
         </fieldset>
       </section>
     </Modal>

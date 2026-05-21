@@ -68,12 +68,140 @@ type BenchmarkCommit = {
   commitTime: number;
 };
 
+type UiRefreshMetricKind =
+  | "bootstrap_refresh"
+  | "refresh_request"
+  | "backend_event"
+  | "message_delta_flush";
+
+type UiRefreshMetricStatus =
+  | "success"
+  | "error"
+  | "scheduled"
+  | "coalesced"
+  | "queued"
+  | "skipped";
+
+type UiRefreshMetricEvent = {
+  id: number;
+  at: string;
+  elapsed_ms: number;
+  kind: UiRefreshMetricKind;
+  reason: string;
+  status: UiRefreshMetricStatus;
+  detail?: string;
+  duration_ms?: number;
+  batch_size?: number;
+  rate_per_minute_1m: number;
+};
+
+type UiRefreshMetricsSummary = {
+  started_at: string;
+  total: number;
+  last_minute: number;
+  rate_per_minute_1m: number;
+  by_kind: Record<string, number>;
+  by_reason: Record<string, number>;
+  last_event: UiRefreshMetricEvent | null;
+};
+
+type UiRefreshMetricsStore = {
+  events: UiRefreshMetricEvent[];
+  reset: () => void;
+  recent: (limit?: number) => UiRefreshMetricEvent[];
+  summary: () => UiRefreshMetricsSummary;
+};
+
 declare global {
   interface Window {
     __LANTOR_BENCH_PROFILER__?: {
       commits: BenchmarkCommit[];
       reset: () => void;
     };
+    __LANTOR_UI_REFRESH_METRICS__?: UiRefreshMetricsStore;
+  }
+}
+
+const UI_REFRESH_METRICS_MAX_EVENTS = 500;
+const UI_REFRESH_METRICS_RATE_WINDOW_MS = 60_000;
+const UI_REFRESH_METRICS_LOG_INTERVAL_MS = 15_000;
+
+const uiRefreshMetricsState = {
+  startedAtMs: Date.now(),
+  events: [] as UiRefreshMetricEvent[],
+  lastLogAtMs: 0,
+  nextId: 1,
+};
+
+function countMetricValues(events: UiRefreshMetricEvent[], key: "kind" | "reason") {
+  const counts: Record<string, number> = {};
+  for (const event of events) {
+    counts[event[key]] = (counts[event[key]] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function summarizeUiRefreshMetrics(): UiRefreshMetricsSummary {
+  const now = Date.now();
+  const recentEvents = uiRefreshMetricsState.events.filter((event) =>
+    now - Date.parse(event.at) <= UI_REFRESH_METRICS_RATE_WINDOW_MS);
+  return {
+    started_at: new Date(uiRefreshMetricsState.startedAtMs).toISOString(),
+    total: uiRefreshMetricsState.nextId - 1,
+    last_minute: recentEvents.length,
+    rate_per_minute_1m: recentEvents.length,
+    by_kind: countMetricValues(uiRefreshMetricsState.events, "kind"),
+    by_reason: countMetricValues(uiRefreshMetricsState.events, "reason"),
+    last_event: uiRefreshMetricsState.events[uiRefreshMetricsState.events.length - 1] ?? null,
+  };
+}
+
+function ensureUiRefreshMetricsStore() {
+  if (!window.__LANTOR_UI_REFRESH_METRICS__) {
+    window.__LANTOR_UI_REFRESH_METRICS__ = {
+      events: uiRefreshMetricsState.events,
+      reset() {
+        uiRefreshMetricsState.events.splice(0);
+        uiRefreshMetricsState.startedAtMs = Date.now();
+        uiRefreshMetricsState.lastLogAtMs = 0;
+        uiRefreshMetricsState.nextId = 1;
+      },
+      recent(limit = 25) {
+        return uiRefreshMetricsState.events.slice(-limit);
+      },
+      summary() {
+        return summarizeUiRefreshMetrics();
+      },
+    };
+  }
+  return window.__LANTOR_UI_REFRESH_METRICS__;
+}
+
+function shouldLogUiRefreshMetrics() {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem("lantor:refresh-metrics-log") !== "0";
+}
+
+function recordUiRefreshMetric(event: Omit<UiRefreshMetricEvent, "id" | "at" | "elapsed_ms" | "rate_per_minute_1m">) {
+  ensureUiRefreshMetricsStore();
+  const now = Date.now();
+  const recentCount = uiRefreshMetricsState.events.filter((item) =>
+    now - Date.parse(item.at) <= UI_REFRESH_METRICS_RATE_WINDOW_MS).length + 1;
+  const entry: UiRefreshMetricEvent = {
+    id: uiRefreshMetricsState.nextId,
+    at: new Date(now).toISOString(),
+    elapsed_ms: Math.round(now - uiRefreshMetricsState.startedAtMs),
+    rate_per_minute_1m: recentCount,
+    ...event,
+  };
+  uiRefreshMetricsState.nextId += 1;
+  uiRefreshMetricsState.events.push(entry);
+  if (uiRefreshMetricsState.events.length > UI_REFRESH_METRICS_MAX_EVENTS) {
+    uiRefreshMetricsState.events.splice(0, uiRefreshMetricsState.events.length - UI_REFRESH_METRICS_MAX_EVENTS);
+  }
+  if (shouldLogUiRefreshMetrics() && now - uiRefreshMetricsState.lastLogAtMs >= UI_REFRESH_METRICS_LOG_INTERVAL_MS) {
+    uiRefreshMetricsState.lastLogAtMs = now;
+    console.info("[Lantor UI refresh metrics]", summarizeUiRefreshMetrics());
   }
 }
 
@@ -658,6 +786,7 @@ function App() {
   const [showSavedModal, setShowSavedModal] = useState(false);
   const [showOwnerProfileModal, setShowOwnerProfileModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [, setRefreshMetricsTick] = useState(0);
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => getStoredThemePreference());
   const [chatTextSize, setChatTextSize] = useState<ChatTextSize>(() => getStoredChatTextSize());
   const [showMobileSidebar, setShowMobileSidebar] = useState(() => isMobileViewport());
@@ -735,7 +864,7 @@ function App() {
   const refreshTimerRef = useRef<number | null>(null);
   const refreshInFlightRef = useRef(false);
   const refreshQueuedRef = useRef(false);
-  const messageDeltaBufferRef = useRef<Map<string, { append: string; deliveryState: Message["delivery_state"] }>>(new Map());
+  const messageDeltaBufferRef = useRef<Map<string, { append: string; deliveryState: Message["delivery_state"]; reasons: string[] }>>(new Map());
   const optimisticMessagesRef = useRef<Map<string, Message>>(new Map());
   const optimisticAttachmentUrlsRef = useRef<Map<string, string[]>>(new Map());
   const messageDeltaFlushTimerRef = useRef<number | null>(null);
@@ -756,6 +885,8 @@ function App() {
       : showSavedModal
         ? "saved"
         : null;
+  const refreshMetricsSummary = showSettingsModal ? summarizeUiRefreshMetrics() : null;
+  const refreshMetricEvents = showSettingsModal ? uiRefreshMetricsState.events.slice(-12).reverse() : [];
 
   useEffect(() => {
     return () => {
@@ -766,6 +897,15 @@ function App() {
       optimisticMessagesRef.current.clear();
     };
   }, []);
+
+  useEffect(() => {
+    if (!showSettingsModal) return;
+    setRefreshMetricsTick((current) => current + 1);
+    const timer = window.setInterval(() => {
+      setRefreshMetricsTick((current) => current + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [showSettingsModal]);
 
   function setAppHistoryPosition(index: number, maxIndex?: number) {
     const nextMaxIndex = maxIndex ?? Math.max(appHistoryMaxIndexRef.current, index);
@@ -816,27 +956,52 @@ function App() {
     };
   }
 
-  async function refresh(includeOptimistic = true) {
-    const next = normalizeBootstrap(await apiInvoke<Bootstrap>("bootstrap"));
-    setData(includeOptimistic ? withOptimisticMessages(next) : next);
-    setActiveChannelId((prev) => {
-      if (next.channels.some((item) => item.id === prev)) return prev;
-      return next.channels[0]?.id || "";
-    });
-    setActiveThreadId((prev) => {
-      const rootIds = new Set(next.messages.filter((item) => !item.thread_root_id).map((item) => item.id));
-      if (prev && rootIds.has(prev)) return prev;
-      return null;
-    });
+  async function refresh(includeOptimistic = true, reason = "direct") {
+    const startedAt = performance.now();
+    try {
+      const next = normalizeBootstrap(await apiInvoke<Bootstrap>("bootstrap"));
+      setData(includeOptimistic ? withOptimisticMessages(next) : next);
+      setActiveChannelId((prev) => {
+        if (next.channels.some((item) => item.id === prev)) return prev;
+        return next.channels[0]?.id || "";
+      });
+      setActiveThreadId((prev) => {
+        const rootIds = new Set(next.messages.filter((item) => !item.thread_root_id).map((item) => item.id));
+        if (prev && rootIds.has(prev)) return prev;
+        return null;
+      });
+      recordUiRefreshMetric({
+        kind: "bootstrap_refresh",
+        reason,
+        status: "success",
+        duration_ms: Math.round(performance.now() - startedAt),
+        detail: includeOptimistic ? "bootstrap with optimistic messages" : "bootstrap without optimistic messages",
+      });
+    } catch (err) {
+      recordUiRefreshMetric({
+        kind: "bootstrap_refresh",
+        reason,
+        status: "error",
+        duration_ms: Math.round(performance.now() - startedAt),
+        detail: errorMessage(err, "bootstrap failed"),
+      });
+      throw err;
+    }
   }
 
-  function refreshWithError(fallback: string) {
+  function refreshWithError(fallback: string, reason = fallback) {
     if (refreshInFlightRef.current) {
       refreshQueuedRef.current = true;
+      recordUiRefreshMetric({
+        kind: "refresh_request",
+        reason,
+        status: "queued",
+        detail: "refresh already in flight",
+      });
       return;
     }
     refreshInFlightRef.current = true;
-    refresh()
+    refresh(true, reason)
       .catch((err) => {
         setAppError(errorMessage(err, fallback));
         console.error(err);
@@ -845,30 +1010,50 @@ function App() {
         refreshInFlightRef.current = false;
         if (refreshQueuedRef.current) {
           refreshQueuedRef.current = false;
-          requestRefresh(fallback);
+          requestRefresh(fallback, `${reason}:queued`);
         }
       });
   }
 
-  function requestRefresh(fallback = `Failed to refresh ${APP_DISPLAY_NAME} state`) {
-    if (refreshTimerRef.current !== null) return;
+  function requestRefresh(fallback = `Failed to refresh ${APP_DISPLAY_NAME} state`, reason = fallback) {
+    if (refreshTimerRef.current !== null) {
+      recordUiRefreshMetric({
+        kind: "refresh_request",
+        reason,
+        status: "coalesced",
+        detail: "debounced refresh already scheduled",
+      });
+      return;
+    }
+    recordUiRefreshMetric({
+      kind: "refresh_request",
+      reason,
+      status: "scheduled",
+      detail: `${UI_REFRESH_DEBOUNCE_MS}ms debounce`,
+    });
     refreshTimerRef.current = window.setTimeout(() => {
       refreshTimerRef.current = null;
-      refreshWithError(fallback);
+      refreshWithError(fallback, reason);
     }, UI_REFRESH_DEBOUNCE_MS);
   }
 
-  function applyMessageUpsert(message: Message) {
+  function applyMessageUpsert(message: Message, reason = "backend:message_upsert") {
     messageDeltaBufferRef.current.delete(message.id);
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message update`);
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message update`, `${reason}:fallback`);
         return current;
       }
       const existingIndex = current.messages.findIndex((item) => item.id === message.id);
       const messages = existingIndex >= 0
         ? current.messages.map((item) => item.id === message.id ? message : item)
         : [...current.messages, message];
+      recordUiRefreshMetric({
+        kind: "backend_event",
+        reason,
+        status: "success",
+        detail: existingIndex >= 0 ? "message updated" : "message inserted",
+      });
       return { ...current, messages: sortedMessages(messages) };
     });
   }
@@ -892,15 +1077,17 @@ function App() {
     messageDeltaBufferRef.current = new Map();
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message delta`);
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message delta`, "backend:message_delta:fallback");
         return current;
       }
       let missing = false;
       let changed = false;
+      const reasons = new Set<string>();
       const messages = current.messages.map((item) => {
         const delta = deltas.get(item.id);
         if (!delta) return item;
         changed = true;
+        delta.reasons.forEach((reason) => reasons.add(reason));
         return { ...item, body: `${item.body}${delta.append}`, delivery_state: delta.deliveryState };
       });
       for (const messageId of deltas.keys()) {
@@ -910,18 +1097,28 @@ function App() {
         }
       }
       if (missing) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message delta`);
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message delta`, "backend:message_delta:missing_message");
       }
       if (!changed) return current;
+      recordUiRefreshMetric({
+        kind: "message_delta_flush",
+        reason: Array.from(reasons).sort().join(",") || "backend:message_delta",
+        status: "success",
+        batch_size: deltas.size,
+        detail: `${deltas.size} buffered message delta(s)`,
+      });
       return { ...current, messages };
     });
   }
 
-  function queueMessageDelta(messageId: string, append: string, deliveryState: Message["delivery_state"]) {
+  function queueMessageDelta(messageId: string, append: string, deliveryState: Message["delivery_state"], reason = "backend:message_delta") {
     const existing = messageDeltaBufferRef.current.get(messageId);
+    const reasons = existing?.reasons ? [...existing.reasons] : [];
+    if (!reasons.includes(reason)) reasons.push(reason);
     messageDeltaBufferRef.current.set(messageId, {
       append: `${existing?.append ?? ""}${append}`,
       deliveryState,
+      reasons,
     });
     if (messageDeltaFlushTimerRef.current !== null) return;
     messageDeltaFlushTimerRef.current = window.setTimeout(() => {
@@ -929,35 +1126,47 @@ function App() {
     }, 50);
   }
 
-  function applyMessageDelete(messageId: string) {
+  function applyMessageDelete(messageId: string, reason = "backend:message_delete") {
     messageDeltaBufferRef.current.delete(messageId);
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message deletion`);
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message deletion`, `${reason}:fallback`);
         return current;
       }
+      recordUiRefreshMetric({
+        kind: "backend_event",
+        reason,
+        status: "success",
+        detail: "message deleted",
+      });
       return { ...current, messages: current.messages.filter((item) => item.id !== messageId) };
     });
   }
 
-  function applyActivityUpsert(activity: AgentActivity) {
+  function applyActivityUpsert(activity: AgentActivity, reason = "backend:activity_upsert") {
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after activity update`);
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after activity update`, `${reason}:fallback`);
         return current;
       }
       const existingIndex = current.agent_activities.findIndex((item) => item.id === activity.id);
       const agent_activities = existingIndex >= 0
         ? current.agent_activities.map((item) => item.id === activity.id ? activity : item)
         : [activity, ...current.agent_activities];
+      recordUiRefreshMetric({
+        kind: "backend_event",
+        reason,
+        status: "success",
+        detail: existingIndex >= 0 ? "activity updated" : "activity inserted",
+      });
       return { ...current, agent_activities: limitActivitiesPerAgent(agent_activities) };
     });
   }
 
-  function applyAgentRunUpsert(patch: Omit<AgentRun, "log"> & { log?: string }) {
+  function applyAgentRunUpsert(patch: Omit<AgentRun, "log"> & { log?: string }, reason = "backend:agent_run_upsert") {
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after run update`);
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after run update`, `${reason}:fallback`);
         return current;
       }
       const existing = current.agent_runs.find((item) => item.id === patch.id);
@@ -969,14 +1178,20 @@ function App() {
         ? current.agent_runs.map((item) => item.id === patch.id ? { ...item, ...run } : item)
         : [run, ...current.agent_runs];
       agent_runs.sort((left, right) => new Date(right.started_at).getTime() - new Date(left.started_at).getTime());
+      recordUiRefreshMetric({
+        kind: "backend_event",
+        reason,
+        status: "success",
+        detail: existing ? "agent run updated" : "agent run inserted",
+      });
       return { ...current, agent_runs: agent_runs.slice(0, 30) };
     });
   }
 
-  function applyWorkItemUpsert(patch: Omit<AgentWorkItem, "context"> & { context?: string }) {
+  function applyWorkItemUpsert(patch: Omit<AgentWorkItem, "context"> & { context?: string }, reason = "backend:work_item_upsert") {
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after agent request update`);
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after agent request update`, `${reason}:fallback`);
         return current;
       }
       const existing = current.agent_work_items.find((item) => item.id === patch.id);
@@ -989,18 +1204,24 @@ function App() {
         ? current.agent_work_items.map((item) => item.id === patch.id ? { ...item, ...workItem } : item)
         : [workItem, ...current.agent_work_items];
       agent_work_items.sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+      recordUiRefreshMetric({
+        kind: "backend_event",
+        reason,
+        status: "success",
+        detail: existing ? "work item updated" : "work item inserted",
+      });
       return { ...current, agent_work_items: agent_work_items.slice(0, 80) };
     });
   }
 
-  function applyArtifactUpsert(artifact: Artifact) {
+  function applyArtifactUpsert(artifact: Artifact, reason = "backend:artifact_upsert") {
     if (!artifact || typeof artifact.id !== "string" || typeof artifact.message_id !== "string") {
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`);
+      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`, `${reason}:fallback`);
       return;
     }
     setData((current) => {
       if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`);
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`, `${reason}:fallback`);
         return current;
       }
       const currentArtifacts = Array.isArray(current.artifacts) ? current.artifacts : [];
@@ -1016,6 +1237,12 @@ function App() {
           ? currentMessageArtifacts.map((item) => item.id === artifact.id ? artifact : item)
           : [...currentMessageArtifacts, artifact];
         return { ...message, artifacts: messageArtifacts };
+      });
+      recordUiRefreshMetric({
+        kind: "backend_event",
+        reason,
+        status: "success",
+        detail: existingIndex >= 0 ? "artifact updated" : "artifact inserted",
       });
       return { ...current, artifacts, messages };
     });
@@ -1036,7 +1263,7 @@ function App() {
   function handleBackendEvent(payload: unknown) {
     try {
       if (typeof payload !== "string") {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`);
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`, "backend:invalid_payload");
         return;
       }
       const parsed = JSON.parse(payload) as UiBackendEvent;
@@ -1046,46 +1273,51 @@ function App() {
         }
         return;
       }
+      const backendReason = `backend:${parsed.reason ?? parsed.type}`;
+      if (parsed.type === "refresh") {
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend refresh`, backendReason);
+        return;
+      }
       if (parsed.type === "message_upsert") {
-        applyMessageUpsert(parsed.message);
+        applyMessageUpsert(parsed.message, backendReason);
         return;
       }
       if (parsed.type === "message_delta") {
-        queueMessageDelta(parsed.message_id, parsed.append, parsed.delivery_state);
+        queueMessageDelta(parsed.message_id, parsed.append, parsed.delivery_state, backendReason);
         return;
       }
       if (parsed.type === "message_delete") {
-        applyMessageDelete(parsed.message_id);
+        applyMessageDelete(parsed.message_id, backendReason);
         return;
       }
       if (parsed.type === "activity_upsert") {
-        applyActivityUpsert(parsed.activity);
+        applyActivityUpsert(parsed.activity, backendReason);
         return;
       }
       if (parsed.type === "agent_run_upsert") {
-        applyAgentRunUpsert(parsed.run);
+        applyAgentRunUpsert(parsed.run, backendReason);
         return;
       }
       if (parsed.type === "work_item_upsert") {
-        applyWorkItemUpsert(parsed.work_item);
+        applyWorkItemUpsert(parsed.work_item, backendReason);
         return;
       }
       if (parsed.type === "artifact_upsert") {
-        applyArtifactUpsert(parsed.artifact);
+        applyArtifactUpsert(parsed.artifact, backendReason);
         return;
       }
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`);
+      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`, "backend:unknown_event");
     } catch (err) {
       setAppError(errorMessage(err, `Failed to apply ${APP_DISPLAY_NAME} backend update`));
       console.error(`Failed to apply ${APP_DISPLAY_NAME} backend update`, err, payload);
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`);
+      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`, "backend:parse_error");
     }
   }
 
   async function mutate<T = unknown>(command: string, args: Record<string, unknown> = {}): Promise<T> {
     try {
       const result = await apiInvoke<T>(command, args);
-      await refresh();
+      await refresh(true, `mutation:${command}`);
       return result;
     } catch (err) {
       const message = errorMessage(err, `${command} failed`);
@@ -1096,7 +1328,7 @@ function App() {
   }
 
   useEffect(() => {
-    refresh().catch((err) => {
+    refresh(true, "initial_load").catch((err) => {
       setAppError(errorMessage(err, `Failed to load ${APP_DISPLAY_NAME} state`));
       console.error(err);
     });
@@ -1152,7 +1384,7 @@ function App() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state`);
+      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state`, "interval:5s");
     }, 5000);
     return () => window.clearInterval(timer);
   }, []);
@@ -2650,7 +2882,7 @@ function App() {
       workingDirectory: nextForm.workingDirectory,
       dailyBudgetMicros: budgetMicrosFromForm(nextForm.dailyBudgetUsd),
     });
-    await refresh();
+    await refresh(true, "action:create_agent");
     setAgentDraft(newAgentDraft());
     setShowCreateAgentModal(false);
     setReturnToCreateChannelAfterAgent(false);
@@ -2784,7 +3016,7 @@ function App() {
         asTask: sendAsTask,
         attachments: await attachmentUploads(attachments),
       });
-      await refresh(false);
+      await refresh(false, "action:send_root_message");
       finalizeOptimisticMessage(optimisticId);
     } catch (err) {
       removeOptimisticMessage(optimisticId);
@@ -2798,7 +3030,7 @@ function App() {
   async function openDmWithAgent(agent: Agent) {
     try {
       const channelId = await apiInvoke<string>("open_dm_with_agent", { agentId: agent.id });
-      await refresh();
+      await refresh(true, "action:open_dm_with_agent");
       setActiveChannelId(channelId);
       restoreRememberedThreadForChannel(channelId);
       setActiveTab("chat");
@@ -2825,7 +3057,7 @@ function App() {
         asTask: false,
         attachments: await attachmentUploads(attachments),
       });
-      await refresh(false);
+      await refresh(false, "action:send_reply");
       finalizeOptimisticMessage(optimisticId);
     } catch (err) {
       removeOptimisticMessage(optimisticId);
@@ -2978,14 +3210,14 @@ function App() {
       operations.push(apiInvoke("mark_channel_read", { channelId: item.channelId }));
     }
     await Promise.all(operations);
-    await refresh();
+    await refresh(true, "action:mark_activity_item_read");
   }
 
   async function dismissActivityFeedItem(item: ActivityFeedItem) {
     const dismissedUntil = activityFeedItemCutoff(item);
     setDismissedActivityFeedItems((current) => ({ ...current, [item.dismissId]: dismissedUntil }));
     await persistDismissedActivityFeedItems([item], dismissedUntil);
-    await refresh();
+    await refresh(true, "action:dismiss_activity_item");
   }
 
   async function dismissActivityFeedItems(items: ActivityFeedItem[]) {
@@ -3006,7 +3238,7 @@ function App() {
       return next;
     });
     await persistDismissedActivityFeedItems(items, (item) => cutoffByDismissId.get(item.dismissId) ?? item.timestamp);
-    await refresh();
+    await refresh(true, "action:dismiss_activity_items");
   }
 
   async function markAllActivityFeedRead(items: ActivityFeedItem[]) {
@@ -3045,7 +3277,7 @@ function App() {
         (channelId) => apiInvoke("mark_channel_read", { channelId }),
       ),
     ]);
-    await refresh();
+    await refresh(true, "action:mark_all_activity_items_read");
   }
 
   function startSidebarResize(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -3281,8 +3513,14 @@ function App() {
         open={showSettingsModal}
         themePreference={themePreference}
         chatTextSize={chatTextSize}
+        refreshMetricsSummary={refreshMetricsSummary}
+        refreshMetricEvents={refreshMetricEvents}
         onThemePreferenceChange={setThemePreference}
         onChatTextSizeChange={setChatTextSize}
+        onRefreshMetricsReset={() => {
+          ensureUiRefreshMetricsStore().reset();
+          setRefreshMetricsTick((current) => current + 1);
+        }}
         onClose={() => setShowSettingsModal(false)}
       />
 
