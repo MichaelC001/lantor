@@ -4893,6 +4893,63 @@ body.resizing-row * {
   opacity: 0.45;
 }
 
+.agent-drawer-head .agent-head-action[data-tooltip] {
+  position: relative;
+}
+
+.agent-drawer-head .agent-head-action[data-tooltip]::after {
+  position: absolute;
+  right: 50%;
+  bottom: calc(100% + 10px);
+  z-index: 4;
+  max-width: 220px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: rgba(29, 28, 29, 0.94);
+  color: #fff;
+  content: attr(data-tooltip);
+  font-size: 11px;
+  font-weight: var(--type-weight-medium);
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(50%, 2px);
+  transition:
+    opacity 90ms ease,
+    transform 90ms ease;
+  white-space: nowrap;
+}
+
+.agent-drawer-head .agent-head-action[data-tooltip]::before {
+  position: absolute;
+  right: 50%;
+  bottom: calc(100% + 6px);
+  z-index: 4;
+  width: 8px;
+  height: 8px;
+  background: rgba(29, 28, 29, 0.94);
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(50%, 2px) rotate(45deg);
+  transition:
+    opacity 90ms ease,
+    transform 90ms ease;
+}
+
+.agent-drawer-head .agent-head-action[data-tooltip]:hover::after,
+.agent-drawer-head .agent-head-action[data-tooltip]:focus-visible::after,
+.agent-drawer-head .agent-head-action[data-tooltip]:hover::before,
+.agent-drawer-head .agent-head-action[data-tooltip]:focus-visible::before {
+  opacity: 1;
+  transform: translate(50%, 0);
+}
+
+.agent-drawer-head .agent-head-action[data-tooltip]:hover::before,
+.agent-drawer-head .agent-head-action[data-tooltip]:focus-visible::before {
+  transform: translate(50%, 0) rotate(45deg);
+}
+
 .agent-drawer-head .agent-mobile-back {
   display: none;
 }

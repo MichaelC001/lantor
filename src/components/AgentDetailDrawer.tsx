@@ -918,8 +918,8 @@ export function AgentDetailDrawer({
           <button
             type="button"
             className="agent-head-action"
-            title={`Edit @${agent.handle}`}
             aria-label={`Edit @${agent.handle}`}
+            data-tooltip={`Edit @${agent.handle}`}
             onClick={() => onEdit(agent)}
           >
             <Pencil size={16} />
@@ -929,7 +929,7 @@ export function AgentDetailDrawer({
             className="agent-head-action danger"
             disabled={deleteDisabled}
             aria-label={`Delete @${agent.handle}`}
-            title={deleteDisabled ? "Stop the active run before deleting this agent" : `Delete @${agent.handle}`}
+            data-tooltip={deleteDisabled ? "Stop the active run before deleting this agent" : `Delete @${agent.handle}`}
             onClick={() => onDelete(agent)}
           >
             <Trash2 size={16} />
