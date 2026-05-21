@@ -1,3 +1,4 @@
+import { Check, UserPlus } from "lucide-react";
 import { Agent, Channel } from "../types";
 import { AgentAvatar } from "./AgentAvatar";
 import { Modal } from "./Modal";
@@ -21,16 +22,27 @@ export function ChannelAgentsModal({
   onCreateAgent,
   onClose,
 }: ChannelAgentsModalProps) {
+  const selectedCount = agents.filter((agent) => channelMemberIds.has(agent.id)).length;
+
   return (
     <Modal
       open={open}
-      title={channel ? `Agents in #${channel.name}` : "Channel Agents"}
+      title={channel ? `Add agents to #${channel.name}` : "Add agents"}
       onClose={onClose}
       width={560}
     >
       <div className="modal-form">
+        <div className="channel-agent-modal-intro">
+          <span className="channel-agent-modal-icon" aria-hidden="true">
+            <UserPlus size={18} />
+          </span>
+          <div>
+            <strong>{selectedCount > 0 ? `${selectedCount} ${selectedCount === 1 ? "agent" : "agents"} added` : "Bring agents into this channel"}</strong>
+            <p>{agents.length > 0 ? "Pick the agents that should participate here." : "Create an agent first, then add it to this channel."}</p>
+          </div>
+        </div>
         <div className="member-editor modal-member-editor channel-agent-picker">
-          {agents.length === 0 && <span>No agents yet. Create an agent first.</span>}
+          {agents.length === 0 && <span>No agents yet.</span>}
           {agents.map((agent) => {
             const isMember = channelMemberIds.has(agent.id);
             return (
@@ -49,6 +61,10 @@ export function ChannelAgentsModal({
                     <small>@{agent.handle}</small>
                   </div>
                 </div>
+                <span className={`channel-agent-option-state ${isMember ? "selected" : ""}`}>
+                  {isMember ? <Check size={14} /> : <UserPlus size={14} />}
+                  {isMember ? "Added" : "Add"}
+                </span>
               </label>
             );
           })}

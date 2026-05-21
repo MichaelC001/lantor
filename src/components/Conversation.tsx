@@ -12,9 +12,9 @@ import {
   Send,
   Settings,
   Trash2,
-  Users,
+  UserPlus,
 } from "lucide-react";
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FocusEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FocusEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { useAutoGrowTextarea } from "../hooks/useAutoGrowTextarea";
 import { useMentionPicker } from "../hooks/useMentionPicker";
 import { isImeComposing } from "../input-utils";
@@ -169,7 +169,13 @@ export function Conversation({
   const [messageMenu, setMessageMenu] = useState<MessageMenuState>(null);
   const [expandedChannelMessageIds, setExpandedChannelMessageIds] = useState<Set<string>>(() => new Set());
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const messageListContentRef = useRef<HTMLDivElement | null>(null);
+  const messageListBottomAnchorRef = useRef<HTMLDivElement | null>(null);
+  const bottomScrollFrameRef = useRef<number | null>(null);
+  const bottomScrollTimeoutRef = useRef<number | null>(null);
   const shouldFollowMessagesRef = useRef(true);
+  const userMessageScrollUntilRef = useRef(0);
+  const messageListMetricsRef = useRef({ scrollHeight: 0, scrollTop: 0, clientHeight: 0 });
   const channelActionsRef = useRef<HTMLDivElement | null>(null);
   const isDm = channel?.kind === "dm";
   const dmAgent = isDm ? agents.find((agent) => agent.id === channel?.dm_agent_id) ?? null : null;
@@ -209,19 +215,109 @@ export function Conversation({
       : `#${channel.name}`
     : APP_DISPLAY_NAME;
   function isMessageListAtBottom(element: HTMLDivElement) {
-    return element.scrollHeight - element.scrollTop - element.clientHeight < 32;
+    return messageListDistanceFromBottom(element) < 32;
+  }
+
+  function wasMessageListPreviouslyAtBottom() {
+    const metrics = messageListMetricsRef.current;
+    if (metrics.scrollHeight === 0 && metrics.clientHeight === 0) return true;
+    return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight < 32;
+  }
+
+  function messageListDistanceFromBottom(element: HTMLDivElement) {
+    return element.scrollHeight - element.scrollTop - element.clientHeight;
+  }
+
+  function rememberMessageListMetrics(element: HTMLDivElement) {
+    messageListMetricsRef.current = {
+      scrollHeight: element.scrollHeight,
+      scrollTop: element.scrollTop,
+      clientHeight: element.clientHeight,
+    };
+  }
+
+  function cancelPendingMessageBottomScroll() {
+    if (bottomScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(bottomScrollFrameRef.current);
+      bottomScrollFrameRef.current = null;
+    }
+    if (bottomScrollTimeoutRef.current !== null) {
+      window.clearTimeout(bottomScrollTimeoutRef.current);
+      bottomScrollTimeoutRef.current = null;
+    }
+  }
+
+  function isUserScrollingMessages() {
+    return Date.now() < userMessageScrollUntilRef.current;
+  }
+
+  function stopFollowingMessages(element = messageListRef.current) {
+    userMessageScrollUntilRef.current = Date.now() + 650;
+    shouldFollowMessagesRef.current = false;
+    cancelPendingMessageBottomScroll();
+    if (element) rememberMessageListMetrics(element);
+  }
+
+  function isPointerOnMessageListScrollbar(event: ReactPointerEvent<HTMLDivElement>) {
+    const element = event.currentTarget;
+    const scrollbarWidth = element.offsetWidth - element.clientWidth;
+    if (scrollbarWidth <= 0) return false;
+    return event.clientX >= element.getBoundingClientRect().right - scrollbarWidth - 2;
+  }
+
+  function scrollMessagesToBottomNow(behavior: ScrollBehavior = "auto") {
+    const element = messageListRef.current;
+    if (!element) return;
+    userMessageScrollUntilRef.current = 0;
+    element.scrollTo({ top: element.scrollHeight, behavior });
+    if (behavior === "auto") {
+      shouldFollowMessagesRef.current = true;
+      rememberMessageListMetrics(element);
+    }
   }
 
   function scrollMessagesToBottom(behavior: ScrollBehavior = "auto") {
-    const element = messageListRef.current;
-    if (!element) return;
-    element.scrollTo({ top: element.scrollHeight, behavior });
+    scrollMessagesToBottomNow(behavior);
+    if (behavior !== "auto") return;
+    cancelPendingMessageBottomScroll();
+    bottomScrollFrameRef.current = window.requestAnimationFrame(() => {
+      bottomScrollFrameRef.current = null;
+      if (shouldFollowMessagesRef.current) scrollMessagesToBottomNow();
+    });
+    bottomScrollTimeoutRef.current = window.setTimeout(() => {
+      bottomScrollTimeoutRef.current = null;
+      if (shouldFollowMessagesRef.current) scrollMessagesToBottomNow();
+    }, 50);
   }
 
   function handleMessageListScroll() {
     const element = messageListRef.current;
     if (!element) return;
-    shouldFollowMessagesRef.current = isMessageListAtBottom(element);
+    const atBottom = isMessageListAtBottom(element);
+    const layoutChanged =
+      messageListMetricsRef.current.scrollHeight !== element.scrollHeight
+      || messageListMetricsRef.current.clientHeight !== element.clientHeight;
+    const userScrolling = isUserScrollingMessages();
+    if (atBottom && !userScrolling) {
+      shouldFollowMessagesRef.current = true;
+    } else if (!userScrolling && shouldFollowMessagesRef.current && layoutChanged && wasMessageListPreviouslyAtBottom()) {
+      scrollMessagesToBottom();
+    }
+    rememberMessageListMetrics(element);
+  }
+
+  function handleMessageListWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (event.deltaY >= 0) return;
+    stopFollowingMessages();
+  }
+
+  function handleMessageListPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!isPointerOnMessageListScrollbar(event)) return;
+    stopFollowingMessages(event.currentTarget);
+  }
+
+  function handleMessageListTouchMove() {
+    stopFollowingMessages();
   }
 
   function handleMessageListContentLoad() {
@@ -316,6 +412,51 @@ export function Conversation({
     scrollMessagesToBottom();
   }, [channel?.id]);
 
+  useEffect(() => () => {
+    if (bottomScrollFrameRef.current !== null) window.cancelAnimationFrame(bottomScrollFrameRef.current);
+    if (bottomScrollTimeoutRef.current !== null) window.clearTimeout(bottomScrollTimeoutRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== "chat") return;
+    const root = messageListRef.current;
+    const content = messageListContentRef.current;
+    const bottomAnchor = messageListBottomAnchorRef.current;
+    if (!root || !content || !bottomAnchor) return;
+    function keepBottomVisible() {
+      const list = messageListRef.current;
+      if (!list) return;
+      if (shouldFollowMessagesRef.current && !isUserScrollingMessages()) {
+        scrollMessagesToBottom();
+      } else {
+        rememberMessageListMetrics(list);
+      }
+    }
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(keepBottomVisible);
+    const intersectionObserver = typeof IntersectionObserver === "undefined"
+      ? null
+      : new IntersectionObserver((entries) => {
+        if (!shouldFollowMessagesRef.current) return;
+        if (entries.some((entry) => !entry.isIntersecting || entry.intersectionRatio < 1)) {
+          keepBottomVisible();
+        }
+      }, { root, threshold: 1 });
+    const mutationObserver = typeof MutationObserver === "undefined"
+      ? null
+      : new MutationObserver(keepBottomVisible);
+    observer?.observe(root);
+    observer?.observe(content);
+    intersectionObserver?.observe(bottomAnchor);
+    mutationObserver?.observe(content, { childList: true, characterData: true, subtree: true });
+    window.addEventListener("resize", keepBottomVisible);
+    return () => {
+      observer?.disconnect();
+      intersectionObserver?.disconnect();
+      mutationObserver?.disconnect();
+      window.removeEventListener("resize", keepBottomVisible);
+    };
+  }, [activeTab, channel?.id]);
+
   useEffect(() => {
     setExpandedChannelMessageIds(new Set());
   }, [channel?.id]);
@@ -329,7 +470,7 @@ export function Conversation({
     if (!focusedMessageId) return;
     const element = messageListRef.current?.querySelector<HTMLElement>(`[data-message-id="${focusedMessageId}"]`);
     element?.scrollIntoView({ block: "center" });
-  }, [channel?.id, focusedMessageId, rootMessages.length]);
+  }, [channel?.id, focusedMessageId]);
 
   return (
     <section className="conversation">
@@ -394,9 +535,9 @@ export function Conversation({
           <div className="channel-header-actions" ref={channelActionsRef} onBlur={handleChannelActionsBlur}>
             <button
               type="button"
-              className="channel-agent-count-trigger"
-              title="Manage channel agents"
-              aria-label="Manage channel agents"
+              className={`channel-agent-count-trigger ${channelAgents.length === 0 ? "empty" : ""}`}
+              title={channelAgents.length === 0 ? "Add agents to this channel" : "Manage channel agents"}
+              aria-label={channelAgents.length === 0 ? "Add agents to this channel" : "Manage channel agents"}
               onClick={() => {
                 setShowChannelActions(false);
                 openChannelAgentsModal();
@@ -411,9 +552,9 @@ export function Conversation({
                   ))}
                 </span>
               ) : (
-                <Users size={16} />
+                <UserPlus size={16} />
               )}
-              <span>{channelAgents.length}</span>
+              <span>{channelAgents.length > 0 ? channelAgents.length : "Add agent"}</span>
             </button>
             <button
               type="button"
@@ -470,41 +611,52 @@ export function Conversation({
           ref={messageListRef}
           className="message-list"
           onScroll={handleMessageListScroll}
+          onWheelCapture={handleMessageListWheel}
+          onPointerDownCapture={handleMessageListPointerDown}
+          onTouchMoveCapture={handleMessageListTouchMove}
           onLoadCapture={handleMessageListContentLoad}
         >
-          {channel ? (
-            rootMessages.length > 0 ? (
-              <div className="beginning">
-                {isDm ? `Beginning of your DM with @${dmAgent?.handle || "agent"}` : `Beginning of #${channel.name}`}
-              </div>
+          <div ref={messageListContentRef} className="message-list-content">
+            {channel ? (
+              rootMessages.length > 0 ? (
+                <div className="beginning">
+                  {isDm ? `Beginning of your DM with @${dmAgent?.handle || "agent"}` : `Beginning of #${channel.name}`}
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <MessageSquare size={34} />
+                  <h2>{isDm ? "No DM messages yet" : "No messages yet"}</h2>
+                  <p>
+                    {isDm
+                      ? "Send a message here to talk directly with this agent."
+                      : channelAgents.length === 0
+                        ? "Add agents to this channel or send the first message."
+                        : "Send a root message from the composer. Replies belong in the right thread pane."}
+                  </p>
+                  {!isDm && channelAgents.length === 0 && (
+                    <button type="button" className="empty-state-action" onClick={openChannelAgentsModal}>
+                      <UserPlus size={16} /> Add agent
+                    </button>
+                  )}
+                </div>
+              )
             ) : (
               <div className="empty-state">
-                <MessageSquare size={34} />
-                <h2>{isDm ? "No DM messages yet" : "No messages yet"}</h2>
-                <p>
-                  {isDm
-                    ? "Send a message here to talk directly with this agent."
-                    : "Send a root message from the composer. Replies belong in the right thread pane."}
-                </p>
+                <Hash size={34} />
+                <h2>No channels yet</h2>
+                <p>Create a channel in the left sidebar, then send messages or tasks.</p>
               </div>
-            )
-          ) : (
-            <div className="empty-state">
-              <Hash size={34} />
-              <h2>No channels yet</h2>
-              <p>Create a channel in the left sidebar, then send messages or tasks.</p>
-            </div>
-          )}
-          <ActivityProgressDock
-            messages={rootMessages}
-            activities={agentActivities}
-            runs={agentRuns}
-            workItems={agentWorkItems}
-            agents={agents}
-            channelId={channel?.id ?? null}
-            threadRootId={null}
-          />
-          {rootMessages.map((message, index) => {
+            )}
+            <ActivityProgressDock
+              messages={rootMessages}
+              activities={agentActivities}
+              runs={agentRuns}
+              workItems={agentWorkItems}
+              agents={agents}
+              channelId={channel?.id ?? null}
+              threadRootId={null}
+            />
+            {rootMessages.map((message, index) => {
             const linkedTask = taskForMessage(message.id);
             const replyCount = threadReplyCounts[message.id] ?? 0;
             const replySummary = threadReplySummaries[message.id] ?? null;
@@ -724,7 +876,9 @@ export function Conversation({
                 </article>
               </Fragment>
             );
-          })}
+            })}
+            <div ref={messageListBottomAnchorRef} className="message-list-bottom-anchor" aria-hidden="true" />
+          </div>
           {messageMenu && (
             <MessageActionMenu
               x={messageMenu.x}
@@ -1126,6 +1280,10 @@ function ConversationComposer({
       <textarea
         ref={textareaRef}
         value={text}
+        autoCapitalize="none"
+        autoComplete="off"
+        autoCorrect="off"
+        spellCheck={false}
         onChange={(event) => {
           updateText(event.target.value);
           refreshMentionState(event.target.value, event.target.selectionStart);

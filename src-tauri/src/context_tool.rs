@@ -8,9 +8,10 @@ use serde_json::Value;
 use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::message_store::load_artifact;
 use crate::{
     attachments::{attachment_summary_sql, format_attachment_size},
-    db_connect, load_artifact, resolve_agent_by_handle,
+    db_connect, resolve_agent_by_handle,
     text::compact_chars_middle,
     to_string, CommandResult, AGENT_CONTEXT_TOOL_MESSAGE_LIMIT,
 };

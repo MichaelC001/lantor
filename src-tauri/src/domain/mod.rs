@@ -1,0 +1,30 @@
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use sqlx::SqlitePool;
+use tokio::time::sleep;
+
+use crate::CommandResult;
+
+pub(crate) mod reminders;
+pub(crate) mod schedules;
+
+pub(crate) fn spawn_reminder_worker(pool: SqlitePool) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if let Err(err) = reminders::process_due_reminders(&pool).await {
+                eprintln!("Lantor reminder worker failed: {err}");
+            }
+            if let Err(err) = schedules::process_due_agent_schedules(&pool).await {
+                eprintln!("Lantor schedule worker failed: {err}");
+            }
+            sleep(Duration::from_secs(15)).await;
+        }
+    });
+}
+
+pub(crate) fn parse_due_at(value: &str) -> CommandResult<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|err| format!("invalid reminder due_at: {err}"))
+}
