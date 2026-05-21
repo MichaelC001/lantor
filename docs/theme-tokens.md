@@ -35,6 +35,12 @@ Use these groups before adding component-specific tokens:
 4. Component-specific tokens are allowed only when a semantic token group cannot describe the role.
 5. New status colors require all three roles: text, soft background, and border.
 
+## Runtime Parity
+
+Theme and UI preferences must share one configuration model across web and desktop shells. The Tauri desktop app, browser preview, and mobile browser view should read and write the same frontend settings path and render through the same React/CSS token code path.
+
+Do not add a desktop-only or web-only preference path for theme, density, display mode, or message rendering behavior. If a platform needs a native bridge or persistence adapter, keep it behind the same setting key and the same UI state shape so the rendered result cannot drift by shell.
+
 ## Follow-Up Gates
 
 Before the raw-color migration is considered complete:
@@ -42,3 +48,4 @@ Before the raw-color migration is considered complete:
 - Style lint must reject new raw color literals outside token declarations.
 - Dark and light screenshots must cover desktop and mobile breakpoints.
 - Mobile coverage must include sidebar, bottom nav, thread, search, activity feed, modal, and composer.
+- Settings coverage must verify that web and desktop shells use the same preference keys and render the same state.
