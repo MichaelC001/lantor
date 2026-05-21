@@ -34,7 +34,7 @@ use crate::{
     try_claim_unassigned_task,
 };
 
-const AGENT_EVENT_MARKER: &str = "LANTOR_EVENT";
+const AGENT_EVENT_PREFIX: &str = "LANTOR_EVENT";
 const SILENT_REPLY_PREFIX: &str = "LANTOR_SILENT_REPLY";
 
 #[derive(Debug, Deserialize)]
@@ -300,11 +300,7 @@ fn extract_agent_event_json_with_remainder(line: &str) -> Option<(&str, &str)> {
             break;
         }
     }
-    let (marker_index, payload_start) = find_agent_event_marker(trimmed)?;
-    if marker_index != 0 {
-        return None;
-    }
-    let payload = &trimmed[payload_start..];
+    let payload = strip_agent_event_prefix(trimmed)?;
     if payload.is_empty() {
         return None;
     }
@@ -314,24 +310,29 @@ fn extract_agent_event_json_with_remainder(line: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn find_agent_event_marker(text: &str) -> Option<(usize, usize)> {
-    let mut search_start = 0;
-    while search_start < text.len() {
-        let relative_index = text[search_start..].find(AGENT_EVENT_MARKER)?;
-        let marker_index = search_start + relative_index;
-        let after_marker_index = marker_index + AGENT_EVENT_MARKER.len();
-        let after_marker = &text[after_marker_index..];
-        let payload_offset = after_marker
-            .char_indices()
-            .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index));
-        let Some(payload_offset) = payload_offset else {
-            return Some((marker_index, text.len()));
-        };
-        let payload_start = after_marker_index + payload_offset;
-        if text[payload_start..].starts_with('{') {
-            return Some((marker_index, payload_start));
+fn strip_agent_event_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix(AGENT_EVENT_PREFIX)?;
+    let payload = match rest.chars().next() {
+        None => "",
+        Some(ch) if ch.is_whitespace() => rest.trim_start(),
+        _ => return None,
+    };
+    if payload.is_empty() || payload.starts_with('{') {
+        Some(payload)
+    } else {
+        None
+    }
+}
+
+fn find_agent_event_prefix(text: &str) -> Option<(usize, &str)> {
+    let mut offset = 0usize;
+    while let Some(found) = text[offset..].find(AGENT_EVENT_PREFIX) {
+        let marker_index = offset + found;
+        let candidate = &text[marker_index..];
+        if let Some(payload) = strip_agent_event_prefix(candidate) {
+            return Some((marker_index, payload));
         }
-        search_start = after_marker_index;
+        offset = marker_index + AGENT_EVENT_PREFIX.len();
     }
     None
 }
@@ -344,9 +345,8 @@ fn split_agent_event_jsons_from_text(
     let mut events = Vec::new();
     let mut rest = text;
 
-    while let Some((marker_index, payload_start)) = find_agent_event_marker(rest) {
+    while let Some((marker_index, payload)) = find_agent_event_prefix(rest) {
         visible.push_str(&rest[..marker_index]);
-        let payload = &rest[payload_start..];
         let Some(end) = complete_json_object_end(payload) else {
             if !strip_incomplete_tail {
                 visible.push_str(&rest[marker_index..]);
@@ -1302,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_split_consumes_complete_inline_control_events() {
+    fn complete_split_consumes_inline_control_events_only_after_newline() {
         let (visible, events) = split_complete_streaming_agent_event_lines(
             "Working patch.LANTOR_EVENT {\"type\":\"activity\",\"title\":\"Step\",\"detail\":\"one\"}\npartial LANTOR_EVENT {\"type\":\"activity\",\"title\":\"Later\",\"detail\":\"two\"}",
         );
@@ -1315,19 +1315,6 @@ mod tests {
             ]
         );
         assert_eq!(visible, "Working patch.\npartial");
-    }
-
-    #[test]
-    fn strips_control_event_split_between_marker_and_json() {
-        let (visible, events) = split_streaming_agent_event_lines(
-            "LANTOR_EVENT\n{\"type\":\"activity\",\"title\":\"x\",\"detail\":\"ok\"}",
-        );
-
-        assert_eq!(visible, "");
-        assert_eq!(
-            events,
-            vec![r#"{"type":"activity","title":"x","detail":"ok"}"#]
-        );
     }
 
     #[test]

@@ -569,7 +569,7 @@ async fn consume_complete_streaming_agent_control_lines(
     let message_id: Uuid = row.get("id");
     let body: String = row.get("body");
     let (visible_body, event_jsons) = split_complete_streaming_agent_event_lines(&body);
-    if event_jsons.is_empty() && visible_body == body.trim() {
+    if event_jsons.is_empty() {
         return Ok(false);
     }
 
