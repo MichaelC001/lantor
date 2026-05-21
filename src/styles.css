@@ -1035,8 +1035,8 @@ button,
   color: inherit;
 }
 
-.dm strong,
-.dm span {
+.dm > div strong,
+.dm > div span {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
