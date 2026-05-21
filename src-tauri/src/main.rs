@@ -5,6 +5,7 @@ mod agent_memory;
 mod agent_profile;
 mod agent_work_dispatch;
 mod agent_workspace;
+mod artifact_store;
 mod attachments;
 mod channels;
 mod context_tool;
@@ -15,6 +16,7 @@ mod message_store;
 mod models;
 mod prompts;
 mod runtime;
+mod task_messages;
 mod text;
 mod ui_notifications;
 mod usage;
@@ -54,13 +56,12 @@ use agent_inbox_wake::{inbox_wake_context, InboxWakeItem, InboxWakeSummary};
 use agent_memory::append_run_log;
 use agent_profile::{
     create_agent_in_pool, delete_agent_in_pool, load_agents, load_owner_profile,
-    update_agent_in_pool, update_owner_profile_in_pool, DEFAULT_OWNER_DISPLAY_NAME,
+    update_agent_in_pool, update_owner_profile_in_pool,
 };
 use agent_work_dispatch::{
     cancel_agent_work, cancel_agent_work_in_pool, claim_task, claim_task_in_pool,
-    dispatch_agent_work, dispatch_task_assignment_to_agent, dispatch_unassigned_task_availability,
-    mark_task_after_work_item_finished, retry_agent_work, retry_agent_work_in_pool,
-    try_claim_unassigned_task,
+    dispatch_agent_work, dispatch_task_assignment_to_agent, mark_task_after_work_item_finished,
+    retry_agent_work, retry_agent_work_in_pool, try_claim_unassigned_task,
 };
 use agent_workspace::{agent_workspace_list, agent_workspace_read_file};
 #[cfg(test)]
@@ -86,8 +87,9 @@ use events::control::{
     claim_agent_event, extract_agent_event_json, handle_agent_event, AgentEvent,
 };
 use message_store::{
-    insert_agent_handoff_message, insert_agent_message, insert_message_attachments_tx,
-    load_artifact, load_artifacts, load_messages, load_saved_messages,
+    delete_message_in_pool, insert_agent_handoff_message, load_artifact, load_artifacts,
+    load_messages, load_saved_messages, send_owner_message_in_pool, set_message_saved_in_pool,
+    update_message_in_pool,
 };
 use models::{
     AgentActivity, AgentRun, AgentWorkItem, Artifact, AttachmentUpload, Bootstrap,
@@ -1678,150 +1680,18 @@ async fn send_message(
     .await
 }
 
-pub(crate) async fn send_owner_message_in_pool(
-    pool: &SqlitePool,
-    channel_id: Uuid,
-    thread_root_id: Option<Uuid>,
-    body: &str,
-    as_task: bool,
-    attachments: Vec<AttachmentUpload>,
-) -> CommandResult<()> {
-    if body.trim().is_empty() && attachments.is_empty() {
-        return Err("message body or attachment is required".to_owned());
-    }
-    let mut tx = pool
-        .begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(to_string)?;
-    let channel_kind: Option<String> =
-        sqlx::query_scalar("select kind from channels where id = $1")
-            .bind(channel_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(to_string)?;
-    let Some(channel_kind) = channel_kind else {
-        return Err("channel does not exist".to_owned());
-    };
-    if as_task && channel_kind == "dm" {
-        return Err("direct messages do not support tasks".to_owned());
-    }
-
-    let owner_display_name =
-        sqlx::query_scalar::<_, String>("select display_name from owner_profile where id = 1")
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(to_string)?
-            .unwrap_or_else(|| DEFAULT_OWNER_DISPLAY_NAME.to_owned());
-
-    let msg_id: Uuid = sqlx::query_scalar(
-        r#"
-        insert into messages (channel_id, thread_root_id, sender_name, sender_role, body, is_task)
-        values ($1, $2, $3, 'owner', $4, $5)
-        returning id
-        "#,
-    )
-    .bind(channel_id)
-    .bind(thread_root_id)
-    .bind(owner_display_name)
-    .bind(body.trim())
-    .bind(as_task)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(to_string)?;
-
-    insert_message_attachments_tx(&mut tx, msg_id, attachments).await?;
-
-    let mut task_id = None;
-    if as_task {
-        task_id = Some(
-            sqlx::query_scalar(
-                r#"
-            insert into tasks (message_id, channel_id, title, status)
-            values ($1, $2, $3, 'todo')
-            returning id
-            "#,
-            )
-            .bind(msg_id)
-            .bind(channel_id)
-            .bind(body.lines().next().unwrap_or("Untitled task"))
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(to_string)?,
-        );
-    }
-
-    tx.commit().await.map_err(to_string)?;
-    queue_mentions_as_work_items(
-        pool,
-        channel_id,
-        thread_root_id,
-        msg_id,
-        task_id,
-        body.trim(),
-        MentionDispatchOrigin::Owner,
-    )
-    .await?;
-    if let Some(task_id) = task_id {
-        dispatch_unassigned_task_availability(pool, task_id).await?;
-    }
-    let _ = notify_ui_refresh(pool, "message").await;
-    Ok(())
-}
-
 #[tauri::command]
 async fn update_message(
     message_id: Uuid,
     body: String,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    let body = body.trim();
-    if body.is_empty() {
-        return Err("message body is empty".to_owned());
-    }
-
-    let mut tx = state
-        .pool
-        .begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(to_string)?;
-    let result = sqlx::query("update messages set body = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') where id = $1")
-        .bind(message_id)
-        .bind(body)
-        .execute(&mut *tx)
-        .await
-        .map_err(to_string)?;
-    if result.rows_affected() == 0 {
-        return Err("message does not exist".to_owned());
-    }
-
-    sqlx::query(
-        r#"
-        update tasks
-        set title = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
-        where message_id = $1
-        "#,
-    )
-    .bind(message_id)
-    .bind(body.lines().next().unwrap_or("Untitled task"))
-    .execute(&mut *tx)
-    .await
-    .map_err(to_string)?;
-
-    tx.commit().await.map_err(to_string)?;
-    Ok(())
+    update_message_in_pool(&state.pool, message_id, &body).await
 }
 
 #[tauri::command]
 async fn delete_message(message_id: Uuid, state: State<'_, AppState>) -> CommandResult<()> {
-    let result = sqlx::query("delete from messages where id = $1")
-        .bind(message_id)
-        .execute(&state.pool)
-        .await
-        .map_err(to_string)?;
-    if result.rows_affected() == 0 {
-        return Err("message does not exist".to_owned());
-    }
-    Ok(())
+    delete_message_in_pool(&state.pool, message_id).await
 }
 
 #[tauri::command]
@@ -1831,43 +1701,6 @@ async fn set_message_saved(
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
     set_message_saved_in_pool(&state.pool, message_id, saved).await
-}
-
-pub(crate) async fn set_message_saved_in_pool(
-    pool: &SqlitePool,
-    message_id: Uuid,
-    saved: bool,
-) -> CommandResult<()> {
-    let exists: bool = sqlx::query_scalar("select exists(select 1 from messages where id = $1)")
-        .bind(message_id)
-        .fetch_one(pool)
-        .await
-        .map_err(to_string)?;
-    if !exists {
-        return Err("message does not exist".to_owned());
-    }
-
-    if saved {
-        sqlx::query(
-            r#"
-            insert into saved_messages (message_id)
-            values ($1)
-            on conflict (message_id) do nothing
-            "#,
-        )
-        .bind(message_id)
-        .execute(pool)
-        .await
-        .map_err(to_string)?;
-    } else {
-        sqlx::query("delete from saved_messages where message_id = $1")
-            .bind(message_id)
-            .execute(pool)
-            .await
-            .map_err(to_string)?;
-    }
-    let _ = notify_ui_refresh(pool, "saved_message_updated").await;
-    Ok(())
 }
 
 #[tauri::command]
@@ -2811,72 +2644,6 @@ async fn create_agent_handoff(
     ))
 }
 
-async fn create_agent_task_thread(
-    pool: &SqlitePool,
-    agent_id: Uuid,
-    channel_id: Uuid,
-    title: &str,
-    body: Option<&str>,
-    thread_body: Option<&str>,
-    assign_self: bool,
-    status: Option<&str>,
-) -> CommandResult<(i64, Uuid, Option<Uuid>)> {
-    let title = title.trim();
-    if title.is_empty() {
-        return Err("task_create title is required".to_owned());
-    }
-    let final_status = status
-        .map(str::trim)
-        .filter(|status| !status.is_empty())
-        .unwrap_or(if assign_self { "in_progress" } else { "todo" });
-    if !matches!(final_status, "todo" | "in_progress" | "in_review" | "done") {
-        return Err(format!("unsupported task status: {final_status}"));
-    }
-    let root_body = body
-        .map(str::trim)
-        .filter(|body| !body.is_empty())
-        .unwrap_or(title);
-    let root_message_id =
-        insert_agent_message(pool, agent_id, channel_id, None, root_body, true).await?;
-    let task_row = sqlx::query(
-        r#"
-        update tasks
-        set title = $2,
-            status = $3,
-            assignee_agent_id = case when $4 then $5 else null end,
-            version = version + 1,
-            updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
-        where message_id = $1
-        returning number
-        "#,
-    )
-    .bind(root_message_id)
-    .bind(title)
-    .bind(final_status)
-    .bind(assign_self)
-    .bind(agent_id)
-    .fetch_one(pool)
-    .await
-    .map_err(to_string)?;
-    let task_number: i64 = task_row.get("number");
-    let thread_reply_id = match thread_body.map(str::trim).filter(|body| !body.is_empty()) {
-        Some(thread_body) => Some(
-            insert_agent_message(
-                pool,
-                agent_id,
-                channel_id,
-                Some(root_message_id),
-                thread_body,
-                false,
-            )
-            .await?,
-        ),
-        None => None,
-    };
-    let _ = notify_ui_refresh(pool, "task_create").await;
-    Ok((task_number, root_message_id, thread_reply_id))
-}
-
 async fn load_channel_agent_roster(
     pool: &SqlitePool,
     channel_id: Option<Uuid>,
@@ -3532,7 +3299,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use crate::agent_memory::{format_memory_index_entry, insert_memory_index_entry};
-    use crate::message_store::{insert_agent_message, load_messages};
+    use crate::message_store::{insert_agent_message, load_messages, send_owner_message_in_pool};
     use crate::prompts::{build_codex_streaming_prompt, claude_system_prompt};
     use crate::runtime::{
         process::{
@@ -3564,10 +3331,9 @@ mod tests {
         load_channel_agent_roster, mark_all_owner_inbox_read_in_pool,
         mark_inbox_items_read_in_pool, migrate, normalize_open_link_target,
         open_dm_with_agent_in_pool, queue_mentions_as_work_items, record_agent_activity,
-        same_codex_surface, send_owner_message_in_pool, try_claim_unassigned_task,
-        upsert_agent_thread_subscription, AgentAttachmentFile, AgentEvent, AgentInboxItemInput,
-        InboxWakeItem, InboxWakeSummary, MentionDispatchOrigin, AGENT_MEMORY_CONTEXT_LIMIT,
-        WORK_ITEM_FINISH_PROMPT,
+        same_codex_surface, try_claim_unassigned_task, upsert_agent_thread_subscription,
+        AgentAttachmentFile, AgentEvent, AgentInboxItemInput, InboxWakeItem, InboxWakeSummary,
+        MentionDispatchOrigin, AGENT_MEMORY_CONTEXT_LIMIT, WORK_ITEM_FINISH_PROMPT,
     };
     use chrono::{DateTime, Duration as ChronoDuration, Utc};
     use serde_json::{json, Value};

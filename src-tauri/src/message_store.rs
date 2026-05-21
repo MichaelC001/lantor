@@ -3,11 +3,14 @@ use std::collections::HashMap;
 use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::agent_profile::DEFAULT_OWNER_DISPLAY_NAME;
+use crate::agent_work_dispatch::dispatch_unassigned_task_availability;
 use crate::attachments::{write_attachment_file, ATTACHMENT_SIZE_LIMIT};
 use crate::ui_notifications::{notify_ui_message_upsert, notify_ui_refresh};
 use crate::{
     models::{Artifact, AttachmentUpload, Message, MessageAttachment, SavedMessage},
-    queue_agent_message_mentions, to_string, upsert_agent_thread_subscription, CommandResult,
+    queue_agent_message_mentions, queue_mentions_as_work_items, to_string,
+    upsert_agent_thread_subscription, CommandResult, MentionDispatchOrigin,
 };
 
 pub(crate) async fn load_messages(pool: &SqlitePool) -> CommandResult<Vec<Message>> {
@@ -305,6 +308,189 @@ pub(crate) async fn insert_agent_message_with_options(
     }
     let _ = notify_ui_refresh(pool, "message").await;
     Ok(msg_id)
+}
+
+pub(crate) async fn send_owner_message_in_pool(
+    pool: &SqlitePool,
+    channel_id: Uuid,
+    thread_root_id: Option<Uuid>,
+    body: &str,
+    as_task: bool,
+    attachments: Vec<AttachmentUpload>,
+) -> CommandResult<()> {
+    if body.trim().is_empty() && attachments.is_empty() {
+        return Err("message body or attachment is required".to_owned());
+    }
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
+    let channel_kind: Option<String> =
+        sqlx::query_scalar("select kind from channels where id = $1")
+            .bind(channel_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(to_string)?;
+    let Some(channel_kind) = channel_kind else {
+        return Err("channel does not exist".to_owned());
+    };
+    if as_task && channel_kind == "dm" {
+        return Err("direct messages do not support tasks".to_owned());
+    }
+
+    let owner_display_name =
+        sqlx::query_scalar::<_, String>("select display_name from owner_profile where id = 1")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(to_string)?
+            .unwrap_or_else(|| DEFAULT_OWNER_DISPLAY_NAME.to_owned());
+
+    let msg_id: Uuid = sqlx::query_scalar(
+        r#"
+        insert into messages (channel_id, thread_root_id, sender_name, sender_role, body, is_task)
+        values ($1, $2, $3, 'owner', $4, $5)
+        returning id
+        "#,
+    )
+    .bind(channel_id)
+    .bind(thread_root_id)
+    .bind(owner_display_name)
+    .bind(body.trim())
+    .bind(as_task)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(to_string)?;
+
+    insert_message_attachments_tx(&mut tx, msg_id, attachments).await?;
+
+    let mut task_id = None;
+    if as_task {
+        task_id = Some(
+            sqlx::query_scalar(
+                r#"
+            insert into tasks (message_id, channel_id, title, status)
+            values ($1, $2, $3, 'todo')
+            returning id
+            "#,
+            )
+            .bind(msg_id)
+            .bind(channel_id)
+            .bind(body.lines().next().unwrap_or("Untitled task"))
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(to_string)?,
+        );
+    }
+
+    tx.commit().await.map_err(to_string)?;
+    queue_mentions_as_work_items(
+        pool,
+        channel_id,
+        thread_root_id,
+        msg_id,
+        task_id,
+        body.trim(),
+        MentionDispatchOrigin::Owner,
+    )
+    .await?;
+    if let Some(task_id) = task_id {
+        dispatch_unassigned_task_availability(pool, task_id).await?;
+    }
+    let _ = notify_ui_refresh(pool, "message").await;
+    Ok(())
+}
+
+pub(crate) async fn update_message_in_pool(
+    pool: &SqlitePool,
+    message_id: Uuid,
+    body: &str,
+) -> CommandResult<()> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("message body is empty".to_owned());
+    }
+
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
+    let result = sqlx::query("update messages set body = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') where id = $1")
+        .bind(message_id)
+        .bind(body)
+        .execute(&mut *tx)
+        .await
+        .map_err(to_string)?;
+    if result.rows_affected() == 0 {
+        return Err("message does not exist".to_owned());
+    }
+
+    sqlx::query(
+        r#"
+        update tasks
+        set title = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+        where message_id = $1
+        "#,
+    )
+    .bind(message_id)
+    .bind(body.lines().next().unwrap_or("Untitled task"))
+    .execute(&mut *tx)
+    .await
+    .map_err(to_string)?;
+
+    tx.commit().await.map_err(to_string)?;
+    Ok(())
+}
+
+pub(crate) async fn delete_message_in_pool(
+    pool: &SqlitePool,
+    message_id: Uuid,
+) -> CommandResult<()> {
+    let result = sqlx::query("delete from messages where id = $1")
+        .bind(message_id)
+        .execute(pool)
+        .await
+        .map_err(to_string)?;
+    if result.rows_affected() == 0 {
+        return Err("message does not exist".to_owned());
+    }
+    Ok(())
+}
+
+pub(crate) async fn set_message_saved_in_pool(
+    pool: &SqlitePool,
+    message_id: Uuid,
+    saved: bool,
+) -> CommandResult<()> {
+    let exists: bool = sqlx::query_scalar("select exists(select 1 from messages where id = $1)")
+        .bind(message_id)
+        .fetch_one(pool)
+        .await
+        .map_err(to_string)?;
+    if !exists {
+        return Err("message does not exist".to_owned());
+    }
+
+    if saved {
+        sqlx::query(
+            r#"
+            insert into saved_messages (message_id)
+            values ($1)
+            on conflict (message_id) do nothing
+            "#,
+        )
+        .bind(message_id)
+        .execute(pool)
+        .await
+        .map_err(to_string)?;
+    } else {
+        sqlx::query("delete from saved_messages where message_id = $1")
+            .bind(message_id)
+            .execute(pool)
+            .await
+            .map_err(to_string)?;
+    }
+    let _ = notify_ui_refresh(pool, "saved_message_updated").await;
+    Ok(())
 }
 
 pub(crate) async fn insert_message_attachments_tx(
