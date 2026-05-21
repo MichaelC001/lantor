@@ -4695,7 +4695,14 @@ body.resizing-row * {
   overflow: hidden;
 }
 
+.thread-scroll-shell {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .thread-scroll {
+  height: 100%;
   min-height: 0;
   overflow: auto;
   overflow-anchor: none;
@@ -4712,14 +4719,15 @@ body.resizing-row * {
 }
 
 .thread-back-to-bottom {
-  position: sticky;
+  position: absolute;
+  left: 50%;
   bottom: 12px;
   z-index: 2;
   display: flex;
   align-items: center;
   gap: 7px;
   width: fit-content;
-  margin: 4px auto 12px;
+  margin: 0;
   padding: 8px 12px;
   border: 1px solid rgba(10, 132, 255, 0.18);
   border-radius: 999px;
@@ -4729,11 +4737,12 @@ body.resizing-row * {
   font-weight: var(--type-weight-semibold);
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.13);
   backdrop-filter: blur(14px);
+  transform: translateX(-50%);
 }
 
 .thread-back-to-bottom:hover {
   background: #fff;
-  transform: translateY(-1px);
+  transform: translateX(-50%) translateY(-1px);
 }
 
 @container thread (max-width: 420px) {
