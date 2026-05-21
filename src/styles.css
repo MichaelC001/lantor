@@ -7993,6 +7993,37 @@ body.resizing-row * {
   scrollbar-gutter: stable;
 }
 
+.activity-feed-new-activity {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  justify-content: center;
+  padding: 10px 22px 8px;
+  pointer-events: none;
+}
+
+.activity-feed-new-activity button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 7px 14px;
+  border: 1px solid var(--activity-feed-filter-active-border);
+  border-radius: 999px;
+  background: var(--activity-feed-control-bg);
+  color: var(--activity-feed-filter-active-ink);
+  font-size: var(--type-size-body);
+  font-weight: var(--type-weight-bold);
+  box-shadow: var(--activity-feed-control-shadow);
+  pointer-events: auto;
+}
+
+.activity-feed-new-activity button:hover {
+  background: var(--activity-feed-control-hover-bg);
+  color: var(--activity-feed-control-hover-ink);
+}
+
 .activity-feed-row-shell {
   position: relative;
   min-height: max-content;
@@ -9217,6 +9248,15 @@ body.resizing-row * {
     gap: 10px;
     padding: 12px 12px 118px;
     background: var(--activity-feed-mobile-bg);
+  }
+
+  .activity-feed-new-activity {
+    padding: 0 0 2px;
+  }
+
+  .activity-feed-new-activity button {
+    min-height: 36px;
+    padding: 8px 14px;
   }
 
   .saved-panel {
