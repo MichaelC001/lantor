@@ -4892,11 +4892,22 @@ body.resizing-row * {
 .agent-drawer-head button:disabled,
 .agent-head-action:disabled {
   cursor: not-allowed;
-  opacity: 0.45;
+  color: var(--ink-on-surface-muted);
 }
 
 .agent-drawer-head .agent-head-action[data-tooltip] {
   position: relative;
+}
+
+.agent-drawer-head button:disabled:hover,
+.agent-drawer-head button.danger:disabled:hover {
+  border-color: var(--line);
+  background: var(--panel-strong);
+  color: var(--ink-on-surface-muted);
+}
+
+.agent-drawer-head button:disabled svg {
+  opacity: 0.45;
 }
 
 .agent-drawer-head .agent-head-action[data-tooltip]::after {
