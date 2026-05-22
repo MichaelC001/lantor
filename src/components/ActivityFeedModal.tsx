@@ -57,6 +57,13 @@ function activityTimestampValue(item: ActivityFeedItem) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function sortActivityFeedItems(items: ActivityFeedItem[]) {
+  return [...items].sort((left, right) => {
+    if (left.unread !== right.unread) return left.unread ? -1 : 1;
+    return activityTimestampValue(right) - activityTimestampValue(left);
+  });
+}
+
 export function ActivityFeedModal({
   open,
   items,
@@ -71,7 +78,7 @@ export function ActivityFeedModal({
 }: ActivityFeedModalProps) {
   const [filter, setFilter] = useState<ActivityFeedFilter>("all");
   const [visibleCount, setVisibleCount] = useState(ACTIVITY_FEED_INITIAL_VISIBLE);
-  const [displayItems, setDisplayItems] = useState<ActivityFeedItem[]>(items);
+  const [displayItems, setDisplayItems] = useState<ActivityFeedItem[]>(() => sortActivityFeedItems(items));
   const [swipeState, setSwipeState] = useState<{
     itemId: string;
     startX: number;
@@ -113,7 +120,7 @@ export function ActivityFeedModal({
 
   useEffect(() => {
     if (open) return;
-    setDisplayItems(items);
+    setDisplayItems(sortActivityFeedItems(items));
   }, [items, open]);
 
   useEffect(() => {
@@ -137,7 +144,7 @@ export function ActivityFeedModal({
         }
       }
 
-      return changed ? next : current;
+      return changed ? sortActivityFeedItems(next) : current;
     });
   }, [items, open]);
 

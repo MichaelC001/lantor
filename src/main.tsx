@@ -251,6 +251,11 @@ function timestampSortValue(value: string) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function compareActivityFeedItems(left: ActivityFeedItem, right: ActivityFeedItem) {
+  if (left.unread !== right.unread) return left.unread ? -1 : 1;
+  return timestampSortValue(right.timestamp) - timestampSortValue(left.timestamp);
+}
+
 function limitActivitiesPerAgent(activities: AgentActivity[]) {
   const counts = new Map<string, number>();
   return [...activities]
@@ -1900,9 +1905,7 @@ function App() {
         }
         return { ...item, unread: false };
       })
-      .sort((left, right) => {
-        return timestampSortValue(right.timestamp) - timestampSortValue(left.timestamp);
-      })
+      .sort(compareActivityFeedItems)
       .slice(0, 120);
   }, [allActivityFeedItems, dismissedActivityFeedItems, readActivityFeedItems]);
 
