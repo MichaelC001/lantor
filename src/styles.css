@@ -2370,6 +2370,12 @@ button,
   transition: opacity 120ms ease, transform 120ms ease;
 }
 
+.thread-reply-summary.active-reply[data-active-menu-placement="above"] .thread-reply-active-menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+  transform: translateY(2px);
+}
+
 :root[data-theme="dark"] .thread-reply-active-menu {
   background: var(--bg-panel-strong);
 }

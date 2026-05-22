@@ -107,6 +107,7 @@ function taskStatusLabel(status: string) {
 }
 
 type ReplyProgress = ReturnType<typeof activeProgressByAgent>[number];
+type ActiveReplyMenuPlacement = "above" | "below";
 
 function compactReplyProgressText(value: string, limit: number) {
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -258,6 +259,7 @@ export function Conversation({
   const [showChannelActions, setShowChannelActions] = useState(false);
   const [messageMenu, setMessageMenu] = useState<MessageMenuState>(null);
   const [expandedChannelMessageIds, setExpandedChannelMessageIds] = useState<Set<string>>(() => new Set());
+  const [activeReplyMenuPlacementByMessageId, setActiveReplyMenuPlacementByMessageId] = useState<Record<string, ActiveReplyMenuPlacement>>({});
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const messageListContentRef = useRef<HTMLDivElement | null>(null);
   const messageListBottomAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -408,6 +410,27 @@ export function Conversation({
 
   function handleMessageListTouchMove() {
     stopFollowingMessages();
+  }
+
+  function updateActiveReplyMenuPlacement(messageId: string, summaryElement: HTMLElement) {
+    const menu = summaryElement.querySelector<HTMLElement>(".thread-reply-active-menu");
+    if (!menu) return;
+
+    const boundaryRect = messageListRef.current?.getBoundingClientRect();
+    const summaryRect = summaryElement.getBoundingClientRect();
+    const menuHeight = menu.offsetHeight || menu.getBoundingClientRect().height;
+    const gap = 6;
+    const boundaryTop = boundaryRect?.top ?? 0;
+    const boundaryBottom = boundaryRect?.bottom ?? window.innerHeight;
+    const spaceBelow = boundaryBottom - summaryRect.bottom - gap;
+    const spaceAbove = summaryRect.top - boundaryTop - gap;
+    const placement: ActiveReplyMenuPlacement = spaceBelow < menuHeight && spaceAbove > spaceBelow
+      ? "above"
+      : "below";
+
+    setActiveReplyMenuPlacementByMessageId((current) => (
+      current[messageId] === placement ? current : { ...current, [messageId]: placement }
+    ));
   }
 
   function handleMessageListContentLoad() {
@@ -756,6 +779,7 @@ export function Conversation({
             const activeReplyStatus = hasActiveReplyProgress
               ? replyProgressSummary(activeReplyProgress[0]).title
               : "";
+            const activeReplyMenuPlacement = activeReplyMenuPlacementByMessageId[message.id] ?? "below";
             const replyingAgents = activeReplyProgress.map((progress) => progress.agent.display_name).join(", ");
             const activeReplyAgentIds = new Set(activeReplyProgress.map((progress) => progress.agent.id).filter(Boolean));
             const replySummaryClassName = [
@@ -936,11 +960,18 @@ export function Conversation({
                       <button
                         type="button"
                         className={replySummaryClassName}
+                        data-active-menu-placement={hasActiveReplyProgress ? activeReplyMenuPlacement : undefined}
                         title="View thread replies"
                         aria-label={hasActiveReplyProgress
                           ? `${activeReplyStatus}${replyingAgents ? `: ${replyingAgents}` : ""}. View thread`
                           : `View ${replyCount} ${replyCount === 1 ? "reply" : "replies"} in thread`}
+                        onPointerEnter={(event) => {
+                          if (hasActiveReplyProgress) updateActiveReplyMenuPlacement(message.id, event.currentTarget);
+                        }}
                         onPointerDown={(event) => event.stopPropagation()}
+                        onFocus={(event) => {
+                          if (hasActiveReplyProgress) updateActiveReplyMenuPlacement(message.id, event.currentTarget);
+                        }}
                         onClick={(event) => {
                           event.stopPropagation();
                           setActiveThreadId(message.id);
