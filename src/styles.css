@@ -2219,7 +2219,11 @@ button,
 }
 
 .thread-reply-summary.active-reply strong {
-  color: #1f7a4d;
+  color: var(--thread-new-ink);
+}
+
+.thread-reply-summary.active-reply .thread-reply-summary-status {
+  color: var(--thread-new-ink);
 }
 
 .thread-reply-summary.unread-replies {

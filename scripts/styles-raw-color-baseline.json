@@ -1665,12 +1665,6 @@
       "n": 0
     },
     {
-      "selector": ".thread-reply-summary.active-reply strong",
-      "prop": "color",
-      "literal": "#1f7a4d",
-      "n": 0
-    },
-    {
       "selector": ".thread-resize-handle::after",
       "prop": "background",
       "literal": "rgba(10, 132, 255, 0)",
