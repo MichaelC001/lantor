@@ -3,8 +3,8 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::activity_store::load_agent_activity;
+use crate::app::{to_string, CommandResult};
 use crate::ui_notifications::{notify_ui_activity_upsert, notify_ui_refresh};
-use crate::{to_string, CommandResult};
 
 fn activity_phase(kind: &str) -> &'static str {
     match kind {

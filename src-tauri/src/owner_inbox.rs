@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::app::{to_string, CommandResult};
 use crate::ui_notifications::notify_ui_refresh;
-use crate::{to_string, CommandResult};
 
 pub(crate) async fn dismiss_inbox_items_in_pool<I>(pool: &SqlitePool, items: I) -> CommandResult<()>
 where

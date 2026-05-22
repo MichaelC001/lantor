@@ -4,8 +4,8 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+use crate::app::{to_string, CommandResult};
 use crate::runtime::process::truncate_activity_detail;
-use crate::{to_string, CommandResult};
 
 const CODEX_CONTEXT_ROTATE_DEFAULT_INPUT_TOKENS: i64 = 180_000;
 const CODEX_CONTEXT_ROTATE_MIN_INPUT_TOKENS: i64 = 50_000;

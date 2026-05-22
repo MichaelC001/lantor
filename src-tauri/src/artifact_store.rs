@@ -2,12 +2,12 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::app::{to_string, CommandResult};
 use crate::message_store::{insert_agent_message, load_artifact, load_message};
 use crate::text::compact_chars_middle;
 use crate::ui_notifications::{
     notify_ui_artifact_upsert, notify_ui_message_upsert, notify_ui_refresh,
 };
-use crate::{to_string, CommandResult};
 
 pub(crate) fn normalize_artifact_kind(kind: &str) -> CommandResult<String> {
     let normalized = kind.trim().to_lowercase().replace('_', "-");

@@ -6,7 +6,7 @@ use std::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::{models::AttachmentUpload, CommandResult};
+use crate::{app::CommandResult, models::AttachmentUpload};
 
 pub(crate) const ATTACHMENT_SIZE_LIMIT: usize = 25 * 1024 * 1024;
 

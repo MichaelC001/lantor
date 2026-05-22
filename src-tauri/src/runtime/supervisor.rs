@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
 use tokio::{sync::Semaphore, time::sleep};
 use uuid::Uuid;
@@ -20,23 +21,56 @@ use crate::{
         agent_has_active_or_pending_start, agent_runtime, enqueue_agent_work_if_available,
     },
     agent_memory::append_run_log,
+    app::{to_string, CommandResult},
     db::{acquire_supervisor_lock, db_connect_with_url, db_url, migrate},
     events::activity::record_agent_activity,
-    models::SupervisorCommand,
+    models::{SupervisorCommand, SupervisorStatus},
     prompts::{
         build_streaming_work_item_prompt, build_work_item_prompt, load_agent_memory_context,
         prepend_memory_context,
     },
-    to_string,
     ui_notifications::{notify_ui_agent_run_changed, notify_ui_work_item_changed},
     usage::agent_budget_exhausted,
-    CommandResult,
 };
 
 const SUPERVISOR_COMMAND_CONCURRENCY: usize = 4;
 const SUPERVISOR_IDLE_SLEEP: Duration = Duration::from_secs(2);
 const SUPERVISOR_ERROR_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const SUPERVISOR_ERROR_BACKOFF_MAX: Duration = Duration::from_secs(10);
+
+pub(crate) async fn load_supervisor_status(pool: &SqlitePool) -> CommandResult<SupervisorStatus> {
+    let row = sqlx::query(
+        r#"
+        select pid, status, updated_at
+        from supervisor_state
+        where id = 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(to_string)?;
+
+    let Some(row) = row else {
+        return Ok(SupervisorStatus {
+            pid: None,
+            status: "offline".to_owned(),
+            updated_at: None,
+        });
+    };
+
+    let updated_at: DateTime<Utc> = row.get("updated_at");
+    let status = if Utc::now().signed_duration_since(updated_at).num_seconds() > 10 {
+        "stale".to_owned()
+    } else {
+        row.get("status")
+    };
+
+    Ok(SupervisorStatus {
+        pid: row.get("pid"),
+        status,
+        updated_at: Some(updated_at),
+    })
+}
 
 pub(crate) async fn mark_orphaned_agent_runs(pool: &SqlitePool) -> CommandResult<()> {
     sqlx::query(

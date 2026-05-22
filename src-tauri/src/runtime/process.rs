@@ -18,7 +18,11 @@ use crate::events::control::{
 };
 use crate::runtime::streaming::mark_run_work_item_silent;
 use crate::ui_notifications::{notify_ui_agent_run_changed, notify_ui_work_item_changed};
-use crate::{db::db_url, mark_task_after_work_item_finished, to_string, CommandResult};
+use crate::{
+    app::{to_string, CommandResult},
+    db::db_url,
+    mark_task_after_work_item_finished,
+};
 
 const LANTOR_CONTEXT_TOOL_ENV: &str = "LANTOR_CONTEXT_TOOL";
 
@@ -396,6 +400,10 @@ pub(crate) async fn upsert_runtime_thread_id(
     .map_err(to_string)?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/runtime_process.rs"]
+mod relocated_tests;
 
 pub(crate) async fn wait_for_agent_run(
     pool: SqlitePool,

@@ -4,7 +4,10 @@ use chrono::Utc;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use crate::{prompts::ensure_agent_workspace, to_string, CommandResult};
+use crate::{
+    app::{to_string, CommandResult},
+    prompts::ensure_agent_workspace,
+};
 
 fn memory_path_for_workspace(working_directory: &str) -> CommandResult<PathBuf> {
     let working_directory = working_directory.trim();
@@ -178,3 +181,7 @@ pub(crate) async fn append_run_log(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests/agent_memory.rs"]
+mod relocated_tests;

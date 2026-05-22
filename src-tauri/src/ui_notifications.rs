@@ -7,9 +7,9 @@ use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::agent_inbox_wake::sync_inbox_for_work_item;
+use crate::app::{to_string, CommandResult};
 use crate::message_store::load_message;
 use crate::models::{AgentActivity, AgentRunPatch, AgentWorkItemPatch, Artifact, Message};
-use crate::{to_string, CommandResult};
 
 pub(crate) const UI_REFRESH_CHANNEL: &str = "lantor_ui_refresh";
 const SUPERVISOR_WAKE_CHANNEL: &str = "lantor_supervisor_wake";

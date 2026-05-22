@@ -3,8 +3,8 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use super::ClaudeSurface;
+use crate::app::{to_string, CommandResult};
 use crate::runtime::process::truncate_activity_detail;
-use crate::{to_string, CommandResult};
 
 pub(super) const CLAUDE_MAX_RETRIES_ENV: &str = "ANTHROPIC_MAX_RETRIES";
 pub(super) const DEFAULT_CLAUDE_MAX_RETRIES: &str = "5";

@@ -9,11 +9,11 @@ use crate::agent_inbox_wake::{
     AgentInboxItemInput,
 };
 use crate::agent_routing::{resolve_agent_handle, upsert_agent_thread_subscription};
+use crate::app::{to_string, AppState, CommandResult};
 use crate::events::activity::record_agent_activity;
 use crate::ui_notifications::{
     notify_supervisor_wake, notify_ui_refresh, notify_ui_work_item_changed,
 };
-use crate::{to_string, AppState, CommandResult};
 
 #[tauri::command]
 pub(crate) async fn dispatch_agent_work(
@@ -863,3 +863,7 @@ pub(crate) async fn retry_agent_work_in_pool(
 
     Ok(new_work_item_id)
 }
+
+#[cfg(test)]
+#[path = "tests/agent_work_dispatch.rs"]
+mod relocated_tests;

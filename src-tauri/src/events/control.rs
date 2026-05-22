@@ -29,11 +29,12 @@ use crate::task_messages::create_agent_task_thread;
 use crate::ui_notifications::{insert_system_message, notify_ui_refresh};
 use crate::usage::record_run_usage;
 use crate::{
+    app::{to_string, CommandResult},
     dispatch_task_assignment_to_agent, resolve_event_channel, resolve_run_reminder_anchor,
-    to_string, try_claim_unassigned_task, CommandResult,
+    try_claim_unassigned_task,
 };
 
-const AGENT_EVENT_PREFIX: &str = "LANTOR_EVENT ";
+const AGENT_EVENT_PREFIX: &str = "LANTOR_EVENT";
 const SILENT_REPLY_PREFIX: &str = "LANTOR_SILENT_REPLY";
 
 #[derive(Debug, Deserialize)]
@@ -299,23 +300,57 @@ fn extract_agent_event_json_with_remainder(line: &str) -> Option<(&str, &str)> {
             break;
         }
     }
-    let payload = trimmed.strip_prefix(AGENT_EVENT_PREFIX)?.trim_start();
+    let payload = strip_agent_event_prefix(trimmed)?;
+    if payload.is_empty() {
+        return None;
+    }
     match complete_json_object_end(payload) {
         Some(end) => Some((&payload[..end], &payload[end..])),
         None => Some((payload.trim(), "")),
     }
 }
 
-pub(crate) fn split_agent_event_jsons_from_text(text: &str) -> (String, Vec<String>) {
+fn strip_agent_event_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix(AGENT_EVENT_PREFIX)?;
+    let payload = match rest.chars().next() {
+        None => "",
+        Some(ch) if ch.is_whitespace() => rest.trim_start(),
+        _ => return None,
+    };
+    if payload.is_empty() || payload.starts_with('{') {
+        Some(payload)
+    } else {
+        None
+    }
+}
+
+fn find_agent_event_prefix(text: &str) -> Option<(usize, &str)> {
+    let mut offset = 0usize;
+    while let Some(found) = text[offset..].find(AGENT_EVENT_PREFIX) {
+        let marker_index = offset + found;
+        let candidate = &text[marker_index..];
+        if let Some(payload) = strip_agent_event_prefix(candidate) {
+            return Some((marker_index, payload));
+        }
+        offset = marker_index + AGENT_EVENT_PREFIX.len();
+    }
+    None
+}
+
+fn split_agent_event_jsons_from_text(
+    text: &str,
+    strip_incomplete_tail: bool,
+) -> (String, Vec<String>) {
     let mut visible = String::new();
     let mut events = Vec::new();
     let mut rest = text;
 
-    while let Some(marker_index) = rest.find(AGENT_EVENT_PREFIX) {
+    while let Some((marker_index, payload)) = find_agent_event_prefix(rest) {
         visible.push_str(&rest[..marker_index]);
-        let payload = rest[marker_index + AGENT_EVENT_PREFIX.len()..].trim_start();
         let Some(end) = complete_json_object_end(payload) else {
-            visible.push_str(&rest[marker_index..]);
+            if !strip_incomplete_tail {
+                visible.push_str(&rest[marker_index..]);
+            }
             return (visible.trim().to_owned(), events);
         };
         events.push(payload[..end].to_owned());
@@ -380,28 +415,15 @@ pub(crate) fn silent_reply_reason(body: &str) -> Option<String> {
 }
 
 pub(crate) fn split_streaming_agent_event_lines(body: &str) -> (String, Vec<String>) {
-    split_agent_event_jsons_from_text(body)
+    split_agent_event_jsons_from_text(body, false)
 }
 
 pub(crate) fn split_complete_streaming_agent_event_lines(body: &str) -> (String, Vec<String>) {
-    let mut visible = String::new();
-    let mut events = Vec::new();
-    for segment in body.split_inclusive('\n') {
-        if !segment.ends_with('\n') {
-            visible.push_str(segment);
-            continue;
-        }
-        let line = segment.trim_end_matches(['\r', '\n']);
-        let (line_visible, line_events) = split_agent_event_jsons_from_text(line);
-        if line_events.is_empty() {
-            visible.push_str(segment);
-        } else if !line_visible.is_empty() {
-            visible.push_str(&line_visible);
-            visible.push('\n');
-        }
-        events.extend(line_events);
-    }
-    (visible.trim().to_owned(), events)
+    split_streaming_agent_event_lines(body)
+}
+
+pub(crate) fn split_terminal_streaming_agent_event_lines(body: &str) -> (String, Vec<String>) {
+    split_agent_event_jsons_from_text(body, true)
 }
 
 fn control_event_creates_visible_chat_message(json: &str) -> bool {
@@ -1244,10 +1266,14 @@ pub(crate) async fn handle_agent_event(
 }
 
 #[cfg(test)]
+#[path = "../tests/events_control.rs"]
+mod relocated_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         silent_reply_reason, split_complete_streaming_agent_event_lines,
-        split_streaming_agent_event_lines,
+        split_streaming_agent_event_lines, split_terminal_streaming_agent_event_lines,
     };
 
     #[test]
@@ -1287,12 +1313,76 @@ mod tests {
 
         assert_eq!(
             events,
+            vec![
+                r#"{"type":"activity","title":"Step","detail":"one"}"#,
+                r#"{"type":"activity","title":"Later","detail":"two"}"#,
+            ]
+        );
+        assert_eq!(visible, "Working patch.\npartial");
+    }
+
+    #[test]
+    fn consumes_control_events_when_json_starts_on_next_line() {
+        let (visible, events) = split_streaming_agent_event_lines(
+            "Status update\nLANTOR_EVENT\n{\"type\":\"activity\",\"title\":\"Step\",\"detail\":\"one\"}\nDone",
+        );
+
+        assert_eq!(
+            events,
             vec![r#"{"type":"activity","title":"Step","detail":"one"}"#]
         );
-        assert_eq!(
-            visible,
-            "Working patch.\npartial LANTOR_EVENT {\"type\":\"activity\",\"title\":\"Later\",\"detail\":\"two\"}"
+        assert_eq!(visible, "Status update\n\nDone");
+    }
+
+    #[test]
+    fn terminal_split_strips_incomplete_control_tail() {
+        let (visible, events) = split_terminal_streaming_agent_event_lines(
+            "Working patch.\nLANTOR_EVENT\n{\"type\":\"activity\",\"title\":\"Step\"",
         );
+
+        assert!(events.is_empty());
+        assert_eq!(visible, "Working patch.");
+    }
+
+    #[test]
+    fn strips_control_event_with_multiple_whitespace_chars() {
+        let (visible, events) = split_streaming_agent_event_lines(
+            "LANTOR_EVENT  \t\r\n {\"type\":\"activity\",\"title\":\"x\"}",
+        );
+
+        assert_eq!(visible, "");
+        assert_eq!(events, vec![r#"{"type":"activity","title":"x"}"#]);
+    }
+
+    #[test]
+    fn drops_unclosed_control_event_at_terminal_split() {
+        let (visible, events) = split_terminal_streaming_agent_event_lines(
+            "Hello there.\nLANTOR_EVENT {\"type\":\"activity\"",
+        );
+
+        assert_eq!(visible, "Hello there.");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn keeps_unclosed_control_event_during_incremental_split() {
+        let body = "Hello there.\nLANTOR_EVENT {\"type\":\"activity\"";
+        let (visible, events) = split_complete_streaming_agent_event_lines(body);
+
+        assert_eq!(visible, body);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn preserves_text_when_event_marker_appears_in_prose() {
+        let body = "我刚提到 LANTOR_EVENT 是系统级控制行，看附录。";
+        let (visible, events) = split_streaming_agent_event_lines(body);
+        let (terminal_visible, terminal_events) = split_terminal_streaming_agent_event_lines(body);
+
+        assert_eq!(visible, body);
+        assert!(events.is_empty());
+        assert_eq!(terminal_visible, body);
+        assert!(terminal_events.is_empty());
     }
 
     #[test]

@@ -9,8 +9,8 @@ use sqlx::{
     SqlitePool,
 };
 
+use crate::app::{to_string, CommandResult};
 use crate::usage::backfill_agent_run_usage_from_logs;
-use crate::{to_string, CommandResult};
 
 const DEFAULT_DATABASE_URL: &str = "sqlite://~/Library/Application Support/Lantor/lantor.sqlite";
 

@@ -2,10 +2,10 @@ use serde_json::json;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::app::{to_string, CommandResult};
 use crate::events::activity::record_agent_activity;
 use crate::models::Task;
 use crate::ui_notifications::notify_ui_refresh;
-use crate::{to_string, CommandResult};
 
 pub(crate) async fn update_task_status_in_pool(
     pool: &SqlitePool,

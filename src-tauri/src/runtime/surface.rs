@@ -3,9 +3,9 @@ use std::time::Duration;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::app::{to_string, CommandResult};
 use crate::context_tool::short_id;
 use crate::text::compact_chars_middle;
-use crate::{to_string, CommandResult};
 
 const CLAUDE_THREAD_CONTEXT_MESSAGE_LIMIT: i64 = 16;
 
@@ -139,3 +139,7 @@ fn claude_context_target(
         .map(|thread_root_id| format!("{channel_label}:{}", short_id(thread_root_id)))
         .unwrap_or(channel_label)
 }
+
+#[cfg(test)]
+#[path = "../tests/runtime_surface.rs"]
+mod relocated_tests;

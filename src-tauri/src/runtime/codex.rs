@@ -35,7 +35,8 @@ use crate::ui_notifications::{
 };
 use crate::usage::{record_run_usage, usage_from_runtime_event};
 use crate::{
-    build_steer_followup_prompt, load_inbox_wake_items_for_work_item, to_string, CommandResult,
+    app::{to_string, CommandResult},
+    build_steer_followup_prompt, load_inbox_wake_items_for_work_item,
 };
 
 mod protocol;

@@ -1110,6 +1110,7 @@ function ThreadReplyComposer({
       <DraftAttachmentsPreview attachments={replyAttachments} onRemove={removeReplyAttachment} />
       <textarea
         ref={textareaRef}
+        rows={1}
         value={text}
         autoCapitalize="none"
         autoComplete="off"

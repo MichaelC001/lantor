@@ -1,4 +1,4 @@
-import { Bell, Check, Hash, Inbox, MessageSquare, UserRound, X } from "lucide-react";
+import { ArrowUp, Bell, Check, Hash, Inbox, MessageSquare, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent } from "react";
 import type { Agent, ActivityFeedItem, ActivityFeedKind, OwnerProfile } from "../types";
@@ -52,6 +52,11 @@ function actorAvatarAgent(item: ActivityFeedItem, agents: Agent[], ownerProfile:
   return null;
 }
 
+function activityTimestampValue(item: ActivityFeedItem) {
+  const value = new Date(item.timestamp).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
 export function ActivityFeedModal({
   open,
   items,
@@ -66,6 +71,7 @@ export function ActivityFeedModal({
 }: ActivityFeedModalProps) {
   const [filter, setFilter] = useState<ActivityFeedFilter>("all");
   const [visibleCount, setVisibleCount] = useState(ACTIVITY_FEED_INITIAL_VISIBLE);
+  const [displayItems, setDisplayItems] = useState<ActivityFeedItem[]>(items);
   const [swipeState, setSwipeState] = useState<{
     itemId: string;
     startX: number;
@@ -73,13 +79,22 @@ export function ActivityFeedModal({
     offsetX: number;
     tracking: boolean;
   } | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const suppressNextClickRef = useRef(false);
-  const unreadCount = items.filter((item) => item.unread).length;
+  const unreadCount = displayItems.filter((item) => item.unread).length;
+  const pendingItems = useMemo(() => {
+    const displayedById = new Map(displayItems.map((item) => [item.id, item]));
+    return items.filter((item) => {
+      const displayed = displayedById.get(item.id);
+      if (!displayed) return true;
+      return activityTimestampValue(item) > activityTimestampValue(displayed);
+    });
+  }, [displayItems, items]);
   const filteredItems = useMemo(() => {
-    if (filter === "all") return items;
-    if (filter === "unread") return items.filter((item) => item.unread);
-    return items.filter((item) => item.kind === filter);
-  }, [filter, items]);
+    if (filter === "all") return displayItems;
+    if (filter === "unread") return displayItems.filter((item) => item.unread);
+    return displayItems.filter((item) => item.kind === filter);
+  }, [displayItems, filter]);
   const filteredUnreadCount = filteredItems.filter((item) => item.unread).length;
   const visibleItems = useMemo(
     () => filteredItems.slice(0, visibleCount),
@@ -89,7 +104,42 @@ export function ActivityFeedModal({
 
   useEffect(() => {
     setVisibleCount(ACTIVITY_FEED_INITIAL_VISIBLE);
-  }, [filter, items.length]);
+  }, [displayItems.length, filter]);
+
+  useEffect(() => {
+    if (!open) return;
+    setVisibleCount(ACTIVITY_FEED_INITIAL_VISIBLE);
+  }, [open]);
+
+  useEffect(() => {
+    if (open) return;
+    setDisplayItems(items);
+  }, [items, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    setDisplayItems((current) => {
+      const latestById = new Map(items.map((item) => [item.id, item]));
+      let changed = false;
+      const next: ActivityFeedItem[] = [];
+
+      for (const displayed of current) {
+        const latest = latestById.get(displayed.id);
+        if (!latest) {
+          changed = true;
+          continue;
+        }
+        if (activityTimestampValue(latest) <= activityTimestampValue(displayed)) {
+          if (latest !== displayed) changed = true;
+          next.push(latest);
+        } else {
+          next.push(displayed);
+        }
+      }
+
+      return changed ? next : current;
+    });
+  }, [items, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -152,6 +202,14 @@ export function ActivityFeedModal({
     onOpenItem(item);
   }
 
+  function showPendingItems() {
+    setDisplayItems(items);
+    setVisibleCount(ACTIVITY_FEED_INITIAL_VISIBLE);
+    window.requestAnimationFrame(() => {
+      bodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
+
   return (
     <div className="search-backdrop" onClick={onClose}>
       <section className="activity-feed-panel activity-panel" onClick={(event) => event.stopPropagation()}>
@@ -161,7 +219,7 @@ export function ActivityFeedModal({
           </button>
           <div>
             <h2>Activity</h2>
-            <p>{items.length} active · {unreadCount} unread</p>
+            <p>{displayItems.length} active · {unreadCount} unread</p>
           </div>
           <div className="activity-feed-head-actions">
             <button
@@ -193,7 +251,18 @@ export function ActivityFeedModal({
           ))}
         </div>
 
-        <div className="activity-feed-body">
+        <div className="activity-feed-body" ref={bodyRef}>
+          {pendingItems.length > 0 && (
+            <div className="activity-feed-new-activity">
+              <button type="button" onClick={showPendingItems}>
+                <ArrowUp size={16} />
+                <span>
+                  {pendingItems.length === 1 ? "1 new activity" : `${pendingItems.length} new activities`}
+                </span>
+              </button>
+            </div>
+          )}
+
           {filteredItems.length === 0 && (
             <div className="search-empty">
               <Inbox size={34} />

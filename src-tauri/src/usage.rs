@@ -2,8 +2,8 @@ use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::app::{to_string, CommandResult};
 use crate::ui_notifications::notify_ui_agent_run_changed;
-use crate::{to_string, CommandResult};
 
 fn value_i64_at(value: &Value, path: &str) -> Option<i64> {
     value.pointer(path).and_then(|value| {
