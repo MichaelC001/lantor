@@ -384,6 +384,132 @@ async fn task_work_item_queue_and_start_do_not_insert_system_messages() {
 }
 
 #[tokio::test]
+async fn busy_warm_codex_start_requeues_work_item_without_leaving_running_state() {
+    let Some((pool, schema)) = test_pool().await else {
+        return;
+    };
+    let result: Result<(), String> = async {
+        let agent_id = insert_test_agent(&pool, "busy-start-agent").await?;
+        let channel_id = insert_test_channel(&pool, "busy-start").await?;
+        let work_item_id: Uuid = sqlx::query_scalar(
+            r#"
+            insert into agent_work_items (
+                agent_id, channel_id, source_kind, title, context, status
+            )
+            values ($1, $2, 'thread_followup', 'busy start', 'context', 'running')
+            returning id
+            "#,
+        )
+        .bind(agent_id)
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        let run_id: Uuid = sqlx::query_scalar(
+            r#"
+            insert into agent_runs (agent_id, work_item_id, command, working_directory, status, pid, log)
+            values ($1, $2, 'codex app-server --listen stdio://', '', 'running', 51932, '$ codex app-server --listen stdio://')
+            returning id
+            "#,
+        )
+        .bind(agent_id)
+        .bind(work_item_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        sqlx::query(
+            r#"
+            update agent_work_items
+            set run_id = $2
+            where id = $1
+            "#,
+        )
+        .bind(work_item_id)
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        sqlx::query("update agents set status = 'running' where id = $1")
+            .bind(agent_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        crate::runtime::codex::cleanup_failed_warm_codex_start(
+            &pool,
+            agent_id,
+            run_id,
+            Some(work_item_id),
+            "codex warm runtime became busy before turn start",
+            true,
+        )
+        .await?;
+
+        let run_row = sqlx::query(
+            r#"
+            select status, stopped_at, log
+            from agent_runs
+            where id = $1
+            "#,
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        let run_status: String = run_row.get("status");
+        let run_stopped_at: Option<String> = run_row.get("stopped_at");
+        let run_log: String = run_row.get("log");
+        assert_eq!(run_status, "failed");
+        assert!(run_stopped_at.is_some());
+        assert!(run_log.contains("codex warm runtime became busy before turn start"));
+
+        let work_row = sqlx::query(
+            r#"
+            select status, run_id, completed_at
+            from agent_work_items
+            where id = $1
+            "#,
+        )
+        .bind(work_item_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        let work_status: String = work_row.get("status");
+        let work_run_id: Option<Uuid> = work_row.get("run_id");
+        let work_completed_at: Option<String> = work_row.get("completed_at");
+        assert_eq!(work_status, "queued");
+        assert!(work_run_id.is_none());
+        assert!(work_completed_at.is_none());
+
+        let agent_status: String = sqlx::query_scalar("select status from agents where id = $1")
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+        assert_eq!(agent_status, "running");
+
+        let activity_title: String = sqlx::query_scalar(
+            r#"
+            select title
+            from agent_activities
+            where run_id = $1
+            order by created_at desc
+            limit 1
+            "#,
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        assert_eq!(activity_title, "Request requeued");
+        Ok(())
+    }
+    .await;
+    drop_test_schema(pool, schema).await;
+    assert!(result.is_ok(), "{:?}", result.err());
+}
+
+#[tokio::test]
 async fn restart_backlog_redispatches_assigned_in_progress_tasks() {
     let Some((pool, schema)) = test_pool().await else {
         return;
