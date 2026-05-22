@@ -3290,6 +3290,7 @@ function App() {
         activeRoot={activeRoot}
         rootMessages={rootMessages}
         threadReplyCounts={threadReplyCounts}
+        threadUnreadCounts={threadUnreadCounts}
         threadReplySummaries={threadReplySummaries}
         visibleTasks={visibleTasks}
         draft={draft}

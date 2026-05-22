@@ -46,6 +46,7 @@ type ConversationProps = {
   activeRoot: Message | null;
   rootMessages: Message[];
   threadReplyCounts: Record<string, number>;
+  threadUnreadCounts: Record<string, number>;
   threadReplySummaries: Record<string, ThreadReplySummary>;
   visibleTasks: Task[];
   draft: string;
@@ -133,6 +134,7 @@ export function Conversation({
   activeRoot,
   rootMessages,
   threadReplyCounts,
+  threadUnreadCounts,
   threadReplySummaries,
   visibleTasks,
   draft,
@@ -659,11 +661,17 @@ export function Conversation({
             {rootMessages.map((message, index) => {
             const linkedTask = taskForMessage(message.id);
             const replyCount = threadReplyCounts[message.id] ?? 0;
+            const unreadReplyCount = threadUnreadCounts[message.id] ?? 0;
             const replySummary = threadReplySummaries[message.id] ?? null;
             const activeReplyProgress = activeReplyProgressByRoot[message.id] ?? [];
             const hasActiveReplyProgress = activeReplyProgress.length > 0;
             const replyingLabel = replyingAgentsLabel(activeReplyProgress);
             const activeReplyAgentIds = new Set(activeReplyProgress.map((progress) => progress.agent.id).filter(Boolean));
+            const replySummaryClassName = [
+              "thread-reply-summary",
+              hasActiveReplyProgress ? "active-reply" : "",
+              unreadReplyCount > 0 ? "unread-replies" : "",
+            ].filter(Boolean).join(" ");
             const replyParticipants = (replySummary?.participants ?? [])
               .filter((participant) => !participant.sender_agent_id || !activeReplyAgentIds.has(participant.sender_agent_id))
               .slice(0, Math.max(0, 3 - activeReplyProgress.length));
@@ -835,7 +843,7 @@ export function Conversation({
                     {(hasActiveReplyProgress || (replyCount > 0 && replySummary)) && (
                       <button
                         type="button"
-                        className={`thread-reply-summary ${hasActiveReplyProgress ? "active-reply" : ""}`}
+                        className={replySummaryClassName}
                         title="View thread replies"
                         aria-label={hasActiveReplyProgress
                           ? `${replyingLabel}. View thread`
