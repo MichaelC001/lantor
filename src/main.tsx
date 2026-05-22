@@ -141,6 +141,7 @@ const MIN_COMPACT_CONTENT_WIDTH = 320;
 const MIN_COMPACT_SIDEBAR_VISIBLE_WIDTH = 220;
 const MOBILE_BREAKPOINT = 760;
 const UI_REFRESH_DEBOUNCE_MS = 80;
+const EPHEMERAL_BACKEND_UPDATE_BATCH_MS = 50;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const ACTIVITY_HISTORY_LIMIT_PER_AGENT = 80;
 const DEFAULT_OWNER_DISPLAY_NAME = "Me";
@@ -210,6 +211,13 @@ type UiBackendEvent =
   | { type: "work_item_upsert"; reason?: string; work_item: Omit<AgentWorkItem, "context"> & { context?: string } }
   | { type: "artifact_upsert"; reason?: string; artifact: Artifact };
 
+type EphemeralBackendUpdateBufferState = {
+  messageUpserts: Map<string, Message>;
+  messageDeletes: Set<string>;
+  activities: AgentActivity[];
+  runPatches: Map<string, Omit<AgentRun, "log"> & { log?: string }>;
+};
+
 type ConfirmRequest = {
   title: string;
   body: string;
@@ -254,6 +262,27 @@ function timestampSortValue(value: string) {
 function compareActivityFeedItems(left: ActivityFeedItem, right: ActivityFeedItem) {
   if (left.unread !== right.unread) return left.unread ? -1 : 1;
   return timestampSortValue(right.timestamp) - timestampSortValue(left.timestamp);
+}
+
+function createEphemeralBackendUpdateBufferState(): EphemeralBackendUpdateBufferState {
+  return {
+    messageUpserts: new Map(),
+    messageDeletes: new Set(),
+    activities: [],
+    runPatches: new Map(),
+  };
+}
+
+function shouldBatchMessageUpsert(reason: string | undefined) {
+  return reason === "stream_event_consumed";
+}
+
+function shouldBatchMessageDelete(reason: string | undefined) {
+  return reason === "superseded_progress_status";
+}
+
+function shouldBatchAgentRunUpsert(reason: string | undefined) {
+  return reason === "run_usage";
 }
 
 function limitActivitiesPerAgent(activities: AgentActivity[]) {
@@ -742,9 +771,11 @@ function App() {
   const refreshInFlightRef = useRef(false);
   const refreshQueuedRef = useRef(false);
   const messageDeltaBufferRef = useRef<Map<string, { append: string; deliveryState: Message["delivery_state"] }>>(new Map());
+  const ephemeralBackendUpdateBufferRef = useRef<EphemeralBackendUpdateBufferState>(createEphemeralBackendUpdateBufferState());
   const optimisticMessagesRef = useRef<Map<string, Message>>(new Map());
   const optimisticAttachmentUrlsRef = useRef<Map<string, string[]>>(new Map());
   const messageDeltaFlushTimerRef = useRef<number | null>(null);
+  const ephemeralBackendUpdateFlushTimerRef = useRef<number | null>(null);
   const appHistoryReadyRef = useRef(false);
   const appHistoryIndexRef = useRef(0);
   const appHistoryMaxIndexRef = useRef(0);
@@ -823,6 +854,8 @@ function App() {
   }
 
   async function refresh(includeOptimistic = true) {
+    flushMessageDeltas();
+    flushEphemeralBackendUpdates();
     const next = normalizeBootstrap(await apiInvoke<Bootstrap>("bootstrap"));
     setData(includeOptimistic ? withOptimisticMessages(next) : next);
     setActiveChannelId((prev) => {
@@ -862,6 +895,138 @@ function App() {
       refreshTimerRef.current = null;
       refreshWithError(fallback);
     }, UI_REFRESH_DEBOUNCE_MS);
+  }
+
+  function flushEphemeralBackendUpdates() {
+    if (ephemeralBackendUpdateFlushTimerRef.current !== null) {
+      window.clearTimeout(ephemeralBackendUpdateFlushTimerRef.current);
+      ephemeralBackendUpdateFlushTimerRef.current = null;
+    }
+    const pending = ephemeralBackendUpdateBufferRef.current;
+    if (
+      pending.messageUpserts.size === 0 &&
+      pending.messageDeletes.size === 0 &&
+      pending.activities.length === 0 &&
+      pending.runPatches.size === 0
+    ) {
+      return;
+    }
+    ephemeralBackendUpdateBufferRef.current = createEphemeralBackendUpdateBufferState();
+    setData((current) => {
+      if (!current) {
+        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`);
+        return current;
+      }
+
+      let messages = current.messages;
+      let messagesChanged = false;
+      if (pending.messageDeletes.size > 0) {
+        const deleteIds = pending.messageDeletes;
+        const nextMessages = messages.filter((item) => !deleteIds.has(item.id));
+        if (nextMessages.length !== messages.length) {
+          messages = nextMessages;
+          messagesChanged = true;
+        }
+      }
+      if (pending.messageUpserts.size > 0) {
+        const nextMessages = [...messages];
+        let nextMessagesChanged = messagesChanged;
+        for (const message of pending.messageUpserts.values()) {
+          const existingIndex = nextMessages.findIndex((item) => item.id === message.id);
+          if (existingIndex >= 0) {
+            nextMessages[existingIndex] = message;
+          } else {
+            nextMessages.push(message);
+          }
+          nextMessagesChanged = true;
+        }
+        if (nextMessagesChanged) {
+          messages = sortedMessages(nextMessages);
+          messagesChanged = true;
+        }
+      }
+
+      let agentActivities = current.agent_activities;
+      let activitiesChanged = false;
+      if (pending.activities.length > 0) {
+        const nextActivities = [...agentActivities];
+        for (const activity of pending.activities) {
+          const existingIndex = nextActivities.findIndex((item) => item.id === activity.id);
+          if (existingIndex >= 0) {
+            nextActivities[existingIndex] = activity;
+          } else {
+            nextActivities.unshift(activity);
+          }
+          activitiesChanged = true;
+        }
+        if (activitiesChanged) {
+          agentActivities = limitActivitiesPerAgent(nextActivities);
+        }
+      }
+
+      let agentRuns = current.agent_runs;
+      let runsChanged = false;
+      if (pending.runPatches.size > 0) {
+        const nextRuns = [...agentRuns];
+        for (const patch of pending.runPatches.values()) {
+          const existing = nextRuns.find((item) => item.id === patch.id);
+          const run: AgentRun = {
+            ...patch,
+            log: patch.log ?? existing?.log ?? "",
+          };
+          if (existing) {
+            const existingIndex = nextRuns.findIndex((item) => item.id === patch.id);
+            nextRuns[existingIndex] = { ...existing, ...run };
+          } else {
+            nextRuns.unshift(run);
+          }
+          runsChanged = true;
+        }
+        if (runsChanged) {
+          nextRuns.sort((left, right) => new Date(right.started_at).getTime() - new Date(left.started_at).getTime());
+          agentRuns = nextRuns.slice(0, 30);
+        }
+      }
+
+      if (!messagesChanged && !activitiesChanged && !runsChanged) return current;
+      return {
+        ...current,
+        messages: messagesChanged ? messages : current.messages,
+        agent_activities: activitiesChanged ? agentActivities : current.agent_activities,
+        agent_runs: runsChanged ? agentRuns : current.agent_runs,
+      };
+    });
+  }
+
+  function scheduleEphemeralBackendUpdatesFlush() {
+    if (ephemeralBackendUpdateFlushTimerRef.current !== null) return;
+    ephemeralBackendUpdateFlushTimerRef.current = window.setTimeout(() => {
+      flushEphemeralBackendUpdates();
+    }, EPHEMERAL_BACKEND_UPDATE_BATCH_MS);
+  }
+
+  function queueEphemeralMessageUpsert(message: Message) {
+    messageDeltaBufferRef.current.delete(message.id);
+    ephemeralBackendUpdateBufferRef.current.messageDeletes.delete(message.id);
+    ephemeralBackendUpdateBufferRef.current.messageUpserts.set(message.id, message);
+    scheduleEphemeralBackendUpdatesFlush();
+  }
+
+  function queueEphemeralMessageDelete(messageId: string) {
+    messageDeltaBufferRef.current.delete(messageId);
+    ephemeralBackendUpdateBufferRef.current.messageUpserts.delete(messageId);
+    ephemeralBackendUpdateBufferRef.current.messageDeletes.add(messageId);
+    scheduleEphemeralBackendUpdatesFlush();
+  }
+
+  function queueEphemeralActivityUpsert(activity: AgentActivity) {
+    ephemeralBackendUpdateBufferRef.current.activities.push(activity);
+    scheduleEphemeralBackendUpdatesFlush();
+  }
+
+  function queueEphemeralAgentRunUpsert(patch: Omit<AgentRun, "log"> & { log?: string }) {
+    ephemeralBackendUpdateBufferRef.current.runPatches.set(patch.id, patch);
+    scheduleEphemeralBackendUpdatesFlush();
   }
 
   function applyMessageUpsert(message: Message) {
@@ -1052,7 +1217,12 @@ function App() {
         }
         return;
       }
+      const eventReason = parsed.reason;
       if (parsed.type === "message_upsert") {
+        if (shouldBatchMessageUpsert(eventReason)) {
+          queueEphemeralMessageUpsert(parsed.message);
+          return;
+        }
         applyMessageUpsert(parsed.message);
         return;
       }
@@ -1061,14 +1231,22 @@ function App() {
         return;
       }
       if (parsed.type === "message_delete") {
+        if (shouldBatchMessageDelete(eventReason)) {
+          queueEphemeralMessageDelete(parsed.message_id);
+          return;
+        }
         applyMessageDelete(parsed.message_id);
         return;
       }
       if (parsed.type === "activity_upsert") {
-        applyActivityUpsert(parsed.activity);
+        queueEphemeralActivityUpsert(parsed.activity);
         return;
       }
       if (parsed.type === "agent_run_upsert") {
+        if (shouldBatchAgentRunUpsert(eventReason)) {
+          queueEphemeralAgentRunUpsert(parsed.run);
+          return;
+        }
         applyAgentRunUpsert(parsed.run);
         return;
       }
@@ -1151,6 +1329,9 @@ function App() {
       }
       if (messageDeltaFlushTimerRef.current !== null) {
         window.clearTimeout(messageDeltaFlushTimerRef.current);
+      }
+      if (ephemeralBackendUpdateFlushTimerRef.current !== null) {
+        window.clearTimeout(ephemeralBackendUpdateFlushTimerRef.current);
       }
       unlisten?.();
     };
