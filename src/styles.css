@@ -1395,7 +1395,7 @@ button,
 
 .agent-avatar-profile-card {
   --agent-avatar-profile-bg: var(--bg-panel);
-  --agent-avatar-profile-border: var(--border-subtle);
+  --agent-avatar-profile-border: var(--border-strong);
   --agent-avatar-profile-shadow: var(--surface-shadow);
   --agent-avatar-profile-ink-primary: var(--ink-primary);
   --agent-avatar-profile-ink-secondary: var(--ink-secondary);
