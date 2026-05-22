@@ -27,6 +27,7 @@ export type ActiveAgentProgress = {
   key: string;
   agent: Pick<Agent, "handle" | "display_name" | "status"> &
     Partial<Pick<Agent, "id" | "runtime" | "model" | "role" | "avatar" | "description">>;
+  state: "working" | "queued";
   workItem: AgentWorkItem | null;
   queuedItems: AgentWorkItem[];
   latestActivity: AgentActivity | null;
@@ -37,6 +38,7 @@ export type ActiveAgentProgress = {
 type ProgressCandidate = {
   message: Message | null;
   workItem: AgentWorkItem | null;
+  state: "working" | "queued";
   latestAt: number;
 };
 
@@ -59,6 +61,14 @@ const ACTIVITY_STATUS_LABELS: Record<string, string> = {
 
 function activityTitle(activity: AgentActivity) {
   return (activity.summary || activity.title || phaseLabel(activity.phase || activity.kind)).trim();
+}
+
+function userFacingActivityTitle(activity: AgentActivity) {
+  const title = activityTitle(activity);
+  const lowered = title.toLowerCase();
+  if (lowered.includes("warm app-server ready") || lowered.includes("warm stream-json ready")) return "Runtime ready";
+  if (lowered === "started working" || lowered === "run started" || lowered === "run created") return "Working";
+  return title;
 }
 
 function statusForActivity(activity: AgentActivity) {
@@ -154,6 +164,23 @@ function activityDetail(activity: AgentActivity) {
 
   const detail = activity.detail.trim();
   if (!detail || detail.startsWith("{") || detail.startsWith("[")) return "";
+  if (detail === "pid unavailable") return "";
+  const parts = detail.split(/[,\n]/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length > 0) {
+    const entries = parts.map((part) => {
+      const separator = part.indexOf("=");
+      return separator > 0
+        ? [part.slice(0, separator).trim(), part.slice(separator + 1).trim()]
+        : null;
+    });
+    if (entries.every(Boolean)) {
+      return entries
+        .filter((entry): entry is string[] => Boolean(entry))
+        .filter(([key]) => !["pid", "thread_id", "session_id", "request_id", "run_id", "reference_id", "uuid"].includes(key))
+        .map(([key, value]) => `${key.replace(/_/g, " ")} ${value}`)
+        .join(", ");
+    }
+  }
   return detail;
 }
 
@@ -176,7 +203,7 @@ function compactProgressActivities(activities: AgentActivity[]) {
   return activities.filter((activity) => {
     if (seen.has(activity.id)) return false;
     seen.add(activity.id);
-    const signature = `${activity.phase || activity.kind || ""}|${activityTitle(activity)}|${activity.detail.trim()}`;
+    const signature = `${activity.phase || activity.kind || ""}|${userFacingActivityTitle(activity)}|${activity.detail.trim()}`;
     if (signature === lastSignature) return false;
     lastSignature = signature;
     return true;
@@ -285,6 +312,7 @@ export function activeProgressByAgent(
     addCandidate(runId, {
       message,
       workItem: null,
+      state: "working",
       latestAt: timestamp(message.updated_at),
     });
   });
@@ -306,6 +334,7 @@ export function activeProgressByAgent(
       addCandidate(runId, {
         message: null,
         workItem,
+        state: "working",
         latestAt: Math.max(
           timestamp(workItem.updated_at),
           timestamp(run?.started_at ?? ""),
@@ -334,6 +363,7 @@ export function activeProgressByAgent(
       agent: existing?.agent ?? agentForProgress(handle, latestActivity, agents),
       workItem: candidate.workItem ?? existing?.workItem ?? null,
       queuedItems: existing?.queuedItems ?? [],
+      state: existing?.state === "working" || candidate.state === "working" ? "working" : "queued",
       latestActivity: existing && existing.latestAt > latestAt ? existing.latestActivity : latestActivity,
       history: compactHistory,
       latestAt: Math.max(existing?.latestAt ?? 0, latestAt),
@@ -359,6 +389,7 @@ export function activeProgressByAgent(
       progressByAgent.set(key, {
         key,
         agent,
+        state: existing?.state ?? "queued",
         workItem: existing?.workItem ?? null,
         queuedItems,
         latestActivity: existing?.latestActivity ?? null,
@@ -383,19 +414,23 @@ export function ActivityProgressDock({
   const progress = activeProgressByAgent(messages, activities, runs, workItems, agents, channelId, threadRootId);
   if (progress.length === 0) return null;
 
-  const latest = progress[0];
+  const workingCount = progress.filter((item) => item.state === "working").length;
+  const latest = progress.find((item) => item.state === "working") ?? progress[0];
   const latestActivity = latest.latestActivity;
+  const latestWorking = latest.state === "working";
   const Icon = progressIcon(latestActivity);
   const providerRetrying = isProviderRetryActivity(latestActivity);
   const queuedCount = progress.reduce((count, item) => count + item.queuedItems.length, 0);
   const title = progress.length === 1
     ? providerRetrying
       ? `${latest.agent.display_name} is waiting on provider`
-      : latestActivity
+      : latestWorking
         ? `${latest.agent.display_name} is working`
         : `${latest.agent.display_name} has queued work`
-    : `${progress.length} agents are working`;
-  const latestTitle = latestActivity ? activityTitle(latestActivity) : "Queued";
+    : workingCount > 0
+      ? `${workingCount} ${workingCount === 1 ? "agent is" : "agents are"} working`
+      : `${progress.length} agents have queued work`;
+  const latestTitle = latestActivity ? userFacingActivityTitle(latestActivity) : latestWorking ? "Working" : "Queued";
   const latestDetail = latestActivity ? activityDetail(latestActivity) : "";
   const history = progress
     .flatMap((item) => item.history.map((activity) => ({ activity, agent: item.agent })))
@@ -404,7 +439,7 @@ export function ActivityProgressDock({
 
   return (
     <details className="activity-progress-dock">
-      <summary data-state={providerRetrying ? "provider-retrying" : latestActivity ? "working" : "queued"}>
+      <summary data-state={providerRetrying ? "provider-retrying" : latestWorking ? "working" : "queued"}>
         <span className="activity-progress-avatar-stack" aria-hidden="true">
           {progress.slice(0, 3).map((item) => (
             <AgentAvatar key={item.key} agent={item.agent} size="sm" showStatus={false} />
@@ -443,7 +478,7 @@ export function ActivityProgressDock({
                 />
                 <div className="activity-timeline-body">
                   <div className="activity-timeline-title">
-                    <strong>{activityTitle(activity)}</strong>
+                    <strong>{userFacingActivityTitle(activity)}</strong>
                     <span className={`activity-status status-${activity.status}`}>
                       {statusForActivity(activity)}
                     </span>

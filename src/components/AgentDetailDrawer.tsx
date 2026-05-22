@@ -83,8 +83,10 @@ function statusForActivity(activity: AgentActivity) {
 function userFacingActivityTitle(activity: AgentActivity) {
   const title = activity.summary || activity.title;
   const lowered = title.toLowerCase();
+  if (lowered.includes("warm app-server ready") || lowered.includes("warm stream-json ready")) return "Runtime ready";
   if (
     (lowered.includes("warm turn") && lowered.includes("started")) ||
+    lowered === "started working" ||
     lowered === "run started" ||
     lowered === "run created"
   ) {
@@ -110,6 +112,34 @@ function userFacingActivityTitle(activity: AgentActivity) {
     if (lowered.includes("cancelled")) return "Request cancelled";
   }
   return title;
+}
+
+const INTERNAL_ACTIVITY_DETAIL_KEYS = new Set([
+  "pid",
+  "thread_id",
+  "session_id",
+  "request_id",
+  "run_id",
+  "reference_id",
+  "uuid",
+]);
+
+function keyValueActivityDetail(detail: string) {
+  const parts = detail.split(/[,\n]/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) return null;
+  const entries: Array<[string, string]> = [];
+  for (const part of parts) {
+    const separator = part.indexOf("=");
+    if (separator <= 0) return null;
+    const key = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    if (!key || !value) return null;
+    entries.push([key, value]);
+  }
+  return entries
+    .filter(([key]) => !INTERNAL_ACTIVITY_DETAIL_KEYS.has(key))
+    .map(([key, value]) => `${key.replace(/_/g, " ")} ${value}`)
+    .join(", ");
 }
 
 function userFacingActivityCategory(activity: AgentActivity) {
@@ -159,21 +189,10 @@ function userFacingActivityDetail(activity: AgentActivity) {
   if (!detail) return "";
   if (isStructuredActivityDetail(detail)) return "";
   if (/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(detail)) return "";
-  if (["content_block_stop", "message_stop", "status"].includes(detail)) return "";
-  const cleaned = detail
-    .split(",")
-    .map((part) => part.trim())
-    .filter((part) => {
-      const lowered = part.toLowerCase();
-      return !(
-        lowered.startsWith("pid=") ||
-        lowered.startsWith("thread_id=") ||
-        lowered.startsWith("session_id=")
-      );
-    })
-    .join(", ");
-  if (!cleaned) return "";
-  return cleaned
+  if (["content_block_stop", "message_stop", "pid unavailable", "status"].includes(detail)) return "";
+  const keyValueDetail = keyValueActivityDetail(detail);
+  if (keyValueDetail !== null) return keyValueDetail;
+  return detail
     .replace(/^codex warm turn failed:/i, "Failed:")
     .replace(/^claude warm turn failed:/i, "Failed:")
     .replace(/^duration=/i, "duration ");
@@ -251,6 +270,16 @@ function workItemStatusLabel(status: string) {
   if (status === "running") return "Running";
   if (status === "cancelling") return "Cancelling";
   if (status === "done") return "Run done";
+  if (status === "failed") return "Failed";
+  if (status === "cancelled") return "Cancelled";
+  return status.replace(/_/g, " ");
+}
+
+function runStatusLabel(status: string) {
+  if (status === "starting") return "Starting";
+  if (status === "running") return "Running";
+  if (status === "stopping") return "Stopping";
+  if (status === "completed") return "Completed";
   if (status === "failed") return "Failed";
   if (status === "cancelled") return "Cancelled";
   return status.replace(/_/g, " ");
@@ -537,7 +566,7 @@ export function AgentDetailDrawer({
           </div>
           <div>
             <span>Active run</span>
-            <code>{activeRun ? `${activeRun.status}${activeRun.pid ? ` · pid ${activeRun.pid}` : ""}` : "No active run"}</code>
+            <code>{activeRun ? runStatusLabel(activeRun.status) : "No active run"}</code>
           </div>
           <div>
             <span>Role</span>

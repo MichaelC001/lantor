@@ -115,19 +115,47 @@ function compactReplyProgressText(value: string, limit: number) {
   return `${normalized.slice(0, Math.max(0, limit - 1)).trim()}...`;
 }
 
+function userFacingReplyProgressTitle(value: string) {
+  const title = value.trim() || "Working";
+  const lowered = title.toLowerCase();
+  if (lowered.includes("warm app-server ready") || lowered.includes("warm stream-json ready")) return "Runtime ready";
+  if (lowered === "started working" || lowered === "run started" || lowered === "run created") return "Working";
+  return title;
+}
+
+function userFacingReplyProgressDetail(value: string) {
+  const detail = value.trim();
+  if (!detail || detail.startsWith("{") || detail.startsWith("[")) return "";
+  const parts = detail.split(/[,\n]/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length > 0) {
+    const entries = parts.map((part) => {
+      const separator = part.indexOf("=");
+      return separator > 0
+        ? [part.slice(0, separator).trim(), part.slice(separator + 1).trim()]
+        : null;
+    });
+    if (entries.every(Boolean)) {
+      return entries
+        .filter((entry): entry is string[] => Boolean(entry))
+        .filter(([key]) => !["pid", "thread_id", "session_id", "request_id", "run_id", "reference_id", "uuid"].includes(key))
+        .map(([key, item]) => `${key.replace(/_/g, " ")} ${item}`)
+        .join(", ");
+    }
+  }
+  if (detail === "pid unavailable") return "";
+  return detail;
+}
+
 function replyProgressSummary(progress: ReplyProgress) {
   if (progress.latestActivity) {
-    const title = (progress.latestActivity.summary || progress.latestActivity.title || "Working").trim() || "Working";
-    const rawDetail = progress.latestActivity.detail.trim();
-    const detail = rawDetail.startsWith("{") || rawDetail.startsWith("[")
-      ? ""
-      : compactReplyProgressText(rawDetail, 72);
+    const title = userFacingReplyProgressTitle(progress.latestActivity.summary || progress.latestActivity.title || "Working");
+    const detail = compactReplyProgressText(userFacingReplyProgressDetail(progress.latestActivity.detail), 72);
     return {
       title,
       detail: detail && detail !== title ? detail : "",
     };
   }
-  if (progress.queuedItems.length > 0) {
+  if (progress.state === "queued" && progress.queuedItems.length > 0) {
     return {
       title: progress.queuedItems.length === 1 ? "Queued" : `${progress.queuedItems.length} queued`,
       detail: "Waiting to start",
