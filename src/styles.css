@@ -9217,15 +9217,14 @@ body.resizing-row * {
     display: none;
   }
 
-  .agent-drawer-head-actions button.danger {
-    display: none;
-  }
-
   .agent-drawer-head-actions {
+    flex: 0 0 auto;
+    gap: 6px;
     margin-left: auto;
   }
 
   .agent-drawer-head .agent-head-action {
+    flex: 0 0 auto;
     width: 30px;
     height: 30px;
   }
