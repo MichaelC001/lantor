@@ -23,6 +23,18 @@ pub(crate) async fn load_channels(pool: &SqlitePool) -> CommandResult<Vec<Channe
                 )
                   and m.sender_role <> 'owner'
                   and m.delivery_state <> 'streaming'
+                  and not (
+                    m.sender_role <> 'system'
+                    and m.delivery_state = 'complete'
+                    and trim(m.body) = ''
+                    and m.stream_key glob '????????-????-????-????-????????????:*'
+                    and not exists (
+                      select 1 from message_attachments ma where ma.message_id = m.id
+                    )
+                    and not exists (
+                      select 1 from artifacts ar where ar.message_id = m.id
+                    )
+                  )
             ) as integer) as unread_count
         from channels c
         left join channel_read_state r on r.channel_id = c.id
@@ -502,6 +514,133 @@ mod tests {
                     "newer in absolute time",
                 ]
             );
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn channel_unread_count_excludes_progress_only_complete_messages() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let channel_id = insert_test_channel(&pool, "progress-only-unread").await?;
+            sqlx::query(
+                r#"
+                insert into channel_read_state (channel_id, last_read_at)
+                values ($1, '2026-05-22T08:00:00+00:00')
+                "#,
+            )
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            sqlx::query(
+                r#"
+                insert into messages (
+                    channel_id, sender_name, sender_role, body, delivery_state, stream_key, created_at
+                )
+                values (
+                    $1,
+                    'Dylan',
+                    'agent',
+                    '',
+                    'complete',
+                    '11111111-1111-1111-1111-111111111111:msg_progress',
+                    '2026-05-22T08:01:00+00:00'
+                )
+                "#,
+            )
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let channels = load_channels(&pool).await?;
+            let channel = channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .ok_or_else(|| "missing test channel".to_owned())?;
+            assert_eq!(channel.unread_count, 0);
+
+            let attachment_message_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (
+                    channel_id, sender_name, sender_role, body, delivery_state, stream_key, created_at
+                )
+                values (
+                    $1,
+                    'Dylan',
+                    'agent',
+                    '',
+                    'complete',
+                    '22222222-2222-2222-2222-222222222222:msg_attachment',
+                    '2026-05-22T08:02:00+00:00'
+                )
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into message_attachments (
+                    message_id, original_name, mime_type, size_bytes, storage_path
+                )
+                values ($1, 'screenshot.png', 'image/png', 42, '/tmp/screenshot.png')
+                "#,
+            )
+            .bind(attachment_message_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let artifact_message_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (
+                    channel_id, sender_name, sender_role, body, delivery_state, stream_key, created_at
+                )
+                values (
+                    $1,
+                    'Dylan',
+                    'agent',
+                    '',
+                    'complete',
+                    '33333333-3333-3333-3333-333333333333:msg_artifact',
+                    '2026-05-22T08:03:00+00:00'
+                )
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into artifacts (message_id, channel_id, kind, title, content)
+                values ($1, $2, 'markdown', 'Report', 'Visible artifact')
+                "#,
+            )
+            .bind(artifact_message_id)
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let channels = load_channels(&pool).await?;
+            let channel = channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .ok_or_else(|| "missing test channel".to_owned())?;
+            assert_eq!(channel.unread_count, 2);
+
             Ok(())
         }
         .await;
