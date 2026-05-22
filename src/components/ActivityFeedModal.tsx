@@ -283,15 +283,21 @@ export function ActivityFeedModal({
             const avatarAgent = actorAvatarAgent(item, agents, ownerProfile);
             const swipeOffset = swipeState?.itemId === item.id ? swipeState.offsetX : 0;
             const excerpt = item.excerpt.trim() === item.title.trim() ? "" : item.excerpt;
+            const isUnreadThread = item.kind === "thread" && item.unread;
             const rowClassName = [
               "activity-feed-row",
               item.unread ? "unread" : "",
-              item.kind === "thread" && item.unread ? "new-thread" : "",
+              isUnreadThread ? "new-thread" : "",
+            ].filter(Boolean).join(" ");
+            const rowShellClassName = [
+              "activity-feed-row-shell",
+              swipeOffset < 0 ? "swiping" : "",
+              isUnreadThread ? "new-thread-shell" : "",
             ].filter(Boolean).join(" ");
             return (
               <div
                 key={item.id}
-                className={`activity-feed-row-shell ${swipeOffset < 0 ? "swiping" : ""}`}
+                className={rowShellClassName}
                 style={{ "--activity-feed-swipe-x": `${swipeOffset}px` } as CSSProperties}
                 onPointerDown={(event) => startSwipe(item, event)}
                 onPointerMove={(event) => moveSwipe(item, event)}
