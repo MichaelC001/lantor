@@ -83,7 +83,13 @@ function statusForActivity(activity: AgentActivity) {
 function userFacingActivityTitle(activity: AgentActivity) {
   const title = activity.summary || activity.title;
   const lowered = title.toLowerCase();
-  if (lowered.includes("warm turn") && lowered.includes("started")) return "Started working";
+  if (
+    (lowered.includes("warm turn") && lowered.includes("started")) ||
+    lowered === "run started" ||
+    lowered === "run created"
+  ) {
+    return "Working";
+  }
   if (lowered.includes("running command")) return "Running command";
   if (lowered.includes("command finished")) return "Command finished";
   if (lowered.includes("editing file")) return "Editing file";
@@ -154,7 +160,20 @@ function userFacingActivityDetail(activity: AgentActivity) {
   if (isStructuredActivityDetail(detail)) return "";
   if (/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(detail)) return "";
   if (["content_block_stop", "message_stop", "status"].includes(detail)) return "";
-  return detail
+  const cleaned = detail
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => {
+      const lowered = part.toLowerCase();
+      return !(
+        lowered.startsWith("pid=") ||
+        lowered.startsWith("thread_id=") ||
+        lowered.startsWith("session_id=")
+      );
+    })
+    .join(", ");
+  if (!cleaned) return "";
+  return cleaned
     .replace(/^codex warm turn failed:/i, "Failed:")
     .replace(/^claude warm turn failed:/i, "Failed:")
     .replace(/^duration=/i, "duration ");
