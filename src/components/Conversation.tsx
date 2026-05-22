@@ -918,8 +918,13 @@ export function Conversation({
                           setActiveThreadId(message.id);
                         }}
                       >
-                        {replyParticipants.length > 0 && (
+                        {(activeReplyProgress.length > 0 || replyParticipants.length > 0) && (
                           <div className="thread-reply-avatars">
+                            {activeReplyProgress.slice(0, 3).map((progress) => (
+                              <span key={`active:${progress.key}`}>
+                                <AgentAvatar agent={progress.agent} size="sm" showStatus={false} />
+                              </span>
+                            ))}
                             {replyParticipants.map((participant) => (
                               <span key={`${participant.sender_role}:${participant.sender_agent_id ?? participant.sender_name}`}>
                                 {renderReplyParticipantAvatar(participant)}
@@ -927,49 +932,38 @@ export function Conversation({
                             ))}
                           </div>
                         )}
-                        <strong>
-                          {replyCount > 0 ? (
-                            `${replyCount} ${replyCount === 1 ? "reply" : "replies"}`
-                          ) : (
-                            <ActiveReplyIndicator label={activeReplyStatus} />
-                          )}
-                        </strong>
-                        {(hasActiveReplyProgress || replySummary?.latest) && (
-                          <span className="thread-reply-summary-action">
-                            {hasActiveReplyProgress ? (
-                              <span className="thread-reply-summary-status">
-                                <span className="thread-reply-status-avatar-stack" aria-hidden="true">
-                                  {activeReplyProgress.slice(0, 3).map((progress) => (
-                                    <AgentAvatar key={`status:${progress.key}`} agent={progress.agent} size="sm" showStatus={false} />
-                                  ))}
-                                </span>
-                                {replyCount > 0 && (
-                                  <ActiveReplyIndicator label={activeReplyStatus} />
-                                )}
-                                <span className="thread-reply-active-menu" aria-hidden="true">
-                                  {activeReplyProgress.map((progress) => {
-                                    const summary = replyProgressSummary(progress);
-                                    return (
-                                      <span key={`menu:${progress.key}`} className="thread-reply-active-agent">
-                                        <AgentAvatar agent={progress.agent} size="sm" showStatus={false} />
-                                        <span className="thread-reply-active-agent-copy">
-                                          <span className="thread-reply-active-agent-name">{progress.agent.display_name}</span>
-                                          <span className="thread-reply-active-agent-status">
-                                            <span>{summary.title}</span>
-                                            {summary.detail && <em>{summary.detail}</em>}
-                                          </span>
-                                        </span>
+                        {hasActiveReplyProgress && (
+                          <span className="thread-reply-progress-dots" aria-hidden="true">...</span>
+                        )}
+                        {replyCount > 0 && (
+                          <strong>{`${replyCount} ${replyCount === 1 ? "reply" : "replies"}`}</strong>
+                        )}
+                        {hasActiveReplyProgress ? (
+                          <span className="thread-reply-summary-spacer" aria-hidden="true">
+                            <span className="thread-reply-active-menu" aria-hidden="true">
+                              {activeReplyProgress.map((progress) => {
+                                const summary = replyProgressSummary(progress);
+                                return (
+                                  <span key={`menu:${progress.key}`} className="thread-reply-active-agent">
+                                    <AgentAvatar agent={progress.agent} size="sm" showStatus={false} />
+                                    <span className="thread-reply-active-agent-copy">
+                                      <span className="thread-reply-active-agent-name">{progress.agent.display_name}</span>
+                                      <span className="thread-reply-active-agent-status">
+                                        <span>{summary.title}</span>
+                                        {summary.detail && <em>{summary.detail}</em>}
                                       </span>
-                                    );
-                                  })}
-                                </span>
-                              </span>
-                            ) : replySummary?.latest ? (
-                              <time dateTime={replySummary.latest.created_at}>Last reply {formatTime(replySummary.latest.created_at)}</time>
-                            ) : null}
+                                    </span>
+                                  </span>
+                                );
+                              })}
+                            </span>
+                          </span>
+                        ) : replySummary?.latest ? (
+                          <span className="thread-reply-summary-action">
+                            <time dateTime={replySummary.latest.created_at}>Last reply {formatTime(replySummary.latest.created_at)}</time>
                             <span className="thread-reply-summary-open">View thread</span>
                           </span>
-                        )}
+                        ) : null}
                         <ChevronRight className="thread-reply-summary-icon" size={18} aria-hidden="true" />
                       </button>
                     )}
