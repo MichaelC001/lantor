@@ -8,8 +8,8 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::{
+    app::{to_string, AppState, CommandResult},
     models::{AgentWorkspaceEntry, AgentWorkspaceFile, AgentWorkspaceListing},
-    to_string, AppState, CommandResult,
 };
 
 const AGENT_WORKSPACE_PREVIEW_LIMIT: u64 = 256 * 1024;

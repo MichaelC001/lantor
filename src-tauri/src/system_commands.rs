@@ -3,7 +3,11 @@ use std::{
     process::{Command as StdCommand, Stdio},
 };
 
-use crate::{db::expand_home_path, models::RuntimeCheck, to_string, CommandResult};
+use crate::{
+    app::{to_string, CommandResult},
+    db::expand_home_path,
+    models::RuntimeCheck,
+};
 
 fn normalize_external_url(url: &str) -> Option<String> {
     let (scheme, rest) = url.split_once(':')?;

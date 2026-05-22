@@ -12,8 +12,8 @@ use crate::agent_work_dispatch::dispatch_unassigned_task_availability;
 use crate::attachments::{write_attachment_file, ATTACHMENT_SIZE_LIMIT};
 use crate::ui_notifications::{notify_ui_message_upsert, notify_ui_refresh};
 use crate::{
+    app::{to_string, CommandResult},
     models::{Artifact, AttachmentUpload, Message, MessageAttachment, SavedMessage},
-    to_string, CommandResult,
 };
 
 pub(crate) async fn load_messages(pool: &SqlitePool) -> CommandResult<Vec<Message>> {

@@ -49,9 +49,20 @@ const ACTIVE_RUN_STATUSES = new Set(["starting", "running", "stopping"]);
 const ACTIVE_WORK_ITEM_STATUSES = new Set(["queued", "running", "cancelling"]);
 const SETTLING_WORK_ITEM_STATUSES = new Set(["done", "failed", "cancelled", "silent"]);
 const COMPLETION_SETTLE_WINDOW_MS = 15_000;
+const ACTIVITY_STATUS_LABELS: Record<string, string> = {
+  active: "Active",
+  success: "Done",
+  warning: "Needs attention",
+  error: "Error",
+  info: "Info",
+};
 
 function activityTitle(activity: AgentActivity) {
   return (activity.summary || activity.title || phaseLabel(activity.phase || activity.kind)).trim();
+}
+
+function statusForActivity(activity: AgentActivity) {
+  return ACTIVITY_STATUS_LABELS[activity.status] ?? activity.status;
 }
 
 function phaseLabel(phase: string) {
@@ -74,6 +85,37 @@ function phaseLabel(phase: string) {
     case "event_error":
     case "run_error":
       return "Error";
+    default:
+      return "Working";
+  }
+}
+
+function activityCategory(activity: AgentActivity) {
+  if (activity.status === "error") return "Error";
+  switch (activity.phase || activity.kind) {
+    case "thinking":
+      return "Thinking";
+    case "command":
+      return "Command";
+    case "file_edit":
+      return "File edit";
+    case "tools":
+      return "Tool";
+    case "acting":
+      return "Response";
+    case "work":
+      return "Request";
+    case "runtime":
+      return "Runtime";
+    case "profile":
+      return "Profile";
+    case "usage":
+      return "Usage";
+    case "memory":
+      return "Memory";
+    case "channel":
+    case "membership":
+      return "Collaboration";
     default:
       return "Working";
   }
@@ -384,16 +426,34 @@ export function ActivityProgressDock({
           {history.map(({ activity, agent }) => {
             const detail = activityDetail(activity);
             return (
-              <li key={activity.id} data-status={activity.status}>
+              <li
+                key={activity.id}
+                className="activity-run-step"
+                data-kind={activity.kind}
+                data-phase={activity.phase}
+                data-status={activity.status}
+              >
                 <time>{formatClockTime(activity.created_at)}</time>
-                <span className="activity-progress-source-chip" data-kind={activity.kind || activity.phase}>
-                  {phaseLabel(activity.phase || activity.kind)}
-                </span>
-                <span>
-                  <strong>{agent.display_name}</strong>
-                  <b>{activityTitle(activity)}</b>
-                  {detail && <small>{compact(detail, 132)}</small>}
-                </span>
+                <span
+                  className="activity-dot"
+                  data-kind={activity.kind}
+                  data-phase={activity.phase}
+                  data-status={activity.status}
+                  aria-hidden="true"
+                />
+                <div className="activity-timeline-body">
+                  <div className="activity-timeline-title">
+                    <strong>{activityTitle(activity)}</strong>
+                    <span className={`activity-status status-${activity.status}`}>
+                      {statusForActivity(activity)}
+                    </span>
+                  </div>
+                  <div className="activity-structure-line">
+                    <span>{activityCategory(activity)}</span>
+                    <span>{agent.display_name}</span>
+                  </div>
+                  {detail && <p title={detail}>{compact(detail, 132)}</p>}
+                </div>
               </li>
             );
           })}

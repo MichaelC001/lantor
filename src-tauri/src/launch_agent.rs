@@ -4,7 +4,10 @@ use std::{
     process::{Command as StdCommand, Stdio},
 };
 
-use crate::{models::LaunchAgentStatus, to_string, CommandResult};
+use crate::{
+    app::{to_string, CommandResult},
+    models::LaunchAgentStatus,
+};
 
 const LAUNCH_AGENT_LABEL: &str = "local.lantor.supervisor";
 

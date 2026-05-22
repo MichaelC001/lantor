@@ -1,4 +1,4 @@
-import { ArrowLeft, Clock3, Inbox, Pencil, RotateCcw, Trash2, X } from "lucide-react";
+import { ArrowLeft, Pencil, RotateCcw, Trash2, X } from "lucide-react";
 import { useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { apiInvoke } from "../apiClient";
 import { APP_DISPLAY_NAME } from "../branding";
@@ -27,13 +27,12 @@ type AgentPhase = {
   detail: string;
 };
 
-type AgentDetailTab = "profile" | "reminders" | "activity" | "inbox" | "workspace";
+type AgentDetailTab = "profile" | "reminders" | "activity" | "workspace";
 
 const AGENT_DETAIL_TABS: Array<{ id: AgentDetailTab; label: string }> = [
   { id: "profile", label: "Profile" },
   { id: "reminders", label: "Reminders" },
   { id: "activity", label: "Activity" },
-  { id: "inbox", label: "Inbox" },
   { id: "workspace", label: "Workspace" },
 ];
 
@@ -50,8 +49,6 @@ type AgentDetailDrawerProps = {
   onEdit: (agent: Agent) => void;
   onRestart: (agent: Agent) => void;
   onOpenWorkItem: (item: AgentWorkItem) => void;
-  onCancelWorkItem: (item: AgentWorkItem) => void;
-  onRetryWorkItem: (item: AgentWorkItem) => void;
   onResizeStart: (event: ReactPointerEvent<HTMLButtonElement>) => void;
 };
 
@@ -240,13 +237,6 @@ function workItemStatusLabel(status: string) {
   return status.replace(/_/g, " ");
 }
 
-function workItemStatusTone(status: string) {
-  if (["queued", "running", "cancelling"].includes(status)) return "active";
-  if (status === "done") return "done";
-  if (["failed", "cancelled"].includes(status)) return "attention";
-  return "idle";
-}
-
 function workItemLocationLabel(item: AgentWorkItem) {
   if (item.channel_name) return `#${item.channel_name}`;
   if (item.channel_id) return "Direct message";
@@ -339,8 +329,6 @@ export function AgentDetailDrawer({
   onEdit,
   onRestart,
   onOpenWorkItem,
-  onCancelWorkItem,
-  onRetryWorkItem,
   onResizeStart,
 }: AgentDetailDrawerProps) {
   const [expandedActivityId, setExpandedActivityId] = useState<string | null>(null);
@@ -488,7 +476,6 @@ export function AgentDetailDrawer({
       if (activeRun) return "Live";
       return activities.length > 0 ? String(activities.length) : "Idle";
     }
-    if (tab === "inbox") return workItems.length > 0 ? String(workItems.length) : "Empty";
     return workspacePath ? agent.workspace_exists ? "Ready" : "Missing" : "Unset";
   }
 
@@ -842,67 +829,6 @@ export function AgentDetailDrawer({
       </section>
     );
   }
-  function renderInboxPanel() {
-    return (
-      <section className="detail-section agent-inbox-section">
-        <div className="detail-section-head">
-          <h4>Agent inbox</h4>
-          {workItems.length > 0 && <span>{workItems.length} requests</span>}
-        </div>
-        {workItems.length === 0 && <p className="empty-mini">No agent requests yet.</p>}
-        {workItems.map((item) => (
-          <article
-            key={item.id}
-            className="detail-work agent-inbox-row"
-            data-status={workItemStatusTone(item.status)}
-            onClick={() => onOpenWorkItem(item)}
-          >
-            <span className="agent-inbox-row-icon" aria-hidden="true">
-              <Inbox size={16} />
-            </span>
-            <div className="agent-inbox-row-main">
-              <div className="agent-inbox-row-meta">
-                <strong>{agentRequestSourceLabel(item.source_kind, item.task_number)}</strong>
-                <span>{workItemLocationLabel(item)}</span>
-                <time dateTime={item.created_at}>
-                  <Clock3 size={12} />
-                  {formatTime(item.created_at)}
-                </time>
-              </div>
-              <div className="agent-inbox-row-title">
-                <h5>{item.title}</h5>
-                <span data-status={workItemStatusTone(item.status)}>{workItemStatusLabel(item.status)}</span>
-              </div>
-            </div>
-            <div className="detail-work-actions">
-              {["queued", "running", "cancelling"].includes(item.status) && (
-                <button
-                  className="danger"
-                  disabled={item.status === "cancelling"}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onCancelWorkItem(item);
-                  }}
-                >
-                  {item.status === "cancelling" ? "Cancelling" : "Cancel"}
-                </button>
-              )}
-              {["failed", "cancelled"].includes(item.status) && (
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onRetryWorkItem(item);
-                  }}
-                >
-                  Retry
-                </button>
-              )}
-            </div>
-          </article>
-        ))}
-      </section>
-    );
-  }
 
   return (
     <>
@@ -934,8 +860,8 @@ export function AgentDetailDrawer({
           <button
             type="button"
             className="agent-head-action"
-            title={`Edit @${agent.handle}`}
             aria-label={`Edit @${agent.handle}`}
+            data-tooltip={`Edit @${agent.handle}`}
             onClick={() => onEdit(agent)}
           >
             <Pencil size={16} />
@@ -955,7 +881,7 @@ export function AgentDetailDrawer({
             className="agent-head-action danger"
             disabled={deleteDisabled}
             aria-label={`Delete @${agent.handle}`}
-            title={deleteDisabled ? "Stop the active run before deleting this agent" : `Delete @${agent.handle}`}
+            data-tooltip={deleteDisabled ? "Stop the active run before deleting this agent" : `Delete @${agent.handle}`}
             onClick={() => onDelete(agent)}
           >
             <Trash2 size={16} />
@@ -1006,7 +932,6 @@ export function AgentDetailDrawer({
             {activeDetailTab === "profile" && renderProfilePanel()}
             {activeDetailTab === "reminders" && renderRemindersPanel()}
             {activeDetailTab === "activity" && renderActivityPanel()}
-            {activeDetailTab === "inbox" && renderInboxPanel()}
             {activeDetailTab === "workspace" && renderWorkspacePanel()}
           </div>
         </div>

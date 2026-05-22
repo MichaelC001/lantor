@@ -28,7 +28,6 @@ const SIDEBAR_SECTION_HANDLE_SPACE = 14;
 type SidebarProps = {
   data: Bootstrap;
   channel: Channel | null;
-  channelAlertIds: Set<string>;
   activityFeedUnreadCount: number;
   savedUnreadCount: number;
   openSearch: () => void;
@@ -64,7 +63,6 @@ function clampSidebarChannelsHeight(height: number, containerHeight: number) {
 export function Sidebar({
   data,
   channel,
-  channelAlertIds,
   activityFeedUnreadCount,
   savedUnreadCount,
   openSearch,
@@ -173,7 +171,7 @@ export function Sidebar({
       <section className="quick-actions">
         <button className="search-trigger" onClick={openSearch}>
           <Search size={18} />
-          <span>Search</span>
+          <span className="search-trigger-label">Search</span>
           <kbd>⌘K</kbd>
         </button>
         <button
@@ -181,7 +179,7 @@ export function Sidebar({
           onClick={openActivityFeed}
         >
           <Inbox size={18} />
-          <span>Activity</span>
+          <span className="sidebar-nav-trigger-label">Activity</span>
           {activityFeedUnreadCount > 0 && <UnreadBadge value={activityFeedUnreadCount} />}
         </button>
         <button
@@ -189,7 +187,7 @@ export function Sidebar({
           onClick={openSaved}
         >
           <Bookmark size={18} />
-          <span>Saved</span>
+          <span className="sidebar-nav-trigger-label">Saved</span>
           {savedUnreadCount > 0 && <UnreadBadge value={savedUnreadCount} />}
         </button>
       </section>
@@ -218,7 +216,7 @@ export function Sidebar({
           </div>
           <div className="sidebar-section-scroll">
             {!collapsedSections.channels && normalChannels.map((item) => {
-              const badge = item.unread_count > 0 ? String(item.unread_count) : channelAlertIds.has(item.id) ? "1" : "";
+              const badge = item.unread_count > 0 ? String(item.unread_count) : "";
               return (
                 <button
                   key={item.id}
@@ -280,13 +278,7 @@ export function Sidebar({
           </div>
           <div className="sidebar-section-scroll">
             {!collapsedSections.dms && dmRows.map(({ agent, item }) => {
-              const badge = item
-                ? item.unread_count > 0
-                  ? String(item.unread_count)
-                  : channelAlertIds.has(item.id)
-                    ? "1"
-                    : ""
-                : "";
+              const badge = item && item.unread_count > 0 ? String(item.unread_count) : "";
               return (
                 <div
                   key={agent.id}

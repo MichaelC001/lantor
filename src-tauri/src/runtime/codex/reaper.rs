@@ -8,10 +8,10 @@ use super::{
     remove_warm_codex_runtime_if_same, turn::finish_warm_codex_active_turn, WarmCodexRegistry,
     WarmCodexRuntime, CODEX_TURN_START_TIMEOUT,
 };
+use crate::app::CommandResult;
 use crate::events::activity::record_agent_activity;
 use crate::runtime::process::terminate_process_group;
 use crate::ui_notifications::notify_supervisor_wake;
-use crate::CommandResult;
 
 const CODEX_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CODEX_IDLE_REAPER_INTERVAL: Duration = Duration::from_secs(30);

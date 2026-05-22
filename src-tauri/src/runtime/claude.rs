@@ -10,6 +10,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::agent_memory::append_run_log;
+use crate::app::{to_string, CommandResult};
 use crate::events::activity::{record_agent_activity, record_agent_activity_throttled};
 use crate::prompts::{build_claude_streaming_prompt, claude_system_prompt};
 use crate::runtime::{
@@ -25,7 +26,6 @@ use crate::ui_notifications::{
     notify_supervisor_wake, notify_ui_agent_run_changed, notify_ui_work_item_changed,
 };
 use crate::usage::{record_run_usage, usage_from_runtime_event};
-use crate::{to_string, CommandResult};
 
 mod protocol;
 mod reaper;

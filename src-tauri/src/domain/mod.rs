@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use tokio::time::sleep;
 
-use crate::CommandResult;
+use crate::app::CommandResult;
 
 pub(crate) mod reminders;
 pub(crate) mod schedules;

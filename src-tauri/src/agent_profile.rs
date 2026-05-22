@@ -4,11 +4,11 @@ use uuid::Uuid;
 use crate::ui_notifications::notify_ui_refresh;
 use crate::{
     agent_workspace::load_agent_workspace_summary,
+    app::{to_string, CommandResult},
     db::expand_home_path,
     events::activity::record_agent_activity,
     models::{Agent, OwnerProfile},
     prompts::ensure_agent_workspace,
-    to_string, CommandResult,
 };
 
 pub(crate) const DEFAULT_OWNER_DISPLAY_NAME: &str = "Me";

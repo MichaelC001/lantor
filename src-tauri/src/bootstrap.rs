@@ -8,14 +8,16 @@ use sqlx::SqlitePool;
 use crate::{
     activity_store::{load_agent_activities, load_agent_runs, load_agent_work_items},
     agent_profile::{load_agents, load_owner_profile},
+    app::CommandResult,
     channels::{load_channel_members, load_channels},
     domain::{reminders::load_reminders, schedules::load_agent_schedules},
-    launch_agent, load_supervisor_status,
+    launch_agent,
     message_store::{load_artifacts, load_messages, load_saved_messages},
     models::Bootstrap,
     owner_inbox::{load_dismissed_inbox_items, load_read_inbox_items},
+    runtime::supervisor::load_supervisor_status,
     task_store::load_tasks,
-    web, CommandResult,
+    web,
 };
 
 fn configured_web_base_url() -> Option<String> {

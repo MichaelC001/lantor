@@ -3,12 +3,13 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::agent_routing::queue_agent_message_mentions;
+use crate::app::{to_string, CommandResult};
 use crate::events::{
     activity::record_agent_activity,
     control::{
         control_event_hides_empty_streaming_reply, handle_streaming_agent_event_json,
         silent_reply_reason, split_complete_streaming_agent_event_lines,
-        split_streaming_agent_event_lines,
+        split_terminal_streaming_agent_event_lines,
     },
 };
 use crate::message_store::load_message;
@@ -16,7 +17,6 @@ use crate::ui_notifications::{
     notify_ui_message_delete, notify_ui_message_delta, notify_ui_message_upsert, notify_ui_refresh,
     notify_ui_work_item_changed,
 };
-use crate::{to_string, CommandResult};
 
 pub(crate) const STREAMING_MESSAGE_BODY_LIMIT: usize = 200_000;
 pub(crate) const STREAMING_TRUNCATION_MARKER: &str = "\n\n[stream truncated by Lantor]";
@@ -362,7 +362,7 @@ pub(crate) async fn finish_streaming_agent_message(
     stream_key: &str,
     delivery_state: &str,
 ) -> CommandResult<()> {
-    if delivery_state == "complete" {
+    if delivery_state != "streaming" {
         if let Some((agent_id, run_id, work_item_id)) =
             load_streaming_control_context(pool, stream_key).await?
         {
@@ -621,8 +621,9 @@ pub(crate) async fn consume_streaming_agent_control_lines(
     };
     let message_id: Uuid = row.get("id");
     let body: String = row.get("body");
-    let (visible_body, event_jsons) = split_streaming_agent_event_lines(&body);
-    if event_jsons.is_empty() {
+    let (visible_body, event_jsons) = split_terminal_streaming_agent_event_lines(&body);
+    let body_changed = visible_body != body;
+    if event_jsons.is_empty() && !body_changed {
         return Ok(false);
     }
 
@@ -631,9 +632,10 @@ pub(crate) async fn consume_streaming_agent_control_lines(
     }
 
     if visible_body.is_empty()
-        && event_jsons
-            .iter()
-            .any(|json| control_event_hides_empty_streaming_reply(json))
+        && ((body_changed && event_jsons.is_empty())
+            || event_jsons
+                .iter()
+                .any(|json| control_event_hides_empty_streaming_reply(json)))
     {
         delete_streaming_agent_message(pool, message_id, "stream_event_consumed").await?;
         return Ok(true);
@@ -665,6 +667,10 @@ pub(crate) async fn streaming_message_exists(
             .map_err(to_string)?;
     Ok(exists)
 }
+
+#[cfg(test)]
+#[path = "../tests/runtime_streaming.rs"]
+mod relocated_tests;
 
 #[cfg(test)]
 mod tests {

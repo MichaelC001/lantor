@@ -2,8 +2,8 @@ use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
+use crate::app::{to_string, CommandResult};
 use crate::models::{AgentActivity, AgentRun, AgentWorkItem};
-use crate::{to_string, CommandResult};
 
 pub(crate) async fn load_agent_runs(pool: &SqlitePool) -> CommandResult<Vec<AgentRun>> {
     let rows = sqlx::query(

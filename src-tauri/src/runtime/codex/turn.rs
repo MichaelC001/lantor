@@ -12,7 +12,10 @@ use crate::runtime::{
 use crate::ui_notifications::{
     notify_supervisor_wake, notify_ui_agent_run_changed, notify_ui_work_item_changed,
 };
-use crate::{mark_task_after_work_item_finished, to_string, CommandResult};
+use crate::{
+    app::{to_string, CommandResult},
+    mark_task_after_work_item_finished,
+};
 
 pub(super) async fn finish_codex_steer_request(
     pool: &SqlitePool,
