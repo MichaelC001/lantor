@@ -1167,12 +1167,6 @@
       "n": 0
     },
     {
-      "selector": ".reply-list article:hover",
-      "prop": "background",
-      "literal": "rgba(246, 247, 249, 0.92)",
-      "n": 0
-    },
-    {
       "selector": ".runtime-preflight",
       "prop": "background",
       "literal": "rgba(142, 142, 147, 0.08)",
@@ -1542,18 +1536,6 @@
       "selector": ".thread-browser-row",
       "prop": "border",
       "literal": "rgba(142, 142, 147, 0.18)",
-      "n": 0
-    },
-    {
-      "selector": ".thread-browser-row:hover, .thread-browser-row.selected",
-      "prop": "background",
-      "literal": "rgba(248, 249, 251, 0.94)",
-      "n": 0
-    },
-    {
-      "selector": ".thread-browser-row:hover, .thread-browser-row.selected",
-      "prop": "border-color",
-      "literal": "rgba(20, 23, 31, 0.16)",
       "n": 0
     },
     {

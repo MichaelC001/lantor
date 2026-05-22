@@ -136,9 +136,9 @@ button,
   --bg-composer: #f4f6f9;
   --bg-control: linear-gradient(180deg, #fbfcfd 0%, #edf1f5 100%);
   --bg-control-flat: rgba(240, 243, 247, 0.92);
-  --bg-control-hover: #fbfcfd;
+  --bg-control-hover: color-mix(in srgb, var(--accent) 7%, var(--bg-panel));
   --bg-control-selected: linear-gradient(180deg, #fbfcfd 0%, #edf1f5 100%);
-  --bg-hover: #edf1f5;
+  --bg-hover: color-mix(in srgb, var(--accent) 8%, var(--bg-panel));
   --bg-selected-soft: rgba(10, 132, 255, 0.09);
   --bg-selected-accent:
     linear-gradient(180deg, rgba(10, 132, 255, 0.18), rgba(10, 132, 255, 0.1)),
@@ -779,7 +779,7 @@ button,
 
 .quick-actions button:hover,
 .channel:hover {
-  background: var(--bg-control-flat);
+  background: var(--bg-hover);
 }
 
 .quick-actions span {
@@ -4955,7 +4955,7 @@ body.resizing-row * {
 .reply-list article:hover {
   transform: none;
   border-color: transparent;
-  background: rgba(246, 247, 249, 0.92);
+  background: var(--bg-hover);
 }
 
 .reply-list article.system-message {
@@ -7689,8 +7689,8 @@ body.resizing-row * {
 
 .thread-browser-row:hover,
 .thread-browser-row.selected {
-  border-color: rgba(20, 23, 31, 0.16);
-  background: rgba(248, 249, 251, 0.94);
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
   box-shadow: 0 12px 26px rgba(15, 23, 42, 0.06);
 }
 
