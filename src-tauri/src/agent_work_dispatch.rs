@@ -285,7 +285,7 @@ pub(crate) async fn dispatch_task_assignment_to_agent(
 pub(crate) async fn dispatch_agent_restart_backlog(
     pool: &SqlitePool,
     agent_id: Uuid,
-) -> CommandResult<(usize, bool)> {
+) -> CommandResult<(usize, usize, bool)> {
     let rows = sqlx::query(
         r#"
         select id
@@ -314,10 +314,35 @@ pub(crate) async fn dispatch_agent_restart_backlog(
         task_count += 1;
     }
 
+    let manual_rows = sqlx::query(
+        r#"
+        select w.id
+        from agent_inbox_items i
+        join agent_work_items w on w.id = i.work_item_id
+        where i.agent_id = $1
+          and i.kind = 'manual'
+          and json_extract(i.payload, '$.explicit_dispatch') = 1
+          and w.source_kind = 'manual'
+          and w.status = 'failed'
+        order by w.updated_at asc, w.created_at asc
+        "#,
+    )
+    .bind(agent_id)
+    .fetch_all(pool)
+    .await
+    .map_err(to_string)?;
+
+    let mut manual_count = 0;
+    for row in manual_rows {
+        let work_item_id: Uuid = row.get("id");
+        retry_agent_work_in_pool(pool, work_item_id).await?;
+        manual_count += 1;
+    }
+
     let inbox_wake = ensure_agent_inbox_wake_work_item(pool, agent_id)
         .await?
         .is_some();
-    Ok((task_count, inbox_wake))
+    Ok((task_count, manual_count, inbox_wake))
 }
 
 pub(crate) async fn dispatch_unassigned_task_availability(
@@ -591,75 +616,103 @@ pub(crate) async fn mark_task_after_work_item_finished(
     run_id: Uuid,
     work_status: &str,
 ) -> CommandResult<()> {
-    let task_row = sqlx::query(
+    let linked_task_rows = sqlx::query(
         r#"
-        select t.id, t.number, t.title, t.status
-        from agent_work_items w
-        join tasks t on t.id = w.task_id
-        where w.id = $1
+        select distinct t.id, t.number, t.title, t.status
+        from agent_inbox_items i
+        join tasks t on t.id = i.task_id
+        where i.work_item_id = $1
+          and i.kind = 'task_assigned'
+        order by t.created_at asc
         "#,
     )
     .bind(work_item_id)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
     .map_err(to_string)?;
-    let Some(task_row) = task_row else {
-        return Ok(());
-    };
-    let task_id: Uuid = task_row.get("id");
-    let task_number: i64 = task_row.get("number");
-    let title: String = task_row.get("title");
-    let current_status: String = task_row.get("status");
-
-    if work_status == "done" && matches!(current_status.as_str(), "todo" | "in_progress") {
+    let task_rows = if linked_task_rows.is_empty() {
         sqlx::query(
             r#"
-            update tasks
-            set status = 'in_review',
-                updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
-            where id = $1 and status in ('todo', 'in_progress')
+            select t.id, t.number, t.title, t.status
+            from agent_work_items w
+            join tasks t on t.id = w.task_id
+            where w.id = $1
+              and w.source_kind in ('task', 'task_assigned')
             "#,
         )
-        .bind(task_id)
-        .execute(pool)
+        .bind(work_item_id)
+        .fetch_all(pool)
         .await
-        .map_err(to_string)?;
+        .map_err(to_string)?
+    } else {
+        linked_task_rows
+    };
+    if task_rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut marked_for_review = false;
+    for task_row in task_rows {
+        let task_id: Uuid = task_row.get("id");
+        let task_number: i64 = task_row.get("number");
+        let title: String = task_row.get("title");
+        let current_status: String = task_row.get("status");
+
+        if work_status == "done" && matches!(current_status.as_str(), "todo" | "in_progress") {
+            sqlx::query(
+                r#"
+                update tasks
+                set status = 'in_review',
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                where id = $1 and status in ('todo', 'in_progress')
+                "#,
+            )
+            .bind(task_id)
+            .execute(pool)
+            .await
+            .map_err(to_string)?;
+            marked_for_review = true;
+            record_agent_activity(
+                pool,
+                Some(agent_id),
+                Some(run_id),
+                "task",
+                "Task ready for review",
+                json!({
+                    "task_id": task_id,
+                    "task_number": task_number,
+                    "work_item_id": work_item_id,
+                    "title": title,
+                })
+                .to_string(),
+            )
+            .await?;
+        } else if matches!(work_status, "failed" | "cancelled")
+            && matches!(current_status.as_str(), "todo" | "in_progress")
+        {
+            record_agent_activity(
+                pool,
+                Some(agent_id),
+                Some(run_id),
+                "task",
+                if work_status == "failed" {
+                    "Task run failed"
+                } else {
+                    "Task run cancelled"
+                },
+                json!({
+                    "task_id": task_id,
+                    "task_number": task_number,
+                    "work_item_id": work_item_id,
+                    "title": title,
+                })
+                .to_string(),
+            )
+            .await?;
+        }
+    }
+    if marked_for_review {
         let _ = notify_ui_refresh(pool, "task_ready_for_review").await;
-        record_agent_activity(
-            pool,
-            Some(agent_id),
-            Some(run_id),
-            "task",
-            "Task ready for review",
-            json!({
-                "task_id": task_id,
-                "task_number": task_number,
-                "work_item_id": work_item_id,
-                "title": title,
-            })
-            .to_string(),
-        )
-        .await?;
-    } else if matches!(work_status, "failed" | "cancelled") {
-        record_agent_activity(
-            pool,
-            Some(agent_id),
-            Some(run_id),
-            "task",
-            if work_status == "failed" {
-                "Task run failed"
-            } else {
-                "Task run cancelled"
-            },
-            json!({
-                "task_id": task_id,
-                "task_number": task_number,
-                "work_item_id": work_item_id,
-                "title": title,
-            })
-            .to_string(),
-        )
-        .await?;
     }
 
     Ok(())

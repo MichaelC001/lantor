@@ -308,7 +308,7 @@ async fn start_agent(agent_id: Uuid, state: State<'_, AppState>) -> CommandResul
         .execute(&state.pool)
         .await
         .map_err(to_string)?;
-    let (redispatched_tasks, inbox_wake_available) =
+    let (redispatched_tasks, retried_manual_work, inbox_wake_available) =
         dispatch_agent_restart_backlog(&state.pool, agent_id).await?;
     let pending_start_after_backlog: Option<Uuid> = sqlx::query_scalar(
         r#"
@@ -344,9 +344,21 @@ async fn start_agent(agent_id: Uuid, state: State<'_, AppState>) -> CommandResul
         None,
         "run",
         "Start queued",
-        if redispatched_tasks > 0 || inbox_wake_available {
+        if redispatched_tasks > 0 || retried_manual_work > 0 || inbox_wake_available {
+            let mut details = vec![format!(
+                "redispatched {redispatched_tasks} unfinished task(s)"
+            )];
+            if retried_manual_work > 0 {
+                details.push(format!(
+                    "retried {retried_manual_work} unfinished manual request(s)"
+                ));
+            }
+            if inbox_wake_available {
+                details.push("kicked inbox backlog".to_owned());
+            }
             format!(
-                "Waiting for supervisor to launch the agent; redispatched {redispatched_tasks} unfinished task(s)"
+                "Waiting for supervisor to launch the agent; {}",
+                details.join(", ")
             )
         } else {
             "Waiting for supervisor to launch the agent".to_owned()
@@ -779,11 +791,11 @@ mod tests {
         create_agent_inbox_item, dispatch_agent_restart_backlog,
         domain::reminders::load_reminders,
         ensure_agent_workspace, extract_agent_event_json, extract_agent_mentions,
-        handle_agent_event, inbox_wake_context, open_dm_with_agent_in_pool,
-        queue_mentions_as_work_items, record_agent_activity, try_claim_unassigned_task,
-        upsert_agent_thread_subscription, AgentAttachmentFile, AgentEvent, AgentInboxItemInput,
-        InboxWakeItem, InboxWakeSummary, MentionDispatchOrigin, AGENT_MEMORY_CONTEXT_LIMIT,
-        WORK_ITEM_FINISH_PROMPT,
+        handle_agent_event, inbox_wake_context, mark_task_after_work_item_finished,
+        open_dm_with_agent_in_pool, queue_mentions_as_work_items, record_agent_activity,
+        try_claim_unassigned_task, upsert_agent_thread_subscription, AgentAttachmentFile,
+        AgentEvent, AgentInboxItemInput, InboxWakeItem, InboxWakeSummary, MentionDispatchOrigin,
+        AGENT_MEMORY_CONTEXT_LIMIT, WORK_ITEM_FINISH_PROMPT,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use serde_json::{json, Value};
@@ -2378,8 +2390,10 @@ mod tests {
             .await
             .map_err(|err| err.to_string())?;
 
-            let (redispatched_tasks, _) = dispatch_agent_restart_backlog(&pool, agent_id).await?;
+            let (redispatched_tasks, retried_manual_work, _) =
+                dispatch_agent_restart_backlog(&pool, agent_id).await?;
             assert_eq!(redispatched_tasks, 1);
+            assert_eq!(retried_manual_work, 0);
 
             let queued_work_items: i64 = sqlx::query_scalar(
                 r#"
@@ -2414,6 +2428,286 @@ mod tests {
             .await
             .map_err(|err| err.to_string())?;
             assert_eq!(pending_task_starts, 1);
+
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn restart_backlog_retries_failed_explicit_manual_work() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "restart-manual-agent").await?;
+            let channel_id = insert_test_channel(&pool, "restart-manual").await?;
+            let inbox_item_id = create_agent_inbox_item(
+                &pool,
+                AgentInboxItemInput {
+                    agent_id,
+                    channel_id: Some(channel_id),
+                    thread_root_id: None,
+                    source_message_id: None,
+                    task_id: None,
+                    kind: "manual",
+                    priority: 60,
+                    title: "Retry manual request",
+                    body_preview: "Please continue",
+                    payload: json!({"source_kind": "manual", "explicit_dispatch": true}),
+                },
+            )
+            .await?;
+            let failed_work_item_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_work_items (
+                    agent_id, channel_id, inbox_item_id, source_kind, title, context, status, completed_at
+                )
+                values (
+                    $1, $2, $3, 'manual', 'Retry manual request', 'manual context',
+                    'failed', strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                )
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .bind(channel_id)
+            .bind(inbox_item_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query("update agent_inbox_items set work_item_id = $2 where id = $1")
+                .bind(inbox_item_id)
+                .bind(failed_work_item_id)
+                .execute(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+
+            let (redispatched_tasks, retried_manual_work, _) =
+                dispatch_agent_restart_backlog(&pool, agent_id).await?;
+            assert_eq!(redispatched_tasks, 0);
+            assert_eq!(retried_manual_work, 1);
+
+            let queued_work_items = sqlx::query(
+                r#"
+                select id, status, inbox_item_id, source_kind
+                from agent_work_items
+                where agent_id = $1
+                order by created_at desc
+                limit 1
+                "#,
+            )
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let retried_work_item_id: Uuid = queued_work_items.get("id");
+            assert_ne!(retried_work_item_id, failed_work_item_id);
+            assert_eq!(queued_work_items.get::<String, _>("status"), "queued");
+            assert_eq!(
+                queued_work_items.get::<Option<Uuid>, _>("inbox_item_id"),
+                Some(inbox_item_id)
+            );
+            assert_eq!(queued_work_items.get::<String, _>("source_kind"), "manual");
+
+            let inbox = sqlx::query(
+                "select work_item_id, state from agent_inbox_items where id = $1",
+            )
+            .bind(inbox_item_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(
+                inbox.get::<Option<Uuid>, _>("work_item_id"),
+                Some(retried_work_item_id)
+            );
+            assert_eq!(inbox.get::<String, _>("state"), "processing");
+
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn merged_task_assigned_work_item_marks_every_task_ready_for_review() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "merged-task-agent").await?;
+            let channel_id = insert_test_channel(&pool, "merged-task").await?;
+            let first_message_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Martin', 'owner', 'Handle first task', true)
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let second_message_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Martin', 'owner', 'Handle second task', true)
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let first_task_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into tasks (message_id, channel_id, title, status, assignee_agent_id)
+                values ($1, $2, 'First task', 'in_progress', $3)
+                returning id
+                "#,
+            )
+            .bind(first_message_id)
+            .bind(channel_id)
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let second_task_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into tasks (message_id, channel_id, title, status, assignee_agent_id)
+                values ($1, $2, 'Second task', 'in_progress', $3)
+                returning id
+                "#,
+            )
+            .bind(second_message_id)
+            .bind(channel_id)
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let first_inbox_id = create_agent_inbox_item(
+                &pool,
+                AgentInboxItemInput {
+                    agent_id,
+                    channel_id: Some(channel_id),
+                    thread_root_id: Some(first_message_id),
+                    source_message_id: Some(first_message_id),
+                    task_id: Some(first_task_id),
+                    kind: "task_assigned",
+                    priority: 95,
+                    title: "First task",
+                    body_preview: "Handle first task",
+                    payload: json!({}),
+                },
+            )
+            .await?;
+            let second_inbox_id = create_agent_inbox_item(
+                &pool,
+                AgentInboxItemInput {
+                    agent_id,
+                    channel_id: Some(channel_id),
+                    thread_root_id: Some(first_message_id),
+                    source_message_id: Some(second_message_id),
+                    task_id: Some(second_task_id),
+                    kind: "task_assigned",
+                    priority: 95,
+                    title: "Second task",
+                    body_preview: "Handle second task",
+                    payload: json!({}),
+                },
+            )
+            .await?;
+            let work_item_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_work_items (
+                    agent_id, channel_id, thread_root_id, source_message_id, inbox_item_id,
+                    task_id, source_kind, title, context, status
+                )
+                values (
+                    $1, $2, $3, $3, $4, $5, 'inbox_wake', 'Merged task wake', 'context', 'queued'
+                )
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .bind(channel_id)
+            .bind(first_message_id)
+            .bind(first_inbox_id)
+            .bind(first_task_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let work_item = sqlx::query(
+                "select id, task_id, source_kind, status from agent_work_items where id = $1",
+            )
+            .bind(work_item_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(work_item.get::<String, _>("source_kind"), "inbox_wake");
+            assert_eq!(work_item.get::<String, _>("status"), "queued");
+            assert_eq!(
+                work_item.get::<Option<Uuid>, _>("task_id"),
+                Some(first_task_id)
+            );
+            for inbox_item_id in [first_inbox_id, second_inbox_id] {
+                sqlx::query("update agent_inbox_items set work_item_id = $2 where id = $1")
+                    .bind(inbox_item_id)
+                    .bind(work_item_id)
+                    .execute(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            }
+
+            let linked_inboxes: i64 = sqlx::query_scalar(
+                r#"
+                select count(*)
+                from agent_inbox_items
+                where work_item_id = $1
+                  and kind = 'task_assigned'
+                "#,
+            )
+            .bind(work_item_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(linked_inboxes, 2);
+
+            let run_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_runs (agent_id, command, status)
+                values ($1, 'codex app-server', 'running')
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            mark_task_after_work_item_finished(&pool, work_item_id, agent_id, run_id, "done")
+                .await?;
+
+            let task_statuses = sqlx::query(
+                r#"
+                select id, status
+                from tasks
+                where id in ($1, $2)
+                order by created_at asc
+                "#,
+            )
+            .bind(first_task_id)
+            .bind(second_task_id)
+            .fetch_all(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(task_statuses.len(), 2);
+            for row in task_statuses {
+                assert_eq!(row.get::<String, _>("status"), "in_review");
+            }
 
             Ok(())
         }
