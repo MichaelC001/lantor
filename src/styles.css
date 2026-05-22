@@ -8249,11 +8249,13 @@ body.resizing-row * {
   position: relative;
   min-height: max-content;
   overflow: hidden;
+  padding: 10px 28px 12px;
+  border-radius: 16px;
   --activity-feed-swipe-x: 0px;
 }
 
 .activity-feed-row-shell + .activity-feed-row-shell {
-  border-top: 1px solid var(--activity-feed-row-border);
+  border-top: 0;
 }
 
 .activity-feed-swipe-action {
@@ -8276,15 +8278,16 @@ body.resizing-row * {
   align-items: start;
   padding: 9px 22px 11px;
   border: 0;
-  border-radius: 0;
-  background: transparent;
+  border-radius: 16px;
+  background: var(--activity-feed-control-bg);
   color: inherit;
+  box-shadow: inset 0 0 0 1px var(--activity-feed-row-border);
   cursor: pointer;
 }
 
 .activity-feed-row:hover {
   background: var(--activity-feed-row-hover-bg);
-  box-shadow: none;
+  box-shadow: inset 0 0 0 1px var(--activity-feed-row-border);
 }
 
 .activity-feed-row.new-thread {
@@ -9633,6 +9636,7 @@ body.resizing-row * {
   }
 
   .activity-feed-row-shell {
+    padding: 0;
     border-radius: 16px;
     background: var(--activity-feed-mobile-bg);
     touch-action: pan-y;
@@ -9678,6 +9682,7 @@ body.resizing-row * {
     padding: 14px;
     border-radius: 16px;
     background: var(--activity-feed-mobile-bg);
+    box-shadow: none;
     transform: translateX(var(--activity-feed-swipe-x));
     transition: transform 160ms ease;
   }
