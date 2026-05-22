@@ -105,10 +105,47 @@ function taskStatusLabel(status: string) {
   return status.replace("_", " ");
 }
 
-function replyingAgentsLabel(progress: ReturnType<typeof activeProgressByAgent>) {
-  if (progress.length === 0) return "";
-  if (progress.length === 1) return `${progress[0].agent.display_name} is replying`;
-  return `${progress.length} agents are replying`;
+type ReplyProgress = ReturnType<typeof activeProgressByAgent>[number];
+
+function compactReplyProgressText(value: string, limit: number) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, Math.max(0, limit - 1)).trim()}...`;
+}
+
+function replyProgressSummary(progress: ReplyProgress) {
+  if (progress.latestActivity) {
+    const title = (progress.latestActivity.summary || progress.latestActivity.title || "Working").trim() || "Working";
+    const rawDetail = progress.latestActivity.detail.trim();
+    const detail = rawDetail.startsWith("{") || rawDetail.startsWith("[")
+      ? ""
+      : compactReplyProgressText(rawDetail, 72);
+    return {
+      title,
+      detail: detail && detail !== title ? detail : "",
+    };
+  }
+  if (progress.queuedItems.length > 0) {
+    return {
+      title: progress.queuedItems.length === 1 ? "Queued" : `${progress.queuedItems.length} queued`,
+      detail: "Waiting to start",
+    };
+  }
+  return {
+    title: "Working",
+    detail: "",
+  };
+}
+
+function ActiveReplyIndicator({ label }: { label: string }) {
+  return (
+    <span className="thread-reply-status-text" aria-label={label}>
+      <span className="thread-reply-status-dot" aria-hidden="true" />
+      <span className="thread-reply-status-dot" aria-hidden="true" />
+      <span className="thread-reply-status-dot" aria-hidden="true" />
+    </span>
+  );
 }
 
 function shouldCollapseChannelMessage(body: string) {
@@ -685,7 +722,10 @@ export function Conversation({
             const replySummary = threadReplySummaries[message.id] ?? null;
             const activeReplyProgress = activeReplyProgressByRoot[message.id] ?? [];
             const hasActiveReplyProgress = activeReplyProgress.length > 0;
-            const replyingLabel = replyingAgentsLabel(activeReplyProgress);
+            const activeReplyStatus = hasActiveReplyProgress
+              ? replyProgressSummary(activeReplyProgress[0]).title
+              : "";
+            const replyingAgents = activeReplyProgress.map((progress) => progress.agent.display_name).join(", ");
             const activeReplyAgentIds = new Set(activeReplyProgress.map((progress) => progress.agent.id).filter(Boolean));
             const replyParticipants = (replySummary?.participants ?? [])
               .filter((participant) => !participant.sender_agent_id || !activeReplyAgentIds.has(participant.sender_agent_id))
@@ -862,7 +902,7 @@ export function Conversation({
                         className={`thread-reply-summary ${hasActiveReplyProgress ? "active-reply" : ""}`}
                         title="View thread replies"
                         aria-label={hasActiveReplyProgress
-                          ? `${replyingLabel}. View thread`
+                          ? `${activeReplyStatus}${replyingAgents ? `: ${replyingAgents}` : ""}. View thread`
                           : `View ${replyCount} ${replyCount === 1 ? "reply" : "replies"} in thread`}
                         onPointerDown={(event) => event.stopPropagation()}
                         onClick={(event) => {
@@ -870,23 +910,52 @@ export function Conversation({
                           setActiveThreadId(message.id);
                         }}
                       >
-                        <div className="thread-reply-avatars">
-                          {activeReplyProgress.slice(0, 3).map((progress) => (
-                            <span key={`active:${progress.key}`}>
-                              <AgentAvatar agent={progress.agent} size="sm" showStatus={false} />
-                            </span>
-                          ))}
-                          {replyParticipants.map((participant) => (
-                            <span key={`${participant.sender_role}:${participant.sender_agent_id ?? participant.sender_name}`}>
-                              {renderReplyParticipantAvatar(participant)}
-                            </span>
-                          ))}
-                        </div>
-                        <strong>{replyCount > 0 ? `${replyCount} ${replyCount === 1 ? "reply" : "replies"}` : "Replying"}</strong>
+                        {replyParticipants.length > 0 && (
+                          <div className="thread-reply-avatars">
+                            {replyParticipants.map((participant) => (
+                              <span key={`${participant.sender_role}:${participant.sender_agent_id ?? participant.sender_name}`}>
+                                {renderReplyParticipantAvatar(participant)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        <strong>
+                          {replyCount > 0 ? (
+                            `${replyCount} ${replyCount === 1 ? "reply" : "replies"}`
+                          ) : (
+                            <ActiveReplyIndicator label={activeReplyStatus} />
+                          )}
+                        </strong>
                         {(hasActiveReplyProgress || replySummary?.latest) && (
                           <span className="thread-reply-summary-action">
                             {hasActiveReplyProgress ? (
-                              <span className="thread-reply-summary-status">{replyingLabel}</span>
+                              <span className="thread-reply-summary-status">
+                                <span className="thread-reply-status-avatar-stack" aria-hidden="true">
+                                  {activeReplyProgress.slice(0, 3).map((progress) => (
+                                    <AgentAvatar key={`status:${progress.key}`} agent={progress.agent} size="sm" showStatus={false} />
+                                  ))}
+                                </span>
+                                {replyCount > 0 && (
+                                  <ActiveReplyIndicator label={activeReplyStatus} />
+                                )}
+                                <span className="thread-reply-active-menu" aria-hidden="true">
+                                  {activeReplyProgress.map((progress) => {
+                                    const summary = replyProgressSummary(progress);
+                                    return (
+                                      <span key={`menu:${progress.key}`} className="thread-reply-active-agent">
+                                        <AgentAvatar agent={progress.agent} size="sm" showStatus={false} />
+                                        <span className="thread-reply-active-agent-copy">
+                                          <span className="thread-reply-active-agent-name">{progress.agent.display_name}</span>
+                                          <span className="thread-reply-active-agent-status">
+                                            <span>{summary.title}</span>
+                                            {summary.detail && <em>{summary.detail}</em>}
+                                          </span>
+                                        </span>
+                                      </span>
+                                    );
+                                  })}
+                                </span>
+                              </span>
                             ) : replySummary?.latest ? (
                               <time dateTime={replySummary.latest.created_at}>Last reply {formatTime(replySummary.latest.created_at)}</time>
                             ) : null}
