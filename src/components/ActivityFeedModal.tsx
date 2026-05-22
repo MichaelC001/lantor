@@ -325,10 +325,7 @@ export function ActivityFeedModal({
                       <span>{item.title}</span>
                     </h3>
                     {excerpt && <p>{firstLines(excerpt, 3)}</p>}
-                    <small>
-                      Open
-                      {item.newCount > 0 ? <b>{item.newCount} new</b> : null}
-                    </small>
+                    {item.newCount > 0 ? <small><b>{item.newCount} new</b></small> : null}
                   </div>
                   <div className="activity-feed-row-actions">
                     {item.unread ? <span className="activity-feed-unread-dot" aria-label="Unread" /> : null}
