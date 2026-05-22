@@ -37,8 +37,15 @@ export function MessageAttachments({ attachments }: MessageAttachmentsProps) {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") setImagePreview(null);
     }
+    function handleHistoryNavigation() {
+      setImagePreview(null);
+    }
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("popstate", handleHistoryNavigation);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("popstate", handleHistoryNavigation);
+    };
   }, [imagePreview]);
 
   if (attachments.length === 0) return null;
@@ -56,7 +63,11 @@ export function MessageAttachments({ attachments }: MessageAttachmentsProps) {
                 type="button"
                 className={`message-attachment image ${attachment.local_url ? "pending" : ""}`}
                 aria-label={`Preview ${attachment.original_name}`}
-                onClick={() => setImagePreview({ src, alt: attachment.original_name })}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setImagePreview({ src, alt: attachment.original_name });
+                }}
               >
                 <img src={src} alt="" loading="lazy" />
               </button>
@@ -70,7 +81,11 @@ export function MessageAttachments({ attachments }: MessageAttachmentsProps) {
               target="_blank"
               rel="noreferrer"
               title={attachment.original_name}
-              onClick={(event) => void openStoredAttachment(event, attachment)}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                void openStoredAttachment(event, attachment);
+              }}
             >
               <span className="attachment-icon"><FileText size={18} /></span>
               <span className="attachment-meta">
@@ -82,22 +97,29 @@ export function MessageAttachments({ attachments }: MessageAttachmentsProps) {
         })}
       </div>
       {imagePreview && (
-        <div className="attachment-lightbox" role="dialog" aria-modal="true" aria-label="Image preview">
+        <div
+          className="attachment-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Image preview"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
           <button
             type="button"
             className="attachment-lightbox-backdrop"
             aria-label="Close image preview"
             onClick={() => setImagePreview(null)}
           />
+          <button
+            type="button"
+            className="attachment-lightbox-close"
+            aria-label="Close image preview"
+            onClick={() => setImagePreview(null)}
+          >
+            <X size={18} />
+          </button>
           <div className="attachment-lightbox-content">
-            <button
-              type="button"
-              className="attachment-lightbox-close"
-              aria-label="Close image preview"
-              onClick={() => setImagePreview(null)}
-            >
-              <X size={18} />
-            </button>
             <img src={imagePreview.src} alt={imagePreview.alt} />
           </div>
         </div>
