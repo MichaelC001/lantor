@@ -784,9 +784,10 @@ button,
   align-items: center;
   justify-content: center;
   justify-self: end;
-  min-width: 18px;
+  width: 30px;
+  min-width: 30px;
   height: 18px;
-  padding: 0 6px;
+  padding: 0;
   border-radius: 999px;
   background: var(--badge-bg);
   color: var(--badge-ink);
