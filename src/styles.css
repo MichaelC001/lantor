@@ -8276,7 +8276,7 @@ body.resizing-row * {
   grid-template-columns: 44px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: start;
-  padding: 9px 22px 11px;
+  padding: 14px 22px 16px;
   border: 0;
   border-radius: 16px;
   background: var(--activity-feed-control-bg);
