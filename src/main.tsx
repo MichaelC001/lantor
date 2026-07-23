@@ -167,6 +167,7 @@ const MIN_COMPACT_CONTENT_WIDTH = 320;
 const MIN_COMPACT_SIDEBAR_VISIBLE_WIDTH = 220;
 const MOBILE_BREAKPOINT = 760;
 const UI_REFRESH_DEBOUNCE_MS = 80;
+const UI_RECONCILE_INTERVAL_MS = 60_000;
 const EPHEMERAL_FLUSH_FALLBACK_MS = 80;
 const MIN_BOOT_SPLASH_MS = 600;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -1054,12 +1055,10 @@ function App() {
     const perf = shouldEnablePerfTelemetry() ? createPerfDraft("full-refresh") : null;
     const refreshInvalidation = refreshInvalidationRef.current;
     const bootstrapChannelId = preferredActiveChannelId || activeChannelId;
-    const bootstrapArgs = !isTauriRuntime()
-      ? {
-        currentChannelOnly: true,
-        ...(bootstrapChannelId ? { channelId: bootstrapChannelId } : {}),
-      }
-      : {};
+    const bootstrapArgs = {
+      currentChannelOnly: true,
+      ...(bootstrapChannelId ? { channelId: bootstrapChannelId } : {}),
+    };
     const { payload, measurement } = perf
       ? await apiInvokeMeasured<Bootstrap>("bootstrap", bootstrapArgs)
       : { payload: await apiInvoke<Bootstrap>("bootstrap", bootstrapArgs), measurement: null };
@@ -1185,8 +1184,7 @@ function App() {
 
   async function loadChannelMessages(channelId: string) {
     if (
-      isTauriRuntime()
-      || initializedOlderChannelIdsRef.current.has(channelId)
+      initializedOlderChannelIdsRef.current.has(channelId)
       || loadingOlderChannelIdsRef.current.has(channelId)
     ) {
       return;
@@ -1242,8 +1240,7 @@ function App() {
   async function loadOlderRootMessages(channelId: string) {
     const beforeSeq = olderChannelBeforeSeqRef.current.get(channelId);
     if (
-      isTauriRuntime()
-      || beforeSeq === undefined
+      beforeSeq === undefined
       || loadingOlderChannelIdsRef.current.has(channelId)
       || exhaustedOlderChannelIds.has(channelId)
     ) {
@@ -1911,9 +1908,18 @@ function App() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (document.visibilityState !== "visible") return;
+      // Live backend events are the primary synchronization path. Keep only a
+      // slow safety-net reconciliation for missed events, and never run it while
+      // the user is editing text: even a compact snapshot should not contend
+      // with keystrokes on the WebKit main thread.
+      if (
+        document.visibilityState !== "visible"
+        || isTextInput(document.activeElement)
+      ) {
+        return;
+      }
       requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state`);
-    }, 5000);
+    }, UI_RECONCILE_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -2453,7 +2459,6 @@ function App() {
   }, [visibleMessages, channel]);
   const hasMoreRootMessages = Boolean(
     channel &&
-    !isTauriRuntime() &&
     olderChannelBeforeSeqRef.current.has(channel.id) &&
     !exhaustedOlderChannelIds.has(channel.id),
   );
@@ -3052,7 +3057,6 @@ function App() {
   useEffect(() => {
     if (
       !activeChannelId
-      || isTauriRuntime()
       || initializedOlderChannelIdsRef.current.has(activeChannelId)
       || !activeChannelExists
     ) {

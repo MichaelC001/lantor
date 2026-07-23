@@ -67,8 +67,8 @@ use commands::{
         update_thread_followed,
     },
     messages::{
-        delete_message, load_older_channel_messages, send_message, set_message_saved,
-        update_message,
+        delete_message, load_channel_messages, load_older_channel_messages, send_message,
+        set_message_saved, update_message,
     },
     tasks::{update_task_status, update_task_title},
 };
@@ -367,6 +367,7 @@ pub fn run() {
             download_attachment,
             open_external_url,
             retry_agent_work,
+            load_channel_messages,
             load_older_channel_messages,
             send_message,
             set_message_saved,

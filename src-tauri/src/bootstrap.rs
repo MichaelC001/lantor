@@ -65,6 +65,32 @@ pub(crate) async fn load_bootstrap(pool: &SqlitePool, db_url: String) -> Command
     .await
 }
 
+pub(crate) async fn load_tauri_bootstrap(
+    pool: &SqlitePool,
+    db_url: String,
+    requested_channel_id: Option<Uuid>,
+    current_channel_only: bool,
+) -> CommandResult<Bootstrap> {
+    if !current_channel_only {
+        return load_bootstrap(pool, db_url).await;
+    }
+    load_bootstrap_with_options(
+        pool,
+        db_url,
+        BootstrapLoadOptions {
+            runtime: "tauri",
+            messages: BootstrapMessageLoad::RecentChannel(
+                requested_channel_id,
+                WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
+            ),
+            include_run_logs: false,
+            compact_agent_activities: true,
+            include_artifact_content: false,
+        },
+    )
+    .await
+}
+
 pub(crate) async fn load_web_bootstrap(
     pool: &SqlitePool,
     db_url: String,
@@ -380,10 +406,10 @@ async fn load_bootstrap_with_options(
 mod tests {
     use crate::test_support::{drop_test_schema, insert_test_channel, test_pool};
 
-    use super::{load_bootstrap, load_web_bootstrap};
+    use super::{load_bootstrap, load_tauri_bootstrap, load_web_bootstrap};
 
     #[tokio::test]
-    async fn web_bootstrap_only_scopes_messages_for_opted_in_clients() {
+    async fn bootstrap_only_scopes_messages_for_opted_in_clients() {
         let Some((pool, schema)) = test_pool().await else {
             return;
         };
@@ -438,6 +464,35 @@ mod tests {
                 .messages
                 .iter()
                 .any(|message| message.body == "other message"));
+
+            let desktop = load_tauri_bootstrap(
+                &pool,
+                "sqlite:test".to_owned(),
+                Some(requested_channel_id),
+                true,
+            )
+            .await?;
+            assert!(desktop
+                .messages
+                .iter()
+                .all(|message| message.channel_id == requested_channel_id));
+            assert!(desktop
+                .messages
+                .iter()
+                .any(|message| message.body == "requested message"));
+            assert!(!desktop
+                .messages
+                .iter()
+                .any(|message| message.body == "other message"));
+            assert_eq!(
+                desktop
+                    .perf
+                    .as_ref()
+                    .expect("desktop bootstrap should report perf options")
+                    .options
+                    .runtime,
+                "tauri"
+            );
             Ok(())
         }
         .await;
@@ -496,6 +551,29 @@ mod tests {
                 .and_then(|message| message.artifacts.iter().find(|artifact| artifact.id == artifact_id))
                 .expect("desktop bootstrap should include the nested message artifact");
             assert_eq!(desktop_message_artifact.content, artifact_content);
+
+            let compact_desktop = load_tauri_bootstrap(
+                &pool,
+                "sqlite:test".to_owned(),
+                Some(channel_id),
+                true,
+            )
+            .await?;
+            let compact_desktop_artifact = compact_desktop
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == artifact_id)
+                .expect("compact desktop bootstrap should include artifact metadata");
+            assert_eq!(compact_desktop_artifact.summary, "short summary");
+            assert_eq!(compact_desktop_artifact.content, "");
+            let compact_desktop_message_artifact = compact_desktop
+                .messages
+                .iter()
+                .find(|message| message.id == message_id)
+                .and_then(|message| message.artifacts.iter().find(|artifact| artifact.id == artifact_id))
+                .expect("compact desktop bootstrap should include nested artifact metadata");
+            assert_eq!(compact_desktop_message_artifact.summary, "short summary");
+            assert_eq!(compact_desktop_message_artifact.content, "");
 
             let web = load_web_bootstrap(
                 &pool,

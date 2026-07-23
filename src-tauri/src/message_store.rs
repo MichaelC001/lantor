@@ -68,15 +68,6 @@ pub(crate) async fn load_recent_channel_message_page_without_artifact_content(
     })
 }
 
-pub(crate) async fn load_older_channel_messages(
-    pool: &SqlitePool,
-    channel_id: Uuid,
-    before_seq: i64,
-    limit: i64,
-) -> CommandResult<ChannelMessagePage> {
-    load_older_channel_messages_with_options(pool, channel_id, before_seq, limit, true).await
-}
-
 pub(crate) async fn load_older_channel_messages_without_artifact_content(
     pool: &SqlitePool,
     channel_id: Uuid,
@@ -1244,7 +1235,7 @@ mod tests {
     use crate::test_support::{drop_test_schema, insert_test_channel, test_pool};
 
     use super::{
-        channel_message_history_from_messages, load_messages, load_older_channel_messages,
+        channel_message_history_from_messages, load_messages,
         load_older_channel_messages_without_artifact_content,
         load_recent_channel_message_page_without_artifact_content,
         load_recent_channel_messages_without_artifact_content,
@@ -1465,7 +1456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn older_channel_messages_uses_seq_cursor_and_omits_web_artifact_content() {
+    async fn older_channel_messages_uses_seq_cursor_and_omits_artifact_content() {
         let Some((pool, schema)) = test_pool().await else {
             return;
         };
@@ -1529,7 +1520,10 @@ mod tests {
             .await
             .map_err(|err| err.to_string())?;
 
-            let first_page = load_older_channel_messages(&pool, channel_id, roots[3].1, 2).await?;
+            let first_page = load_older_channel_messages_without_artifact_content(
+                &pool, channel_id, roots[3].1, 2,
+            )
+            .await?;
             let first_page_roots = first_page
                 .messages
                 .iter()
@@ -1549,22 +1543,10 @@ mod tests {
                 .find(|message| message.id == roots[1].0)
                 .expect("root 2 should be present")
                 .artifacts[0];
-            assert_eq!(artifact.content, "large historical content");
+            assert_eq!(artifact.title, "history artifact");
+            assert!(artifact.content.is_empty());
 
-            let web_page = load_older_channel_messages_without_artifact_content(
-                &pool, channel_id, roots[3].1, 2,
-            )
-            .await?;
-            let web_artifact = &web_page
-                .messages
-                .iter()
-                .find(|message| message.id == roots[1].0)
-                .expect("root 2 should be present in web page")
-                .artifacts[0];
-            assert_eq!(web_artifact.title, "history artifact");
-            assert!(web_artifact.content.is_empty());
-
-            let second_page = load_older_channel_messages(
+            let second_page = load_older_channel_messages_without_artifact_content(
                 &pool,
                 channel_id,
                 first_page.next_before_seq.expect("first page cursor"),
@@ -1659,7 +1641,7 @@ mod tests {
             assert!(channel_history.has_more);
             assert_ne!(channel_history.before_seq, Some(roots[0].1));
 
-            let page = load_older_channel_messages(
+            let page = load_older_channel_messages_without_artifact_content(
                 &pool,
                 channel_id,
                 channel_history.before_seq.expect("history cursor"),
