@@ -146,11 +146,22 @@ pub(crate) async fn mark_channel_read_in_pool(
     pool: &SqlitePool,
     channel_id: Uuid,
 ) -> CommandResult<()> {
-    sqlx::query(
+    // The frontend calls this eagerly whenever the active channel renders.
+    // Only advance the read marker (and emit a refresh event) when it actually
+    // moves past a newer message; an unconditional notify here previously fed a
+    // refresh -> effect -> mark-read -> refresh loop that kept every client
+    // re-running a full bootstrap forever.
+    let result = sqlx::query(
         r#"
         insert into channel_read_state (channel_id, last_read_at)
         values ($1, strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
         on conflict (channel_id) do update set last_read_at = excluded.last_read_at
+        where exists (
+            select 1
+            from messages m
+            where m.channel_id = excluded.channel_id
+              and julianday(m.created_at) > julianday(channel_read_state.last_read_at)
+        )
         "#,
     )
     .bind(channel_id)
@@ -158,7 +169,9 @@ pub(crate) async fn mark_channel_read_in_pool(
     .await
     .map_err(to_string)?;
 
-    let _ = notify_ui_refresh(pool, "channel_read").await;
+    if result.rows_affected() > 0 {
+        let _ = notify_ui_refresh(pool, "channel_read").await;
+    }
     Ok(())
 }
 
@@ -238,7 +251,7 @@ mod tests {
     use crate::db::{db_connect_with_url, migrate};
 
     use super::{
-        dismiss_inbox_items_in_pool, mark_all_owner_inbox_read_in_pool,
+        dismiss_inbox_items_in_pool, mark_all_owner_inbox_read_in_pool, mark_channel_read_in_pool,
         mark_inbox_items_read_in_pool, DateTime, Utc,
     };
 
@@ -323,6 +336,66 @@ mod tests {
         .fetch_one(pool)
         .await
         .map_err(|err| err.to_string())
+    }
+
+    async fn count_channel_read_events(pool: &SqlitePool) -> Result<i64, String> {
+        sqlx::query_scalar(
+            "select count(*) from ui_events where json_extract(event_json, '$.reason') = 'channel_read'",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|err| err.to_string())
+    }
+
+    #[tokio::test]
+    async fn mark_channel_read_notifies_only_when_read_marker_advances() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let channel_id = insert_test_channel(&pool, "mark-channel-read").await?;
+            sqlx::query(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Agent', 'agent', 'unread message', false)
+                "#,
+            )
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            // First call advances past the unread message: one notification.
+            mark_channel_read_in_pool(&pool, channel_id).await?;
+            assert_eq!(count_channel_read_events(&pool).await?, 1);
+
+            // Nothing new since: the marker does not move and no event is sent.
+            mark_channel_read_in_pool(&pool, channel_id).await?;
+            assert_eq!(count_channel_read_events(&pool).await?, 1);
+
+            // A newer message arrives: marking read advances again and notifies.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            sqlx::query(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Agent', 'agent', 'another message', false)
+                "#,
+            )
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            mark_channel_read_in_pool(&pool, channel_id).await?;
+            assert_eq!(count_channel_read_events(&pool).await?, 2);
+
+            // And converges again afterwards.
+            mark_channel_read_in_pool(&pool, channel_id).await?;
+            assert_eq!(count_channel_read_events(&pool).await?, 2);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
     }
 
     #[tokio::test]

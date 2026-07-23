@@ -1114,10 +1114,25 @@ function App() {
       } else {
         currentOnlyMessages = currentOnlyMessages.filter((message) => refreshedChannelIds.has(message.channel_id));
       }
-      if (currentOnlyMessages.length === 0) return refreshed;
+      // A bootstrap snapshot can be over a second stale. Where it still shows a
+      // message as `streaming`, targeted deltas/upserts applied since then are
+      // ahead of it: keep the local copy so live text does not briefly roll
+      // back and re-grow (visible as flicker while agents stream).
+      let preservedStreaming = false;
+      const snapshotMessages = refreshed.messages.map((message) => {
+        if (message.delivery_state !== "streaming") return message;
+        const local = current.messages.find((item) => item.id === message.id);
+        if (!local) return message;
+        if (local.delivery_state !== "streaming" || local.body.length > message.body.length) {
+          preservedStreaming = true;
+          return local;
+        }
+        return message;
+      });
+      if (currentOnlyMessages.length === 0 && !preservedStreaming) return refreshed;
       return {
         ...refreshed,
-        messages: sortedMessages([...refreshed.messages, ...currentOnlyMessages]),
+        messages: sortedMessages([...snapshotMessages, ...currentOnlyMessages]),
       };
     });
     setActiveChannelId((prev) => {
@@ -2772,6 +2787,19 @@ function App() {
     return visibleMessages.filter((message) => message.channel_id === activeChannelId).length;
   }, [visibleMessages, activeChannelId]);
 
+  // Primitive derivations so effects can depend on stable values instead of the
+  // `data.channels` array reference, which is recreated by every bootstrap
+  // refresh even when nothing changed (previously this re-armed mark_channel_read
+  // on each refresh and fed a self-sustaining full-refresh loop).
+  const activeChannelExists = useMemo(() => {
+    if (!activeChannelId) return false;
+    return Boolean(data?.channels.some((item) => item.id === activeChannelId));
+  }, [data?.channels, activeChannelId]);
+  const activeChannelUnreadCount = useMemo(() => {
+    if (!activeChannelId) return 0;
+    return data?.channels.find((item) => item.id === activeChannelId)?.unread_count ?? 0;
+  }, [data?.channels, activeChannelId]);
+
   const activeRunFor = useCallback((agentId: string) => {
     return data?.agent_runs.find((run) => run.agent_id === agentId && ACTIVE_RUN_STATUSES.has(run.status)) ?? null;
   }, [data?.agent_runs]);
@@ -3023,21 +3051,24 @@ function App() {
 
   useEffect(() => {
     if (
-      !data
-      || !activeChannelId
+      !activeChannelId
       || isTauriRuntime()
       || initializedOlderChannelIdsRef.current.has(activeChannelId)
-      || !data.channels.some((item) => item.id === activeChannelId)
+      || !activeChannelExists
     ) {
       return;
     }
     void loadChannelMessages(activeChannelId);
-  }, [activeChannelId, data?.channels]);
+  }, [activeChannelId, activeChannelExists]);
 
+  // Depend on primitives only: re-run on channel switch, on new local messages,
+  // or when the snapshot reports unread — never on a mere array-identity change
+  // from a bootstrap refresh. The backend additionally skips the refresh event
+  // when the read marker does not move, so this converges instead of looping.
   useEffect(() => {
-    if (!data || !activeChannelId || !data.channels.some((item) => item.id === activeChannelId)) return;
+    if (!activeChannelId || !activeChannelExists) return;
     apiInvoke("mark_channel_read", { channelId: activeChannelId }).catch((err) => console.error(err));
-  }, [activeChannelId, activeChannelMessageCount, data?.channels]);
+  }, [activeChannelId, activeChannelExists, activeChannelMessageCount, activeChannelUnreadCount]);
 
   async function createChannel() {
     if (createChannelSubmittingRef.current) return;
