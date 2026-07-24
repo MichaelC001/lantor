@@ -9,7 +9,9 @@ use crate::agent_routing::{
     MentionDispatchOrigin,
 };
 use crate::agent_work_dispatch::dispatch_unassigned_task_availability;
-use crate::attachments::{write_attachment_file, ATTACHMENT_SIZE_LIMIT};
+use crate::attachments::{
+    remove_attachment_files, write_attachment_file, PendingAttachmentWrites, ATTACHMENT_SIZE_LIMIT,
+};
 use crate::ui_notifications::{notify_ui_message_upsert, notify_ui_refresh};
 use crate::{
     app::{to_string, CommandResult},
@@ -755,7 +757,8 @@ pub(crate) async fn send_owner_message_in_pool(
     .await
     .map_err(to_string)?;
 
-    insert_message_attachments_tx(&mut tx, msg_id, attachments).await?;
+    let pending_attachment_writes =
+        insert_message_attachments_tx(&mut tx, msg_id, attachments).await?;
 
     let mut task_id = None;
     if as_task {
@@ -777,6 +780,7 @@ pub(crate) async fn send_owner_message_in_pool(
     }
 
     tx.commit().await.map_err(to_string)?;
+    pending_attachment_writes.commit();
     queue_mentions_as_work_items(
         pool,
         channel_id,
@@ -841,14 +845,32 @@ pub(crate) async fn delete_message_in_pool(
     pool: &SqlitePool,
     message_id: Uuid,
 ) -> CommandResult<()> {
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
+    let attachment_paths = sqlx::query_scalar::<_, String>(
+        r#"
+        select ma.storage_path
+        from message_attachments ma
+        join messages m on m.id = ma.message_id
+        where m.id = $1 or m.thread_root_id = $1
+        "#,
+    )
+    .bind(message_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(to_string)?;
     let result = sqlx::query("delete from messages where id = $1")
         .bind(message_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(to_string)?;
     if result.rows_affected() == 0 {
         return Err("message does not exist".to_owned());
     }
+    tx.commit().await.map_err(to_string)?;
+    remove_attachment_files(&attachment_paths);
     Ok(())
 }
 
@@ -893,8 +915,8 @@ pub(crate) async fn insert_message_attachments_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     message_id: Uuid,
     attachments: Vec<AttachmentUpload>,
-) -> CommandResult<usize> {
-    let mut inserted = 0;
+) -> CommandResult<PendingAttachmentWrites> {
+    let mut pending_writes = PendingAttachmentWrites::default();
     for attachment in attachments {
         if attachment.bytes.is_empty() {
             continue;
@@ -920,6 +942,7 @@ pub(crate) async fn insert_message_attachments_tx(
         };
         let storage_path =
             write_attachment_file(message_id, attachment_id, original_name, &attachment.bytes)?;
+        pending_writes.track(&storage_path);
         sqlx::query(
             r#"
             insert into message_attachments (
@@ -942,9 +965,8 @@ pub(crate) async fn insert_message_attachments_tx(
         .execute(&mut **tx)
         .await
         .map_err(to_string)?;
-        inserted += 1;
     }
-    Ok(inserted)
+    Ok(pending_writes)
 }
 
 pub(crate) async fn insert_agent_attachment_message(
@@ -1006,11 +1028,13 @@ pub(crate) async fn insert_agent_attachment_message(
     .await
     .map_err(to_string)?;
 
-    let inserted = insert_message_attachments_tx(&mut tx, msg_id, attachments).await?;
-    if inserted == 0 {
+    let pending_attachment_writes =
+        insert_message_attachments_tx(&mut tx, msg_id, attachments).await?;
+    if pending_attachment_writes.is_empty() {
         return Err("attachment_create produced no attachments".to_owned());
     }
     tx.commit().await.map_err(to_string)?;
+    pending_attachment_writes.commit();
 
     let conversation_thread_root_id = thread_root_id.unwrap_or(msg_id);
     upsert_agent_thread_subscription(
@@ -1235,11 +1259,81 @@ mod tests {
     use crate::test_support::{drop_test_schema, insert_test_channel, test_pool};
 
     use super::{
-        channel_message_history_from_messages, load_messages,
+        channel_message_history_from_messages, delete_message_in_pool, load_messages,
         load_older_channel_messages_without_artifact_content,
         load_recent_channel_message_page_without_artifact_content,
         load_recent_channel_messages_without_artifact_content,
     };
+    use crate::attachments::write_attachment_file;
+
+    #[tokio::test]
+    async fn deleting_a_thread_removes_its_attachment_files() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let channel_id = insert_test_channel(&pool, "delete-message-attachments").await?;
+            let root_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Dylan', 'owner', 'root', false)
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let reply_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (
+                    channel_id, thread_root_id, sender_name, sender_role, body, is_task
+                )
+                values ($1, $2, 'agent', 'agent', 'reply', false)
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .bind(root_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let mut storage_paths = Vec::new();
+            for (message_id, name) in [(root_id, "root.txt"), (reply_id, "reply.txt")] {
+                let attachment_id = uuid::Uuid::new_v4();
+                let storage_path =
+                    write_attachment_file(message_id, attachment_id, name, name.as_bytes())?;
+                sqlx::query(
+                    r#"
+                    insert into message_attachments (
+                        id, message_id, original_name, mime_type, size_bytes, storage_path
+                    )
+                    values ($1, $2, $3, 'text/plain', $4, $5)
+                    "#,
+                )
+                .bind(attachment_id)
+                .bind(message_id)
+                .bind(name)
+                .bind(name.len() as i64)
+                .bind(&storage_path)
+                .execute(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+                storage_paths.push(storage_path);
+            }
+
+            delete_message_in_pool(&pool, root_id).await?;
+
+            assert!(storage_paths
+                .iter()
+                .all(|path| !std::path::Path::new(path).exists()));
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
 
     #[tokio::test]
     async fn recent_channel_message_page_only_loads_the_requested_channel() {

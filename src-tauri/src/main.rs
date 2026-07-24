@@ -53,6 +53,7 @@ use agent_work_dispatch::{
 };
 use agent_workspace::{agent_workspace_list, agent_workspace_read_file};
 use app::{to_string, AppState, CommandResult};
+use attachments::spawn_attachment_garbage_collector;
 use channels::normalize_channel_name;
 use commands::{
     agents::{create_agent, delete_agent, update_agent, update_owner_profile},
@@ -250,6 +251,7 @@ fn initialize_backend() -> (String, SqlitePool) {
 }
 
 fn spawn_shared_background_workers(pool: SqlitePool, database_url: String) {
+    spawn_attachment_garbage_collector(pool.clone());
     spawn_ui_events_pruner(pool.clone());
     web::spawn_web_server_if_configured(pool.clone(), database_url);
     spawn_reminder_worker(pool);

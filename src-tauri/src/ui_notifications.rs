@@ -439,13 +439,13 @@ pub(crate) fn spawn_ui_refresh_listener(app: tauri::AppHandle, pool: SqlitePool)
 
 /// Number of most-recent `ui_events` rows to retain on each prune.
 ///
-/// `ui_events` is an append-only UI-refresh notification queue. Every consumer
-/// (desktop listener, web SSE stream, owner inbox) starts at `max(id)` and only
-/// ever reads `id > last_id`, so historical rows are never replayed — once a row
-/// has been tailed it is dead weight. Live consumers poll roughly every 150ms,
-/// so retaining several thousand rows is a very large safety margin while keeping
-/// the table from growing without bound. `id` is `autoincrement` (monotonic, never
-/// reused), so pruning by id can never strand or duplicate a consumer cursor.
+/// `ui_events` is an append-only UI-refresh notification queue. Desktop and
+/// owner-inbox consumers tail from `max(id)`, while web SSE clients can replay
+/// from their last delivered event id. Retaining several thousand rows gives
+/// reconnecting web clients a large replay window; if a cursor falls behind this
+/// window, the SSE endpoint explicitly requests a snapshot refresh. `id` is
+/// `autoincrement` (monotonic, never reused), so pruning by id cannot duplicate a
+/// consumer cursor.
 const UI_EVENTS_RETAIN_ROWS: i64 = 5_000;
 
 /// How often the background pruner runs after its initial pass.

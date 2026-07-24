@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 #[test]
 fn extracts_unique_agent_mentions() {
-    let mentions = extract_agent_mentions("ping @Hancock and @agent-2, then @Hancock again");
+    let mentions =
+        extract_agent_mentions("ping @Hancock and @agent-2, then @hancock and @Hancock again");
     assert_eq!(mentions, vec!["Hancock", "agent-2"]);
 }
 
@@ -280,6 +281,46 @@ async fn owner_mention_does_not_dispatch_error_agent() {
                 .map_err(|err| err.to_string())?;
         assert_eq!(inbox_count, 0);
         assert_eq!(work_count, 0);
+        Ok(())
+    }
+    .await;
+    drop_test_schema(pool, schema).await;
+    assert!(result.is_ok(), "{:?}", result.err());
+}
+
+#[tokio::test]
+async fn owner_mention_resolves_agent_handle_case_insensitively() {
+    let Some((pool, schema)) = test_pool().await else {
+        return;
+    };
+    let result: Result<(), String> = async {
+        let agent_id = insert_test_agent(&pool, "MixedCaseAgent").await?;
+        let channel_id = insert_test_channel(&pool, "case-insensitive-mention").await?;
+        sqlx::query("insert into channel_members (channel_id, agent_id) values ($1, $2)")
+            .bind(channel_id)
+            .bind(agent_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        send_owner_message_in_pool(
+            &pool,
+            channel_id,
+            None,
+            "@mixedcaseagent please inspect this",
+            false,
+            vec![],
+        )
+        .await?;
+
+        let inbox_count: i64 = sqlx::query_scalar(
+            "select count(*) from agent_inbox_items where agent_id = $1 and kind = 'mention'",
+        )
+        .bind(agent_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        assert_eq!(inbox_count, 1);
         Ok(())
     }
     .await;

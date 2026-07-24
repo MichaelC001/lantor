@@ -13,7 +13,7 @@ use crate::message_store::insert_agent_handoff_message;
 use crate::ui_notifications::insert_system_message;
 
 pub(crate) fn extract_agent_mentions(body: &str) -> Vec<String> {
-    let mut handles = Vec::new();
+    let mut handles: Vec<String> = Vec::new();
     let mut chars = body.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
         if ch != '@' {
@@ -36,7 +36,11 @@ pub(crate) fn extract_agent_mentions(body: &str) -> Vec<String> {
                 break;
             }
         }
-        if !handle.is_empty() && !handles.contains(&handle) {
+        if !handle.is_empty()
+            && !handles
+                .iter()
+                .any(|existing| handle.eq_ignore_ascii_case(existing))
+        {
             handles.push(handle);
         }
     }
@@ -162,12 +166,13 @@ pub(crate) async fn queue_mentions_as_work_items(
         }
     } else {
         for handle in &mentions {
-            let agent_id: Option<Uuid> =
-                sqlx::query_scalar("select id from agents where handle = $1 and status <> 'error'")
-                    .bind(handle)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(to_string)?;
+            let agent_id: Option<Uuid> = sqlx::query_scalar(
+                "select id from agents where lower(handle) = lower($1) and status <> 'error'",
+            )
+            .bind(handle)
+            .fetch_optional(pool)
+            .await
+            .map_err(to_string)?;
             let Some(agent_id) = agent_id else {
                 continue;
             };

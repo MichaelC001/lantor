@@ -9,7 +9,7 @@ use std::{
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive},
         IntoResponse, Response, Sse,
@@ -57,7 +57,8 @@ use crate::system_commands::check_runtime_in_env;
 use crate::task_store::{update_task_status_in_pool, update_task_title_in_pool};
 use crate::ui_notifications::notify_ui_refresh;
 use crate::{
-    app::to_string, cancel_agent_work_in_pool, claim_task_in_pool, retry_agent_work_in_pool,
+    app::{to_string, CommandResult},
+    cancel_agent_work_in_pool, claim_task_in_pool, retry_agent_work_in_pool,
 };
 
 const WEB_SEND_MESSAGE_BODY_LIMIT: usize = 128 * 1024 * 1024;
@@ -98,6 +99,11 @@ struct BootstrapQuery {
     channel_id: Option<String>,
     #[serde(default)]
     current_channel_only: bool,
+}
+
+#[derive(Default, Deserialize)]
+struct EventsQuery {
+    cursor: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -846,13 +852,62 @@ async fn api_agent_workspace_read_file(
         .map_err(api_error)
 }
 
-async fn api_events(State(state): State<Arc<WebState>>) -> Result<impl IntoResponse, Response> {
+fn requested_event_cursor(headers: &HeaderMap, query: &EventsQuery) -> Option<i64> {
+    headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|cursor| *cursor >= 0)
+        .or(query.cursor.filter(|cursor| *cursor >= 0))
+}
+
+async fn event_stream_start(
+    pool: &SqlitePool,
+    requested_cursor: Option<i64>,
+) -> CommandResult<(i64, bool)> {
+    let row = sqlx::query(
+        "select coalesce(min(id), 0) as min_id, coalesce(max(id), 0) as max_id from ui_events",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(to_string)?;
+    let min_id: i64 = row.get("min_id");
+    let max_id: i64 = row.get("max_id");
+    let Some(cursor) = requested_cursor else {
+        return Ok((max_id, false));
+    };
+    let cursor_fell_behind = min_id > 0 && cursor < min_id.saturating_sub(1);
+    let cursor_is_from_another_database = cursor > max_id;
+    if cursor_fell_behind || cursor_is_from_another_database {
+        Ok((max_id, true))
+    } else {
+        Ok((cursor, false))
+    }
+}
+
+async fn api_events(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<EventsQuery>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, Response> {
+    let (initial_last_id, replay_gap) =
+        event_stream_start(&state.pool, requested_event_cursor(&headers, &query))
+            .await
+            .map_err(api_error)?;
     let pool = state.pool.clone();
     let stream = async_stream::stream! {
-        let mut last_id: i64 = sqlx::query_scalar("select coalesce(max(id), 0) from ui_events")
-            .fetch_one(&pool)
-            .await
-            .unwrap_or(0);
+        let mut last_id = initial_last_id;
+        if replay_gap {
+            yield Ok::<Event, Infallible>(
+                Event::default()
+                    .id(last_id.to_string())
+                    .event("lantor")
+                    .data(json!({
+                        "type": "refresh",
+                        "reason": "event_replay_gap"
+                    }).to_string())
+            );
+        }
         loop {
             match sqlx::query(
                 r#"
@@ -872,8 +927,11 @@ async fn api_events(State(state): State<Arc<WebState>>) -> Result<impl IntoRespo
                 Ok(rows) => {
                     for row in rows {
                         last_id = row.get("id");
-                        yield Ok::<Event, Infallible>(
-                            Event::default().event("lantor").data(row.get::<String, _>("event_json"))
+                        yield Ok(
+                            Event::default()
+                                .id(last_id.to_string())
+                                .event("lantor")
+                                .data(row.get::<String, _>("event_json"))
                         );
                     }
                 },
@@ -942,4 +1000,58 @@ fn api_error(message: String) -> Response {
         Json(ApiError { ok: false, message }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue};
+
+    use super::{event_stream_start, requested_event_cursor, EventsQuery};
+    use crate::test_support::{drop_test_schema, test_pool};
+
+    #[test]
+    fn last_event_id_header_takes_precedence_over_query_cursor() {
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", HeaderValue::from_static("12"));
+        let query = EventsQuery { cursor: Some(7) };
+
+        assert_eq!(requested_event_cursor(&headers, &query), Some(12));
+    }
+
+    #[tokio::test]
+    async fn event_stream_detects_a_pruned_replay_gap() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            for index in 1..=3 {
+                sqlx::query("insert into ui_events (event_json) values ($1)")
+                    .bind(format!(r#"{{"type":"refresh","reason":"event-{index}"}}"#))
+                    .execute(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            }
+            let first_id: i64 = sqlx::query_scalar("select min(id) from ui_events")
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            sqlx::query("delete from ui_events where id <= $1")
+                .bind(first_id + 1)
+                .execute(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+
+            let (last_id, replay_gap) = event_stream_start(&pool, Some(first_id)).await?;
+            let max_id: i64 = sqlx::query_scalar("select max(id) from ui_events")
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            assert!(replay_gap);
+            assert_eq!(last_id, max_id);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
 }

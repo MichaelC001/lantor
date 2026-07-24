@@ -427,6 +427,7 @@ pub(crate) struct Bootstrap {
     pub(crate) agent_activities: Vec<AgentActivity>,
     pub(crate) supervisor: SupervisorStatus,
     pub(crate) launch_agent: LaunchAgentStatus,
+    pub(crate) ui_event_cursor: i64,
     #[serde(rename = "__perf")]
     pub(crate) perf: Option<BootstrapPerf>,
 }

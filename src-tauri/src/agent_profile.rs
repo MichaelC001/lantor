@@ -6,6 +6,7 @@ use crate::{
     agent_environment::normalize_agent_environment_variables,
     agent_workspace::load_agent_workspace_summary,
     app::{to_string, CommandResult},
+    attachments::remove_attachment_files,
     db::expand_home_path,
     events::activity::record_agent_activity,
     models::{Agent, OwnerProfile},
@@ -367,14 +368,33 @@ pub(crate) async fn delete_agent_in_pool(pool: &SqlitePool, agent_id: Uuid) -> C
     )
     .await?;
 
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
+    let attachment_paths = sqlx::query_scalar::<_, String>(
+        r#"
+        select ma.storage_path
+        from message_attachments ma
+        join messages m on m.id = ma.message_id
+        join channels c on c.id = m.channel_id
+        where c.kind = 'dm' and c.dm_agent_id = $1
+        "#,
+    )
+    .bind(agent_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(to_string)?;
     let result = sqlx::query("delete from agents where id = $1")
         .bind(agent_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(to_string)?;
     if result.rows_affected() == 0 {
         return Err("agent does not exist".to_owned());
     }
+    tx.commit().await.map_err(to_string)?;
+    remove_attachment_files(&attachment_paths);
 
     let _ = notify_ui_refresh(pool, "agent_deleted").await;
 
@@ -466,6 +486,7 @@ pub(crate) async fn load_agents(pool: &SqlitePool) -> CommandResult<Vec<Agent>> 
 #[cfg(test)]
 mod tests {
     use super::{delete_agent_in_pool, normalize_reasoning_effort};
+    use crate::attachments::write_attachment_file;
     use crate::db::{db_connect_with_url, migrate};
     use sqlx::{Row, SqlitePool};
     use std::fs;
@@ -614,7 +635,25 @@ mod tests {
             let agent_id = insert_test_agent(&pool, "delete-me").await?;
             let channel_id = insert_channel(&pool, "delete-agent").await?;
             let dm_channel_id = insert_dm_channel(&pool, agent_id).await?;
-            insert_agent_message(&pool, agent_id, dm_channel_id, "before delete").await?;
+            let dm_message_id =
+                insert_agent_message(&pool, agent_id, dm_channel_id, "before delete").await?;
+            let attachment_id = Uuid::new_v4();
+            let attachment_path =
+                write_attachment_file(dm_message_id, attachment_id, "dm.txt", b"dm")?;
+            sqlx::query(
+                r#"
+                insert into message_attachments (
+                    id, message_id, original_name, mime_type, size_bytes, storage_path
+                )
+                values ($1, $2, 'dm.txt', 'text/plain', 2, $3)
+                "#,
+            )
+            .bind(attachment_id)
+            .bind(dm_message_id)
+            .bind(&attachment_path)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
             let channel_message_id =
                 insert_agent_message(&pool, agent_id, channel_id, "channel message").await?;
             delete_agent_in_pool(&pool, agent_id).await?;
@@ -653,6 +692,7 @@ mod tests {
             assert_eq!(message.get::<Option<Uuid>, _>("sender_agent_id"), None);
             assert_eq!(message.get::<String, _>("sender_name"), "delete-me");
             assert_eq!(message.get::<String, _>("body"), "channel message");
+            assert!(!std::path::Path::new(&attachment_path).exists());
             Ok(())
         }
         .await;

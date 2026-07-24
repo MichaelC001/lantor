@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use uuid::Uuid;
 
-use crate::{app::CommandResult, text::compact_chars_middle};
+use crate::{app::CommandResult, text::read_compact_memory_file};
 
 pub(crate) const AGENT_MEMORY_CONTEXT_LIMIT: usize = 8 * 1024;
 
@@ -238,12 +238,12 @@ pub(crate) fn load_agent_memory_context(working_directory: &str) -> CommandResul
     if !metadata.is_file() {
         return Ok(None);
     }
-    let memory = fs::read_to_string(&memory_path).map_err(|err| err.to_string())?;
+    let memory =
+        read_compact_memory_file(&memory_path, metadata.len(), AGENT_MEMORY_CONTEXT_LIMIT)?;
     let memory = memory.trim();
     if memory.is_empty() {
         Ok(None)
     } else {
-        let memory = compact_chars_middle(memory, AGENT_MEMORY_CONTEXT_LIMIT);
         Ok(Some(format!(
             "Persistent agent memory from {}:\n{}\n\nUse this as durable context for this workspace, but prefer the current user request when there is a conflict.",
             memory_path.display(),

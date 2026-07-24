@@ -130,16 +130,40 @@ export async function apiInvokeMeasured<T>(
   };
 }
 
-export async function subscribeBackendEvents(handler: (payload: string) => void): Promise<UnlistenFn> {
+type BackendEventSubscriptionOptions = {
+  cursor?: number | null;
+  onCursor?: (cursor: number) => void;
+  onReconnect?: () => void;
+};
+
+export async function subscribeBackendEvents(
+  handler: (payload: string) => void,
+  options: BackendEventSubscriptionOptions = {},
+): Promise<UnlistenFn> {
   if (isTauriRuntime()) {
     return tauriListen<string>(UI_REFRESH_EVENT, (event) => handler(event.payload));
   }
 
-  const source = new EventSource("/api/events");
+  const cursor = Number.isSafeInteger(options.cursor) && (options.cursor ?? -1) >= 0
+    ? options.cursor
+    : null;
+  const source = new EventSource(cursor === null ? "/api/events" : `/api/events?cursor=${cursor}`);
+  let disconnected = false;
   source.addEventListener("lantor", (event) => {
-    handler((event as MessageEvent<string>).data);
+    const message = event as MessageEvent<string>;
+    const eventCursor = Number(message.lastEventId);
+    if (message.lastEventId && Number.isSafeInteger(eventCursor) && eventCursor >= 0) {
+      options.onCursor?.(eventCursor);
+    }
+    handler(message.data);
   });
+  source.onopen = () => {
+    if (!disconnected) return;
+    disconnected = false;
+    options.onReconnect?.();
+  };
   source.onerror = () => {
+    disconnected = true;
     console.error("Lantor web event stream disconnected");
   };
   return () => source.close();

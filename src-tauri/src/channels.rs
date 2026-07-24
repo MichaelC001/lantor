@@ -4,6 +4,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::app::{to_string, CommandResult};
+use crate::attachments::remove_attachment_files;
 use crate::events::activity::record_agent_activity;
 use crate::models::{Channel, ChannelMember, ThreadActivity};
 use crate::ui_notifications::{notify_ui_channel_member_change, notify_ui_refresh};
@@ -373,14 +374,32 @@ pub(crate) async fn delete_channel_in_pool(
     pool: &SqlitePool,
     channel_id: Uuid,
 ) -> CommandResult<()> {
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
+    let attachment_paths = sqlx::query_scalar::<_, String>(
+        r#"
+        select ma.storage_path
+        from message_attachments ma
+        join messages m on m.id = ma.message_id
+        where m.channel_id = $1
+        "#,
+    )
+    .bind(channel_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(to_string)?;
     let result = sqlx::query("delete from channels where id = $1")
         .bind(channel_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(to_string)?;
     if result.rows_affected() == 0 {
         return Err("channel does not exist".to_owned());
     }
+    tx.commit().await.map_err(to_string)?;
+    remove_attachment_files(&attachment_paths);
 
     let _ = notify_ui_refresh(pool, "channel_deleted").await;
 
@@ -551,6 +570,7 @@ mod tests {
         create_channel_in_pool, delete_channel_in_pool, load_channels, load_thread_activities,
         open_dm_with_agent_in_pool, set_channel_agent_membership_in_pool, update_channel_in_pool,
     };
+    use crate::attachments::write_attachment_file;
     use crate::db::{db_connect_with_url, migrate};
 
     #[tokio::test]
@@ -1277,6 +1297,23 @@ mod tests {
             .fetch_one(&pool)
             .await
             .map_err(|err| err.to_string())?;
+            let attachment_id = Uuid::new_v4();
+            let attachment_path =
+                write_attachment_file(message_id, attachment_id, "channel.txt", b"channel")?;
+            sqlx::query(
+                r#"
+                insert into message_attachments (
+                    id, message_id, original_name, mime_type, size_bytes, storage_path
+                )
+                values ($1, $2, 'channel.txt', 'text/plain', 7, $3)
+                "#,
+            )
+            .bind(attachment_id)
+            .bind(message_id)
+            .bind(&attachment_path)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
             sqlx::query(
                 r#"
                 insert into tasks (message_id, channel_id, title, status, assignee_agent_id)
@@ -1344,6 +1381,7 @@ mod tests {
             .await
             .map_err(|err| err.to_string())?;
             assert_eq!(reminder_channel_count, 1);
+            assert!(!std::path::Path::new(&attachment_path).exists());
             Ok(())
         }
         .await;

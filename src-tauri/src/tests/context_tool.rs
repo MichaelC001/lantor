@@ -9,7 +9,24 @@ use crate::events::activity::record_agent_activity;
 use crate::message_store::send_owner_message_in_pool;
 use crate::models::AttachmentUpload;
 use crate::test_support::{drop_test_schema, insert_test_agent, insert_test_channel, test_pool};
+use crate::text::read_compact_memory_file;
 use uuid::Uuid;
+
+#[test]
+fn compact_memory_read_preserves_bounded_head_and_tail() {
+    let path = std::env::temp_dir().join(format!("lantor-memory-edge-{}.md", Uuid::new_v4()));
+    let body = format!("HEAD-{}\nTAIL", "middle🙂".repeat(20_000));
+    std::fs::write(&path, &body).unwrap();
+    let file_size = std::fs::metadata(&path).unwrap().len();
+
+    let compacted = read_compact_memory_file(&path, file_size, 120).unwrap();
+    let _ = std::fs::remove_file(path);
+
+    assert!(compacted.starts_with("HEAD-"));
+    assert!(compacted.contains("omitted the middle"));
+    assert!(compacted.ends_with("TAIL"));
+    assert!(compacted.chars().count() < 300);
+}
 
 #[tokio::test]
 async fn agent_context_tool_reads_thread_history_and_searches_messages() {

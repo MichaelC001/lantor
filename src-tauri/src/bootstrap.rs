@@ -13,7 +13,7 @@ use crate::{
         load_agent_runs, load_agent_work_items,
     },
     agent_profile::{load_agents, load_owner_profile},
-    app::CommandResult,
+    app::{to_string, CommandResult},
     channels::{load_channel_members, load_channels, load_thread_activities},
     domain::{reminders::load_reminders, schedules::load_agent_schedules},
     launch_agent,
@@ -176,6 +176,15 @@ async fn load_bootstrap_with_options(
 ) -> CommandResult<Bootstrap> {
     let total_started_at = Instant::now();
     let mut phases = Vec::new();
+
+    // Capture the event cursor before reading the snapshot. Any event committed
+    // while the snapshot is loading can then be replayed by the web client.
+    let started_at = Instant::now();
+    let ui_event_cursor: i64 = sqlx::query_scalar("select coalesce(max(id), 0) from ui_events")
+        .fetch_one(pool)
+        .await
+        .map_err(to_string)?;
+    push_phase(&mut phases, "ui_event_cursor", started_at, None);
 
     let started_at = Instant::now();
     let owner_profile = load_owner_profile(pool).await?;
@@ -372,6 +381,7 @@ async fn load_bootstrap_with_options(
         agent_activities,
         supervisor,
         launch_agent,
+        ui_event_cursor,
         perf: None,
     };
 
@@ -434,8 +444,15 @@ mod tests {
                 .await
                 .map_err(|err| err.to_string())?;
             }
+            let expected_event_cursor: i64 = sqlx::query_scalar(
+                "insert into ui_events (event_json) values ('{\"type\":\"refresh\"}') returning id",
+            )
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
 
             let legacy = load_web_bootstrap(&pool, "sqlite:test".to_owned(), None, false).await?;
+            assert_eq!(legacy.ui_event_cursor, expected_event_cursor);
             assert!(legacy
                 .messages
                 .iter()

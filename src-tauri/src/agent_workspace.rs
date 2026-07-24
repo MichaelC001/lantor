@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
 };
 
@@ -12,7 +13,7 @@ use crate::{
     models::{AgentWorkspaceEntry, AgentWorkspaceFile, AgentWorkspaceListing},
 };
 
-const AGENT_WORKSPACE_PREVIEW_LIMIT: u64 = 256 * 1024;
+const AGENT_WORKSPACE_PREVIEW_LIMIT: usize = 256 * 1024;
 
 pub(crate) struct AgentWorkspaceSummary {
     pub(crate) exists: bool,
@@ -253,17 +254,7 @@ pub(crate) async fn agent_workspace_read_file_in_pool(
     }
 
     let metadata = fs::metadata(&file_path).map_err(to_string)?;
-    let mut content = fs::read_to_string(&file_path)
-        .map_err(|err| format!("workspace preview only supports UTF-8 text files: {err}"))?;
-    let truncated = metadata.len() > AGENT_WORKSPACE_PREVIEW_LIMIT;
-    if truncated {
-        let mut boundary = AGENT_WORKSPACE_PREVIEW_LIMIT as usize;
-        while boundary > 0 && !content.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        content.truncate(boundary);
-        content.push_str("\n\n[preview truncated by Lantor]");
-    }
+    let (content, truncated) = read_workspace_preview(&file_path)?;
 
     let name = file_path
         .file_name()
@@ -283,6 +274,38 @@ pub(crate) async fn agent_workspace_read_file_in_pool(
         content,
         truncated,
     })
+}
+
+fn read_workspace_preview(path: &Path) -> CommandResult<(String, bool)> {
+    let file = fs::File::open(path).map_err(to_string)?;
+    let mut bytes = Vec::with_capacity(AGENT_WORKSPACE_PREVIEW_LIMIT + 1);
+    file.take((AGENT_WORKSPACE_PREVIEW_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(to_string)?;
+    let truncated = bytes.len() > AGENT_WORKSPACE_PREVIEW_LIMIT;
+    if truncated {
+        bytes.truncate(AGENT_WORKSPACE_PREVIEW_LIMIT);
+    }
+
+    let mut content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(err) if truncated && err.utf8_error().error_len().is_none() => {
+            let valid_up_to = err.utf8_error().valid_up_to();
+            let mut bytes = err.into_bytes();
+            bytes.truncate(valid_up_to);
+            String::from_utf8(bytes).expect("validated UTF-8 prefix")
+        }
+        Err(err) => {
+            return Err(format!(
+                "workspace preview only supports UTF-8 text files: {}",
+                err.utf8_error()
+            ));
+        }
+    };
+    if truncated {
+        content.push_str("\n\n[preview truncated by Lantor]");
+    }
+    Ok((content, truncated))
 }
 
 fn workspace_preview_language(path: &Path) -> String {
@@ -308,4 +331,31 @@ fn workspace_preview_language(path: &Path) -> String {
         _ => "text",
     }
     .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use uuid::Uuid;
+
+    use super::{read_workspace_preview, AGENT_WORKSPACE_PREVIEW_LIMIT};
+
+    #[test]
+    fn workspace_preview_reads_only_a_bounded_utf8_prefix() {
+        let path =
+            std::env::temp_dir().join(format!("lantor-workspace-preview-{}.txt", Uuid::new_v4()));
+        let mut body = "a".repeat(AGENT_WORKSPACE_PREVIEW_LIMIT - 1);
+        body.push('🙂');
+        body.push_str(&"z".repeat(1024));
+        fs::write(&path, body).unwrap();
+
+        let (content, truncated) = read_workspace_preview(&path).unwrap();
+        let _ = fs::remove_file(path);
+
+        assert!(truncated);
+        assert!(content.starts_with(&"a".repeat(AGENT_WORKSPACE_PREVIEW_LIMIT - 1)));
+        assert!(content.ends_with("[preview truncated by Lantor]"));
+        assert!(!content.contains('🙂'));
+    }
 }

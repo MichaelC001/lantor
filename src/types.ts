@@ -310,6 +310,7 @@ export type Bootstrap = {
   agent_activities: AgentActivity[];
   supervisor: SupervisorStatus;
   launch_agent: LaunchAgentStatus;
+  ui_event_cursor: number;
   __perf?: BootstrapPerf;
 };
 

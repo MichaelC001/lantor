@@ -15,7 +15,7 @@ use crate::message_store::load_artifact;
 use crate::{
     app::{to_string, CommandResult},
     attachments::{attachment_summary_sql, format_attachment_size},
-    text::compact_chars_middle,
+    text::{compact_chars_middle, read_compact_memory_file},
 };
 
 const AGENT_CONTEXT_TOOL_MESSAGE_LIMIT: usize = 2_000;
@@ -1310,8 +1310,7 @@ pub(crate) async fn agent_context_memory_read(
         ));
     }
     let limit = parse_context_tool_usize_limit(args, 16 * 1024, 64 * 1024)?;
-    let body = fs::read_to_string(&memory).map_err(to_string)?;
-    let compacted = compact_chars_middle(body.trim(), limit);
+    let compacted = read_compact_memory_file(&memory, metadata.len(), limit)?;
     Ok(format!(
         "Lantor MEMORY.md for @{}\nmemory_path=\"{}\"\nbytes={}\nchars_returned={}\n\n{}",
         target.handle,

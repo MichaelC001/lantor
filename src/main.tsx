@@ -728,7 +728,11 @@ function buildAgentPerformance(activities: AgentActivity[], runs: AgentRun[]): A
 function App() {
   const [bootStartedAt] = useState(() => performance.now());
   const [bootReady, setBootReady] = useState(false);
+  const [backendEventStartCursor, setBackendEventStartCursor] = useState<number | null>(
+    () => isTauriRuntime() ? 0 : null,
+  );
   const startupSplashCompletedRef = useRef(false);
+  const uiEventCursorRef = useRef<number | null>(isTauriRuntime() ? 0 : null);
   const [data, setData] = useState<Bootstrap | null>(null);
   const setEphemeralData = useCallback((update: (current: Bootstrap | null) => Bootstrap | null) => {
     startTransition(() => {
@@ -1062,6 +1066,15 @@ function App() {
     const { payload, measurement } = perf
       ? await apiInvokeMeasured<Bootstrap>("bootstrap", bootstrapArgs)
       : { payload: await apiInvoke<Bootstrap>("bootstrap", bootstrapArgs), measurement: null };
+    if (
+      !isTauriRuntime()
+      && uiEventCursorRef.current === null
+      && Number.isSafeInteger(payload.ui_event_cursor)
+      && payload.ui_event_cursor >= 0
+    ) {
+      uiEventCursorRef.current = payload.ui_event_cursor;
+      setBackendEventStartCursor(payload.ui_event_cursor);
+    }
     const backendMs = payload.__perf?.total_ms;
     if (perf && measurement) {
       perf.backend = payload.__perf;
@@ -1854,12 +1867,21 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (backendEventStartCursor === null) return;
     let unlisten: (() => void) | null = null;
     let disposed = false;
 
     function connect() {
       if (disposed || unlisten) return;
-      subscribeBackendEvents(handleBackendEvent)
+      subscribeBackendEvents(handleBackendEvent, {
+        cursor: uiEventCursorRef.current ?? backendEventStartCursor,
+        onCursor: (cursor) => {
+          uiEventCursorRef.current = Math.max(uiEventCursorRef.current ?? 0, cursor);
+        },
+        onReconnect: () => {
+          requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after event stream reconnect`);
+        },
+      })
         .then((handler) => {
           if (disposed) {
             handler();
@@ -1904,7 +1926,7 @@ function App() {
       cancelEphemeralFlushTimers();
       disconnect();
     };
-  }, []);
+  }, [backendEventStartCursor]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1956,7 +1978,7 @@ function App() {
       }
       return next ?? current;
     });
-  }, [activeChannelId, activeThreadId, data]);
+  }, [activeChannelId, activeThreadId, data, loadingOlderChannelIds]);
 
   useEffect(() => {
     if (!appError) return;
@@ -2481,7 +2503,7 @@ function App() {
 
   useEffect(() => {
     if (!data || !activeChannelId || !activeThreadId) return;
-    if (!isTauriRuntime() && !initializedOlderChannelIdsRef.current.has(activeChannelId)) return;
+    if (!initializedOlderChannelIdsRef.current.has(activeChannelId)) return;
     const rootExists = data.messages.some((message) => (
       message.id === activeThreadId
       && message.channel_id === activeChannelId
@@ -3336,8 +3358,7 @@ function App() {
 
   function selectChannel(channelId: string) {
     const nextChannel = data?.channels.find((item) => item.id === channelId) ?? null;
-    const needsMessageLoad = !isTauriRuntime()
-      && !initializedOlderChannelIdsRef.current.has(channelId);
+    const needsMessageLoad = !initializedOlderChannelIdsRef.current.has(channelId);
     historyFocusedMessageIdRef.current = null;
     setSelectedAgentId(null);
     setActiveChannelId(channelId);
