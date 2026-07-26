@@ -251,6 +251,17 @@ pub(crate) async fn cleanup_supervisor_commands(pool: &SqlitePool) -> CommandRes
     .execute(pool)
     .await
     .map_err(to_string)?;
+    // Event receipts only need to cover a run's replay window for idempotent
+    // ingestion; without a retention window the table grows forever.
+    sqlx::query(
+        r#"
+        delete from agent_event_receipts
+        where created_at < strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-30 days')
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(to_string)?;
     Ok(())
 }
 
