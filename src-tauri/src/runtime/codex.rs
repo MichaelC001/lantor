@@ -25,6 +25,7 @@ use crate::runtime::{
         configure_agent_context_tool_env, configure_agent_identity_env, load_runtime_thread_id,
         terminate_process_group, upsert_runtime_thread_id,
     },
+    runtime_launch_context_changed,
     streaming::{
         adopt_streaming_agent_message_key, append_streaming_agent_message_deferred_completion,
         delete_streaming_agent_message_by_key, ensure_streaming_agent_message,
@@ -70,6 +71,7 @@ struct WarmCodexRuntime {
     thread_id: String,
     pid: Option<i32>,
     environment_variables: String,
+    memory_context: Option<String>,
 }
 
 struct WarmCodexState {
@@ -232,9 +234,14 @@ async fn get_or_spawn_warm_codex_runtime(
         runtimes.get(&agent_id).cloned()
     } {
         let mut state = runtime.state.lock().await;
-        let environment_changed = runtime.environment_variables != environment_variables;
+        let launch_context_changed = runtime_launch_context_changed(
+            &runtime.environment_variables,
+            runtime.memory_context.as_deref(),
+            environment_variables,
+            memory_context,
+        );
         if state.alive
-            && (rotation_candidate.is_some() || environment_changed)
+            && (rotation_candidate.is_some() || launch_context_changed)
             && state.active.is_none()
         {
             state.alive = false;
@@ -513,6 +520,10 @@ async fn spawn_warm_codex_runtime(
         thread_id,
         pid,
         environment_variables: environment_variables.to_owned(),
+        memory_context: memory_context
+            .map(str::trim)
+            .filter(|context| !context.is_empty())
+            .map(str::to_owned),
     });
 
     tokio::spawn(codex_warm_stdout_reader(
@@ -1639,6 +1650,7 @@ mod tests {
             thread_id: "test-codex-thread".to_owned(),
             pid: None,
             environment_variables: String::new(),
+            memory_context: None,
         }))
     }
 
@@ -1663,6 +1675,7 @@ mod tests {
             thread_id: "test-codex-thread".to_owned(),
             pid: child.id().map(|id| id as i32),
             environment_variables: String::new(),
+            memory_context: None,
         });
         let pool =
             sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("create lazy sqlite pool");

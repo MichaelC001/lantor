@@ -21,6 +21,7 @@ use crate::runtime::{
         configure_agent_context_tool_env, configure_agent_identity_env, terminate_process_group,
         upsert_runtime_thread_id,
     },
+    runtime_launch_context_changed,
     streaming::{
         append_streaming_agent_message, ensure_streaming_agent_message, streaming_message_exists,
     },
@@ -53,6 +54,7 @@ struct WarmClaudeRuntime {
     state: AsyncMutex<WarmClaudeState>,
     pid: Option<i32>,
     environment_variables: String,
+    memory_context: Option<String>,
 }
 
 struct WarmClaudeState {
@@ -100,8 +102,13 @@ async fn get_or_spawn_warm_claude_runtime(
         runtimes.get(&agent_id).cloned()
     } {
         let mut state = runtime.state.lock().await;
-        let environment_changed = runtime.environment_variables != config.environment_variables;
-        if state.alive && environment_changed && state.active.is_none() {
+        let launch_context_changed = runtime_launch_context_changed(
+            &runtime.environment_variables,
+            runtime.memory_context.as_deref(),
+            config.environment_variables,
+            config.memory_context,
+        );
+        if state.alive && launch_context_changed && state.active.is_none() {
             state.alive = false;
             drop(state);
             if let Some(pid) = runtime.pid {
@@ -211,6 +218,11 @@ async fn spawn_warm_claude_runtime(
         }),
         pid,
         environment_variables: config.environment_variables.to_owned(),
+        memory_context: config
+            .memory_context
+            .map(str::trim)
+            .filter(|context| !context.is_empty())
+            .map(str::to_owned),
     });
 
     upsert_runtime_thread_id(
@@ -852,6 +864,7 @@ mod tests {
             }),
             pid: None,
             environment_variables: String::new(),
+            memory_context: None,
         }))
     }
 
