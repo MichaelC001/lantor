@@ -151,7 +151,12 @@ async fn codex_context_rotation_candidate(
 ) -> CommandResult<Option<(Uuid, i64)>> {
     let row = sqlx::query(
         r#"
-        select id, input_tokens
+        select
+            id,
+            case
+                when current_input_tokens > 0 then current_input_tokens
+                else input_tokens
+            end as current_input_tokens
         from agent_runs
         where agent_id = $1
           and stopped_at is not null
@@ -165,7 +170,7 @@ async fn codex_context_rotation_candidate(
     .map_err(to_string)?;
 
     Ok(row.and_then(|row| {
-        let input_tokens = row.get("input_tokens");
+        let input_tokens = row.get("current_input_tokens");
         (input_tokens >= threshold).then(|| (row.get("id"), input_tokens))
     }))
 }
@@ -1585,9 +1590,9 @@ mod tests {
     };
 
     use super::{
-        codex_rotation_marker, finish_warm_codex_active_turn, prepend_codex_rotation_marker,
-        track_codex_agent_message_stream, CodexActiveTurn, WarmCodexRuntime,
-        CODEX_TURN_START_TIMEOUT,
+        codex_context_rotation_candidate, codex_rotation_marker, finish_warm_codex_active_turn,
+        prepend_codex_rotation_marker, track_codex_agent_message_stream, CodexActiveTurn,
+        WarmCodexRuntime, CODEX_TURN_START_TIMEOUT,
     };
 
     async fn test_runtime_with_active_turn(
@@ -1865,6 +1870,60 @@ mod tests {
         assert!(prompt.starts_with("Lantor rotated away"));
         assert!(prompt.contains("Current Lantor request after context rotation"));
         assert!(prompt.ends_with("Current inbox item"));
+    }
+
+    #[tokio::test]
+    async fn codex_rotation_uses_current_input_tokens_after_compaction() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "codex-compaction-agent").await?;
+            let run_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_runs (
+                    agent_id,
+                    command,
+                    status,
+                    input_tokens,
+                    current_input_tokens,
+                    stopped_at
+                )
+                values (
+                    $1,
+                    'codex app-server',
+                    'complete',
+                    226829,
+                    140250,
+                    strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                )
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            assert_eq!(
+                codex_context_rotation_candidate(&pool, agent_id, 180_000).await?,
+                None
+            );
+
+            sqlx::query("update agent_runs set current_input_tokens = 190000 where id = $1")
+                .bind(run_id)
+                .execute(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            assert_eq!(
+                codex_context_rotation_candidate(&pool, agent_id, 180_000).await?,
+                Some((run_id, 190_000))
+            );
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
     }
 
     #[test]

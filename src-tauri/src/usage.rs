@@ -117,6 +117,7 @@ pub(crate) async fn record_run_usage(
         r#"
         update agent_runs
         set input_tokens = max(input_tokens, $2),
+            current_input_tokens = $2,
             output_tokens = max(output_tokens, $3),
             cost_micros = max(cost_micros, $4)
         where id = $1
@@ -166,6 +167,7 @@ pub(crate) async fn backfill_agent_run_usage_from_logs(pool: &SqlitePool) -> sql
             r#"
             update agent_runs
             set input_tokens = $2,
+                current_input_tokens = $2,
                 output_tokens = $3,
                 cost_micros = $4
             where id = $1
@@ -175,6 +177,37 @@ pub(crate) async fn backfill_agent_run_usage_from_logs(pool: &SqlitePool) -> sql
         .bind(input_tokens.max(0))
         .bind(output_tokens.max(0))
         .bind(cost_micros.max(0))
+        .execute(pool)
+        .await?;
+    }
+
+    let rows = sqlx::query(
+        r#"
+        select id, log
+        from agent_runs
+        where current_input_tokens = 0
+          and log like '%tokenUsage%'
+        order by started_at desc
+        limit 200
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for row in rows {
+        let log: String = row.get("log");
+        let Some((input_tokens, _)) = usage_from_run_log(&log) else {
+            continue;
+        };
+        sqlx::query(
+            r#"
+            update agent_runs
+            set current_input_tokens = $2
+            where id = $1
+            "#,
+        )
+        .bind(row.get::<Uuid, _>("id"))
+        .bind(input_tokens.max(0))
         .execute(pool)
         .await?;
     }
@@ -221,6 +254,7 @@ pub(crate) async fn agent_budget_exhausted(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{drop_test_schema, insert_test_agent, test_pool};
 
     #[test]
     fn claude_fable_usage_uses_current_public_rate() {
@@ -248,5 +282,48 @@ mod tests {
             model_cost_micros("claude", "haiku", 1_000_000, 1_000_000),
             6_000_000
         );
+    }
+
+    #[tokio::test]
+    async fn record_run_usage_keeps_peak_and_tracks_current_input_tokens() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: CommandResult<()> = async {
+            let agent_id = insert_test_agent(&pool, "usage-current-agent").await?;
+            let run_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_runs (agent_id, command, status)
+                values ($1, 'codex app-server', 'running')
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(to_string)?;
+
+            record_run_usage(&pool, agent_id, run_id, 226_829, 2_000, None).await?;
+            record_run_usage(&pool, agent_id, run_id, 140_250, 3_000, None).await?;
+
+            let row = sqlx::query(
+                r#"
+                select input_tokens, current_input_tokens, output_tokens
+                from agent_runs
+                where id = $1
+                "#,
+            )
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(to_string)?;
+            assert_eq!(row.get::<i64, _>("input_tokens"), 226_829);
+            assert_eq!(row.get::<i64, _>("current_input_tokens"), 140_250);
+            assert_eq!(row.get::<i64, _>("output_tokens"), 3_000);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
     }
 }
