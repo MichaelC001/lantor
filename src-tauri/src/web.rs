@@ -977,6 +977,17 @@ async fn api_attachment(
     } else {
         mime_type
     };
+    // Active content served inline would execute scripts in the web origin;
+    // force those types to download instead of rendering.
+    let lowered_type = content_type.to_ascii_lowercase();
+    let disposition = if ["html", "svg", "xml", "javascript", "ecmascript"]
+        .iter()
+        .any(|marker| lowered_type.contains(marker))
+    {
+        "attachment"
+    } else {
+        "inline"
+    };
     let mut response = Response::new(Body::from(bytes));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -984,12 +995,16 @@ async fn api_attachment(
             .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
     response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!(
-            "inline; filename=\"{}\"",
+            "{disposition}; filename=\"{}\"",
             original_name.replace('"', "")
         ))
-        .unwrap_or(HeaderValue::from_static("inline")),
+        .unwrap_or(HeaderValue::from_static("attachment")),
     );
     Ok(response)
 }
