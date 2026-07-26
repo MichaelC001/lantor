@@ -1,6 +1,12 @@
 import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import type {
+  ApiArgsTuple,
+  ApiCommand,
+  ApiResult,
+} from "./api-contract";
+
 const UI_REFRESH_EVENT = "lantor://refresh";
 
 declare global {
@@ -46,9 +52,13 @@ function bootstrapApiPath(args: Record<string, unknown>) {
   return `${apiPath("bootstrap")}?${params.toString()}`;
 }
 
-export async function apiInvoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+export async function apiInvoke<C extends ApiCommand>(
+  command: C,
+  ...argsTuple: ApiArgsTuple<C>
+): Promise<ApiResult<C>> {
+  const args = (argsTuple[0] ?? {}) as Record<string, unknown>;
   if (isTauriRuntime()) {
-    return tauriInvoke<T>(command, args);
+    return tauriInvoke<ApiResult<C>>(command, args);
   }
 
   const response = command === "bootstrap"
@@ -71,7 +81,7 @@ export async function apiInvoke<T>(command: string, args: Record<string, unknown
       : String(payload || `${command} failed`);
     throw new Error(message);
   }
-  return payload as T;
+  return payload as ApiResult<C>;
 }
 
 export type ApiInvokeMeasurement = {
@@ -80,13 +90,14 @@ export type ApiInvokeMeasurement = {
   parseMs?: number;
 };
 
-export async function apiInvokeMeasured<T>(
-  command: string,
-  args: Record<string, unknown> = {},
-): Promise<{ payload: T; measurement: ApiInvokeMeasurement }> {
+export async function apiInvokeMeasured<C extends ApiCommand>(
+  command: C,
+  ...argsTuple: ApiArgsTuple<C>
+): Promise<{ payload: ApiResult<C>; measurement: ApiInvokeMeasurement }> {
+  const args = (argsTuple[0] ?? {}) as Record<string, unknown>;
   const startedAt = performance.now();
   if (isTauriRuntime()) {
-    const payload = await tauriInvoke<T>(command, args);
+    const payload = await tauriInvoke<ApiResult<C>>(command, args);
     return {
       payload,
       measurement: {
@@ -121,7 +132,7 @@ export async function apiInvokeMeasured<T>(
     throw new Error(message);
   }
   return {
-    payload: payload as T,
+    payload: payload as ApiResult<C>,
     measurement: {
       roundtripMs,
       payloadBytes,

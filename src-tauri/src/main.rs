@@ -39,9 +39,8 @@ mod web;
 
 use std::{env, fs, path::PathBuf};
 
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 use tauri::{LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent};
-use uuid::Uuid;
 
 use agent_inbox_wake::{
     build_steer_followup_prompt, create_agent_inbox_item, ensure_agent_inbox_wake_work_item,
@@ -53,9 +52,8 @@ use agent_work_dispatch::{
     retry_agent_work, retry_agent_work_in_pool, try_claim_unassigned_task,
 };
 use agent_workspace::{agent_workspace_list, agent_workspace_read_file};
-use app::{to_string, AppState, CommandResult};
+use app::AppState;
 use attachments::spawn_attachment_garbage_collector;
-use channels::normalize_channel_name;
 use commands::{
     agents::{create_agent, delete_agent, update_agent, update_owner_profile},
     artifacts::artifact_read,
@@ -256,72 +254,6 @@ fn spawn_shared_background_workers(pool: SqlitePool, database_url: String) {
     spawn_ui_events_pruner(pool.clone());
     web::spawn_web_server_if_configured(pool.clone(), database_url);
     spawn_reminder_worker(pool);
-}
-
-async fn resolve_run_reminder_anchor(
-    pool: &SqlitePool,
-    agent_id: Uuid,
-    run_id: Uuid,
-) -> CommandResult<(Option<Uuid>, Option<Uuid>, Option<Uuid>)> {
-    let row = sqlx::query(
-        r#"
-        select w.channel_id, w.thread_root_id, w.source_message_id
-        from agent_runs r
-        left join agent_work_items w on w.id = r.work_item_id
-        where r.id = $1 and r.agent_id = $2
-        "#,
-    )
-    .bind(run_id)
-    .bind(agent_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(to_string)?;
-    Ok(row
-        .map(|row| {
-            (
-                row.get("channel_id"),
-                row.get("thread_root_id"),
-                row.get("source_message_id"),
-            )
-        })
-        .unwrap_or((None, None, None)))
-}
-
-async fn resolve_event_channel(
-    pool: &SqlitePool,
-    channel_id: Option<Uuid>,
-    channel_name: Option<&str>,
-) -> CommandResult<Uuid> {
-    if let Some(channel_id) = channel_id {
-        let resolved: Option<Uuid> = sqlx::query_scalar(
-            r#"
-            select id
-            from channels
-            where id = $1 or (kind = 'dm' and dm_agent_id = $1)
-            order by case when id = $1 then 0 else 1 end
-            limit 1
-            "#,
-        )
-        .bind(channel_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(to_string)?;
-        return resolved.ok_or_else(|| format!("channel {channel_id} does not exist"));
-    }
-
-    let Some(name) = channel_name else {
-        return Err("message event requires channel or channel_id".to_owned());
-    };
-    let normalized = normalize_channel_name(name);
-    if normalized.is_empty() {
-        return Err("message event channel is empty".to_owned());
-    }
-    sqlx::query_scalar("select id from channels where name = $1")
-        .bind(&normalized)
-        .fetch_optional(pool)
-        .await
-        .map_err(to_string)?
-        .ok_or_else(|| format!("channel #{normalized} does not exist"))
 }
 
 pub fn run() {

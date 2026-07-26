@@ -514,7 +514,7 @@ export function AgentDetailDrawer({
 
     setWorkspaceLoadingPath(path);
     try {
-      const listing = await apiInvoke<AgentWorkspaceListing>("agent_workspace_list", {
+      const listing = await apiInvoke("agent_workspace_list", {
         agentId: agent.id,
         path,
       });
@@ -531,7 +531,7 @@ export function AgentDetailDrawer({
     setWorkspaceError(null);
     setWorkspaceLoadingPath(path);
     try {
-      const file = await apiInvoke<AgentWorkspaceFile>("agent_workspace_read_file", {
+      const file = await apiInvoke("agent_workspace_read_file", {
         agentId: agent.id,
         path,
       });

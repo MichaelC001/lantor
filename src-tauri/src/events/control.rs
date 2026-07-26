@@ -20,6 +20,7 @@ use crate::channels::{add_agent_to_channel, create_channel_in_pool, normalize_ch
 use crate::domain::parse_due_at;
 use crate::domain::reminders::{cancel_reminder_in_pool, create_reminder_in_pool};
 use crate::events::activity::{normalize_agent_activity_kind, record_agent_activity};
+use crate::events::resolution::{resolve_event_channel, resolve_run_reminder_anchor};
 use crate::freshness::hold_run_event_for_target_if_stale;
 use crate::message_store::{
     insert_agent_attachment_message, insert_agent_handoff_message, insert_agent_message,
@@ -31,8 +32,7 @@ use crate::ui_notifications::{insert_system_message, notify_ui_refresh};
 use crate::usage::record_run_usage;
 use crate::{
     app::{to_string, CommandResult},
-    dispatch_task_assignment_to_agent, resolve_event_channel, resolve_run_reminder_anchor,
-    try_claim_unassigned_task,
+    dispatch_task_assignment_to_agent, try_claim_unassigned_task,
 };
 
 const AGENT_EVENT_PREFIX: &str = "LANTOR_EVENT";

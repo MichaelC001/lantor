@@ -17,6 +17,7 @@ import {
 import { createRoot } from "react-dom/client";
 import { Bookmark, Home, Inbox, Search } from "lucide-react";
 import { apiInvoke, apiInvokeMeasured, completeStartupSplash, isTauriRuntime, subscribeBackendEvents } from "./apiClient";
+import type { ApiArgsTuple, ApiCommand, ApiResult } from "./api-contract";
 import { APP_DISPLAY_NAME } from "./branding";
 import { AgentDetailDrawer } from "./components/AgentDetailDrawer";
 import type { AgentPerformance } from "./components/AgentDetailDrawer";
@@ -951,7 +952,7 @@ function App() {
     }
     const entries = await Promise.all(
       Object.keys(RUNTIME_PRESETS).map(async (runtime) => {
-        const check = await apiInvoke<RuntimeCheck>("check_runtime", { runtime });
+        const check = await apiInvoke("check_runtime", { runtime });
         return [runtime, check] as const;
       }),
     );
@@ -1027,8 +1028,8 @@ function App() {
       ...(bootstrapChannelId ? { channelId: bootstrapChannelId } : {}),
     };
     const { payload, measurement } = perf
-      ? await apiInvokeMeasured<Bootstrap>("bootstrap", bootstrapArgs)
-      : { payload: await apiInvoke<Bootstrap>("bootstrap", bootstrapArgs), measurement: null };
+      ? await apiInvokeMeasured("bootstrap", bootstrapArgs)
+      : { payload: await apiInvoke("bootstrap", bootstrapArgs), measurement: null };
     if (
       !isTauriRuntime()
       && uiEventCursorRef.current === null
@@ -1173,7 +1174,7 @@ function App() {
     loadingOlderChannelIdsRef.current.add(channelId);
     setLoadingOlderChannelIds((current) => new Set(current).add(channelId));
     try {
-      const page = await apiInvoke<ChannelMessagePage>("load_channel_messages", { channelId });
+      const page = await apiInvoke("load_channel_messages", { channelId });
       if (olderChannelRequestEpochRef.current.get(channelId) !== requestEpoch) return;
 
       initializedOlderChannelIdsRef.current.add(channelId);
@@ -1230,7 +1231,7 @@ function App() {
     loadingOlderChannelIdsRef.current.add(channelId);
     setLoadingOlderChannelIds((current) => new Set(current).add(channelId));
     try {
-      const page = await apiInvoke<ChannelMessagePage>("load_older_channel_messages", {
+      const page = await apiInvoke("load_older_channel_messages", {
         channelId,
         beforeSeq,
         limit: OLDER_CHANNEL_MESSAGES_PAGE_SIZE,
@@ -1445,7 +1446,7 @@ function App() {
 
   async function openArtifact(artifact: Artifact) {
     try {
-      const fullArtifact = await apiInvoke<Artifact>("artifact_read", { artifactId: artifact.id });
+      const fullArtifact = await apiInvoke("artifact_read", { artifactId: artifact.id });
       const blob = new Blob([fullArtifact.content], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       window.open(url, "_blank", "noopener,noreferrer");
@@ -1523,9 +1524,12 @@ function App() {
     }
   }
 
-  async function mutate<T = unknown>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+  async function mutate<C extends ApiCommand>(
+    command: C,
+    ...args: ApiArgsTuple<C>
+  ): Promise<ApiResult<C>> {
     try {
-      const result = await apiInvoke<T>(command, args);
+      const result = await apiInvoke(command, ...args);
       // Wait out any refresh that was already running (it may predate this
       // mutation), then run one through the shared single-flight guard so the
       // caller still observes post-mutation state without concurrent bootstraps.
@@ -2843,7 +2847,7 @@ function App() {
     createChannelSubmittingRef.current = true;
     setCreateChannelSubmitting(true);
     try {
-      result = await apiInvoke<{ channelId?: string }>("create_channel", {
+      result = await apiInvoke("create_channel", {
         name,
         agentIds: agentIds.length > 0 ? agentIds : undefined,
       });
@@ -3528,7 +3532,7 @@ function App() {
       launchCommand: buildPresetCommand({ ...agentDraft, handle, displayName }),
       workingDirectory: agentDraft.workingDirectory.trim() || defaultAgentWorkspace(handle),
     };
-    await apiInvoke<string>("create_agent", {
+    await apiInvoke("create_agent", {
       handle,
       displayName: nextForm.displayName,
       role: nextForm.role,
@@ -3689,7 +3693,7 @@ function App() {
     const optimisticId = addOptimisticOwnerMessage(channel.id, null, body, sendAsTask, attachments);
     updateRootComposerDraft(channel.id, () => EMPTY_COMPOSER_DRAFT);
     try {
-      const persistedMessage = await apiInvoke<Message>("send_message", {
+      const persistedMessage = await apiInvoke("send_message", {
         channelId: channel.id,
         threadRootId: null,
         body,
@@ -3708,7 +3712,7 @@ function App() {
 
   async function openDmWithAgent(agent: Agent) {
     try {
-      const channelId = await apiInvoke<string>("open_dm_with_agent", { agentId: agent.id });
+      const channelId = await apiInvoke("open_dm_with_agent", { agentId: agent.id });
       await refresh();
       setSelectedAgentId(null);
       setActiveChannelId(channelId);
@@ -3729,7 +3733,7 @@ function App() {
     const optimisticId = addOptimisticOwnerMessage(channel.id, activeRoot.id, body, false, attachments);
     updateReplyComposerDraft(activeRoot.id, () => EMPTY_COMPOSER_DRAFT);
     try {
-      const persistedMessage = await apiInvoke<Message>("send_message", {
+      const persistedMessage = await apiInvoke("send_message", {
         channelId: channel.id,
         threadRootId: activeRoot.id,
         body,
