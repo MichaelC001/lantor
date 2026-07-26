@@ -20,7 +20,8 @@ use crate::events::control::{
 use crate::freshness::advance_agent_target_watermark_for_work_item;
 use crate::runtime::streaming::mark_run_work_item_silent;
 use crate::ui_notifications::{
-    notify_supervisor_wake, notify_ui_agent_run_changed, notify_ui_work_item_changed,
+    enqueue_ui_agent_run_changed_in_tx, enqueue_ui_work_item_changed_in_tx, notify_supervisor_wake,
+    reconcile_work_item_change,
 };
 use crate::{
     app::{to_string, CommandResult},
@@ -456,31 +457,7 @@ pub(crate) async fn wait_for_agent_run(
         ),
     };
 
-    let _ = sqlx::query(
-        r#"
-        update agent_runs
-        set status = $2,
-            exit_code = $3,
-            log = substr(log || $4, -20000),
-            stopped_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
-        where id = $1
-        "#,
-    )
-    .bind(run_id)
-    .bind(run_status)
-    .bind(exit_code)
-    .bind(&log_line)
-    .execute(&pool)
-    .await;
-    notify_ui_agent_run_changed(&pool, run_id, "run_finished").await;
-
-    let _ = sqlx::query("update agents set status = $2 where id = $1")
-        .bind(agent_id)
-        .bind(agent_status)
-        .execute(&pool)
-        .await;
-
-    if let Some(work_item_id) = work_item_id {
+    let resolved_work_status = if let Some(work_item_id) = work_item_id {
         let current_status: Option<String> =
             sqlx::query_scalar("select status from agent_work_items where id = $1")
                 .bind(work_item_id)
@@ -497,23 +474,73 @@ pub(crate) async fn wait_for_agent_run(
         } else {
             "failed"
         };
-        let _ = sqlx::query(
+        Some((work_item_id, work_status))
+    } else {
+        None
+    };
+    let persist_result: CommandResult<()> = async {
+        let mut transaction = pool.begin().await.map_err(to_string)?;
+        sqlx::query(
             r#"
+            update agent_runs
+            set status = $2,
+                exit_code = $3,
+                log = substr(log || $4, -20000),
+                stopped_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+            where id = $1
+            "#,
+        )
+        .bind(run_id)
+        .bind(run_status)
+        .bind(exit_code)
+        .bind(&log_line)
+        .execute(&mut *transaction)
+        .await
+        .map_err(to_string)?;
+        sqlx::query("update agents set status = $2 where id = $1")
+            .bind(agent_id)
+            .bind(agent_status)
+            .execute(&mut *transaction)
+            .await
+            .map_err(to_string)?;
+        enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_finished").await?;
+
+        if let Some((work_item_id, work_status)) = resolved_work_status {
+            sqlx::query(
+                r#"
             update agent_work_items
             set status = $2,
                 completed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
                 updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
             where id = $1
             "#,
-        )
-        .bind(work_item_id)
-        .bind(work_status)
-        .execute(&pool)
-        .await;
+            )
+            .bind(work_item_id)
+            .bind(work_status)
+            .execute(&mut *transaction)
+            .await
+            .map_err(to_string)?;
+            enqueue_ui_work_item_changed_in_tx(
+                &mut transaction,
+                work_item_id,
+                "work_item_finished",
+            )
+            .await?;
+        }
+        transaction.commit().await.map_err(to_string)
+    }
+    .await;
+    if let Err(error) = &persist_result {
+        eprintln!("Failed to persist terminal process state for run {run_id}: {error}");
+    }
+
+    if let Some((work_item_id, work_status)) = resolved_work_status {
+        if persist_result.is_ok() {
+            let _ = reconcile_work_item_change(&pool, work_item_id, "work_item_finished").await;
+        }
         let _ =
             mark_task_after_work_item_finished(&pool, work_item_id, agent_id, run_id, work_status)
                 .await;
-        notify_ui_work_item_changed(&pool, work_item_id, "work_item_finished").await;
         let _ = record_agent_activity(
             &pool,
             Some(agent_id),
@@ -555,6 +582,7 @@ pub(crate) async fn start_process_agent(
         format!("$ {command_text}\n\n[agent request]\n{work_item_prompt}\n")
     };
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let run_id: Uuid = sqlx::query_scalar(
         r#"
         insert into agent_runs (agent_id, work_item_id, command, working_directory, status, log)
@@ -567,10 +595,10 @@ pub(crate) async fn start_process_agent(
     .bind(&command_text)
     .bind(&working_directory)
     .bind(initial_log)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_ui_agent_run_changed(pool, run_id, "run_created").await;
+    enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_created").await?;
     if let Some(work_item_id) = work_item_id {
         sqlx::query(
             r#"
@@ -583,10 +611,15 @@ pub(crate) async fn start_process_agent(
         )
         .bind(work_item_id)
         .bind(run_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-        notify_ui_work_item_changed(pool, work_item_id, "work_item_running").await;
+        enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_running")
+            .await?;
+    }
+    transaction.commit().await.map_err(to_string)?;
+    if let Some(work_item_id) = work_item_id {
+        reconcile_work_item_change(pool, work_item_id, "work_item_running").await?;
         record_agent_activity(
             pool,
             Some(agent_id),
@@ -657,6 +690,7 @@ pub(crate) async fn start_process_agent(
         Ok(child) => child,
         Err(err) => {
             let error_log = format!("failed to start process: {err}\n");
+            let mut transaction = pool.begin().await.map_err(to_string)?;
             sqlx::query(
                 r#"
                 update agent_runs
@@ -666,15 +700,15 @@ pub(crate) async fn start_process_agent(
             )
             .bind(run_id)
             .bind(error_log)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(to_string)?;
-            notify_ui_agent_run_changed(pool, run_id, "run_failed").await;
             sqlx::query("update agents set status = 'error' where id = $1")
                 .bind(agent_id)
-                .execute(pool)
+                .execute(&mut *transaction)
                 .await
                 .map_err(to_string)?;
+            enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_failed").await?;
             if let Some(work_item_id) = work_item_id {
                 sqlx::query(
                     r#"
@@ -686,10 +720,19 @@ pub(crate) async fn start_process_agent(
                     "#,
                 )
                 .bind(work_item_id)
-                .execute(pool)
+                .execute(&mut *transaction)
                 .await
                 .map_err(to_string)?;
-                notify_ui_work_item_changed(pool, work_item_id, "work_item_failed").await;
+                enqueue_ui_work_item_changed_in_tx(
+                    &mut transaction,
+                    work_item_id,
+                    "work_item_failed",
+                )
+                .await?;
+            }
+            transaction.commit().await.map_err(to_string)?;
+            if let Some(work_item_id) = work_item_id {
+                reconcile_work_item_change(pool, work_item_id, "work_item_failed").await?;
             }
             record_agent_activity(
                 pool,
@@ -705,18 +748,20 @@ pub(crate) async fn start_process_agent(
     };
 
     let pid = child.id().map(|id| id as i32);
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query("update agent_runs set status = 'running', pid = $2 where id = $1")
         .bind(run_id)
         .bind(pid)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-    notify_ui_agent_run_changed(pool, run_id, "run_running").await;
     sqlx::query("update agents set status = 'running' where id = $1")
         .bind(agent_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+    enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_running").await?;
+    transaction.commit().await.map_err(to_string)?;
     record_agent_activity(
         pool,
         Some(agent_id),
@@ -845,6 +890,7 @@ pub(crate) async fn cleanup_failed_warm_start(
     requeue_work_item: bool,
 ) -> CommandResult<()> {
     let error_log = format!("{runtime_label} warm turn failed before start: {error}\n");
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update agent_runs
@@ -857,10 +903,9 @@ pub(crate) async fn cleanup_failed_warm_start(
     )
     .bind(run_id)
     .bind(&error_log)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_ui_agent_run_changed(pool, run_id, "run_failed").await;
 
     sqlx::query("update agents set status = $2 where id = $1")
         .bind(agent_id)
@@ -869,9 +914,10 @@ pub(crate) async fn cleanup_failed_warm_start(
         } else {
             "error"
         })
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+    enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_failed").await?;
 
     if let Some(work_item_id) = work_item_id {
         if requeue_work_item {
@@ -886,11 +932,11 @@ pub(crate) async fn cleanup_failed_warm_start(
                 "#,
             )
             .bind(work_item_id)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(to_string)?;
-            notify_ui_work_item_changed(pool, work_item_id, "work_item_queued").await;
-            let _ = notify_supervisor_wake(pool).await;
+            enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_queued")
+                .await?;
         } else {
             sqlx::query(
                 r#"
@@ -902,11 +948,28 @@ pub(crate) async fn cleanup_failed_warm_start(
                 "#,
             )
             .bind(work_item_id)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(to_string)?;
-            notify_ui_work_item_changed(pool, work_item_id, "work_item_failed").await;
+            enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_failed")
+                .await?;
         }
+    }
+    transaction.commit().await.map_err(to_string)?;
+    if let Some(work_item_id) = work_item_id {
+        reconcile_work_item_change(
+            pool,
+            work_item_id,
+            if requeue_work_item {
+                "work_item_queued"
+            } else {
+                "work_item_failed"
+            },
+        )
+        .await?;
+    }
+    if requeue_work_item {
+        let _ = notify_supervisor_wake(pool).await;
     }
 
     record_agent_activity(

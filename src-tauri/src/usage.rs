@@ -3,7 +3,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::app::{to_string, CommandResult};
-use crate::ui_notifications::notify_ui_agent_run_changed;
+use crate::ui_notifications::enqueue_ui_agent_run_changed_in_tx;
 
 fn value_i64_at(value: &Value, path: &str) -> Option<i64> {
     value.pointer(path).and_then(|value| {
@@ -113,6 +113,7 @@ pub(crate) async fn record_run_usage(
     let estimated_cost = cost_micros
         .unwrap_or_else(|| model_cost_micros(&runtime, &model, input_tokens, output_tokens))
         .max(0);
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update agent_runs
@@ -127,10 +128,11 @@ pub(crate) async fn record_run_usage(
     .bind(input_tokens.max(0))
     .bind(output_tokens.max(0))
     .bind(estimated_cost)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_ui_agent_run_changed(pool, run_id, "run_usage").await;
+    enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_usage").await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 

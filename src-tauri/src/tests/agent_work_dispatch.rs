@@ -3,7 +3,7 @@ use crate::agent_inbox_wake::{create_agent_inbox_item, AgentInboxItemInput};
 use crate::events::control::{handle_agent_event, AgentEvent};
 use crate::message_store::send_owner_message_in_pool;
 use crate::test_support::{drop_test_schema, insert_test_agent, insert_test_channel, test_pool};
-use crate::ui_notifications::notify_ui_work_item_changed;
+use crate::ui_notifications::reconcile_work_item_change;
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
@@ -351,14 +351,14 @@ async fn task_work_item_queue_and_start_do_not_insert_system_messages() {
         .await
         .map_err(|err| err.to_string())?;
 
-        notify_ui_work_item_changed(&pool, work_item_id, "work_item_created").await;
-        notify_ui_work_item_changed(&pool, work_item_id, "work_item_queued").await;
+        reconcile_work_item_change(&pool, work_item_id, "work_item_created").await?;
+        reconcile_work_item_change(&pool, work_item_id, "work_item_queued").await?;
         sqlx::query("update agent_work_items set status = 'running' where id = $1")
             .bind(work_item_id)
             .execute(&pool)
             .await
             .map_err(|err| err.to_string())?;
-        notify_ui_work_item_changed(&pool, work_item_id, "work_item_running").await;
+        reconcile_work_item_change(&pool, work_item_id, "work_item_running").await?;
 
         let system_messages: i64 = sqlx::query_scalar(
             r#"
@@ -677,7 +677,7 @@ async fn task_claim_opportunity_finish_does_not_insert_system_message() {
             .execute(&pool)
             .await
             .map_err(|err| err.to_string())?;
-        notify_ui_work_item_changed(&pool, available_work_item_id, "work_item_finished").await;
+        reconcile_work_item_change(&pool, available_work_item_id, "work_item_finished").await?;
 
         let assigned_message_id: Uuid = sqlx::query_scalar(
             r#"
@@ -743,7 +743,7 @@ async fn task_claim_opportunity_finish_does_not_insert_system_message() {
             .execute(&pool)
             .await
             .map_err(|err| err.to_string())?;
-        notify_ui_work_item_changed(&pool, assigned_work_item_id, "work_item_finished").await;
+        reconcile_work_item_change(&pool, assigned_work_item_id, "work_item_finished").await?;
 
         let claim_opportunity_messages: i64 = sqlx::query_scalar(
             r#"
@@ -784,7 +784,7 @@ async fn task_claim_opportunity_finish_does_not_insert_system_message() {
             .execute(&pool)
             .await
             .map_err(|err| err.to_string())?;
-        notify_ui_work_item_changed(&pool, assigned_work_item_id, "work_item_finished").await;
+        reconcile_work_item_change(&pool, assigned_work_item_id, "work_item_finished").await?;
 
         let assigned_messages: i64 = sqlx::query_scalar(
             r#"
@@ -845,7 +845,7 @@ async fn conversational_work_item_finish_does_not_insert_system_message() {
         .await
         .map_err(|err| err.to_string())?;
 
-        notify_ui_work_item_changed(&pool, work_item_id, "work_item_finished").await;
+        reconcile_work_item_change(&pool, work_item_id, "work_item_finished").await?;
 
         let system_messages: i64 = sqlx::query_scalar(
             r#"

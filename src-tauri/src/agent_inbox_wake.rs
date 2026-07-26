@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
+use sqlx::{sqlite::SqliteRow, Row, Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::ui_notifications::{
-    notify_supervisor_wake, notify_ui_refresh, notify_ui_work_item_changed,
+    enqueue_ui_event_in_tx, enqueue_ui_work_item_changed_in_tx, notify_supervisor_wake,
+    reconcile_work_item_change, UiEvent,
 };
 use crate::{
     app::{to_string, CommandResult},
@@ -180,12 +181,12 @@ pub(crate) async fn create_agent_inbox_item(
     Ok(inbox_item_id)
 }
 
-pub(crate) async fn attach_work_item_to_inbox(
-    pool: &SqlitePool,
+pub(crate) async fn attach_work_item_to_inbox_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
     inbox_item_id: Uuid,
     work_item_id: Uuid,
 ) -> CommandResult<()> {
-    attach_work_item_to_inboxes(pool, &[inbox_item_id], work_item_id).await
+    attach_work_item_to_inboxes_in_tx(transaction, &[inbox_item_id], work_item_id).await
 }
 
 async fn attach_work_item_to_inboxes(
@@ -210,6 +211,31 @@ async fn attach_work_item_to_inboxes(
         .bind(*inbox_item_id)
         .bind(work_item_id)
         .execute(pool)
+        .await
+        .map_err(to_string)?;
+    }
+    Ok(())
+}
+
+async fn attach_work_item_to_inboxes_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    inbox_item_ids: &[Uuid],
+    work_item_id: Uuid,
+) -> CommandResult<()> {
+    for inbox_item_id in inbox_item_ids {
+        sqlx::query(
+            r#"
+            update agent_inbox_items
+            set work_item_id = $2,
+                state = 'processing',
+                updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+                archived_at = null
+            where id = $1
+            "#,
+        )
+        .bind(*inbox_item_id)
+        .bind(work_item_id)
+        .execute(&mut **transaction)
         .await
         .map_err(to_string)?;
     }
@@ -660,6 +686,7 @@ async fn refresh_inbox_wake_work_item(
     };
     let same_thread_context = load_recent_same_thread_context(pool, items).await?;
     let context_max_seq = inbox_wake_context_max_seq(items, same_thread_context.as_ref());
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update agent_work_items
@@ -689,9 +716,12 @@ async fn refresh_inbox_wake_work_item(
             .map(|context| context.body.as_str()),
     ))
     .bind(context_max_seq)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
+    enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_merged").await?;
+    transaction.commit().await.map_err(to_string)?;
+    reconcile_work_item_change(pool, work_item_id, "work_item_merged").await?;
     Ok(())
 }
 
@@ -786,7 +816,6 @@ pub(crate) async fn ensure_agent_inbox_wake_work_item(
         attach_work_item_to_inboxes(pool, &inbox_item_ids, existing_work_item_id).await?;
         let items = load_inbox_wake_items_for_work_item(pool, existing_work_item_id).await?;
         refresh_inbox_wake_work_item(pool, existing_work_item_id, &items).await?;
-        notify_ui_work_item_changed(pool, existing_work_item_id, "work_item_merged").await;
         let scheduled =
             enqueue_agent_work_if_available(pool, agent_id, existing_work_item_id).await?;
         let detail = format!(
@@ -815,6 +844,7 @@ pub(crate) async fn ensure_agent_inbox_wake_work_item(
 
     let same_thread_context = load_recent_same_thread_context(pool, &batch).await?;
     let context_max_seq = inbox_wake_context_max_seq(&batch, same_thread_context.as_ref());
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let work_item_id: Uuid = sqlx::query_scalar(
         r#"
         insert into agent_work_items (
@@ -839,11 +869,13 @@ pub(crate) async fn ensure_agent_inbox_wake_work_item(
             .map(|context| context.body.as_str()),
     ))
     .bind(context_max_seq)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
-    attach_work_item_to_inboxes(pool, &inbox_item_ids, work_item_id).await?;
-    notify_ui_work_item_changed(pool, work_item_id, "work_item_created").await;
+    attach_work_item_to_inboxes_in_tx(&mut transaction, &inbox_item_ids, work_item_id).await?;
+    enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_created").await?;
+    transaction.commit().await.map_err(to_string)?;
+    reconcile_work_item_change(pool, work_item_id, "work_item_created").await?;
     let scheduled = enqueue_agent_work_if_available(pool, agent_id, work_item_id).await?;
     let target = batch
         .first()
@@ -980,6 +1012,7 @@ pub(crate) async fn enqueue_agent_work_if_available(
         return Ok(true);
     }
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         insert into supervisor_commands (command_type, agent_id, work_item_id)
@@ -988,23 +1021,30 @@ pub(crate) async fn enqueue_agent_work_if_available(
     )
     .bind(agent_id)
     .bind(work_item_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    let _ = notify_supervisor_wake(pool).await;
-    let _ = notify_ui_refresh(pool, "supervisor_command").await;
     sqlx::query("update agents set status = 'queued' where id = $1")
         .bind(agent_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
     if is_codex && has_active_run {
         sqlx::query("update agents set status = 'running' where id = $1")
             .bind(agent_id)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(to_string)?;
     }
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "supervisor_command",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
+    let _ = notify_supervisor_wake(pool).await;
 
     Ok(true)
 }

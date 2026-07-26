@@ -28,7 +28,7 @@ use crate::message_store::{
 };
 use crate::runtime::streaming::mark_run_work_item_silent;
 use crate::task_messages::create_agent_task_thread;
-use crate::ui_notifications::{insert_system_message, notify_ui_refresh};
+use crate::ui_notifications::{enqueue_ui_event_in_tx, insert_system_message, UiEvent};
 use crate::usage::record_run_usage;
 use crate::{
     app::{to_string, CommandResult},
@@ -844,6 +844,7 @@ pub(crate) async fn handle_agent_event(
                     format!("@{target_handle} taking over task #{resolved_task_number}: {reason}")
                 });
 
+            let mut transaction = pool.begin().await.map_err(to_string)?;
             let affected = sqlx::query(
                 r#"
                 update tasks
@@ -859,7 +860,7 @@ pub(crate) async fn handle_agent_event(
             .bind(task_id)
             .bind(target_agent_id)
             .bind(agent_id)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(to_string)?
             .rows_affected();
@@ -868,6 +869,14 @@ pub(crate) async fn handle_agent_event(
                     "task #{resolved_task_number} can only be handed off by its current assignee"
                 ));
             }
+            enqueue_ui_event_in_tx(
+                &mut transaction,
+                &UiEvent::Refresh {
+                    reason: "task_handoff",
+                },
+            )
+            .await?;
+            transaction.commit().await.map_err(to_string)?;
 
             let handoff_message_id = insert_agent_handoff_message(
                 pool,
@@ -878,7 +887,6 @@ pub(crate) async fn handle_agent_event(
             )
             .await?;
             dispatch_task_assignment_to_agent(pool, task_id, target_agent_id, reason).await?;
-            let _ = notify_ui_refresh(pool, "task_handoff").await;
             record_agent_activity(
                 pool,
                 Some(agent_id),
@@ -1122,7 +1130,6 @@ pub(crate) async fn handle_agent_event(
                 .to_string(),
             )
             .await?;
-            let _ = notify_ui_refresh(pool, "channel_invite").await;
             Ok("agents invited".to_owned())
         }
         AgentEvent::ProfileUpdate {
@@ -1151,6 +1158,7 @@ pub(crate) async fn handle_agent_event(
             {
                 return Err("profile_update requires at least one non-empty field".to_owned());
             }
+            let mut transaction = pool.begin().await.map_err(to_string)?;
             sqlx::query(
                 r#"
                 update agents
@@ -1166,9 +1174,17 @@ pub(crate) async fn handle_agent_event(
             .bind(role)
             .bind(avatar)
             .bind(description)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(to_string)?;
+            enqueue_ui_event_in_tx(
+                &mut transaction,
+                &UiEvent::Refresh {
+                    reason: "profile_update",
+                },
+            )
+            .await?;
+            transaction.commit().await.map_err(to_string)?;
             record_agent_activity(
                 pool,
                 Some(agent_id),
@@ -1184,7 +1200,6 @@ pub(crate) async fn handle_agent_event(
                 .to_string(),
             )
             .await?;
-            let _ = notify_ui_refresh(pool, "profile_update").await;
             Ok("profile updated".to_owned())
         }
         AgentEvent::ArtifactCreate {

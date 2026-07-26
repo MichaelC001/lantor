@@ -8,7 +8,10 @@ use crate::{
     events::activity::record_agent_activity,
     launch_agent,
     models::LaunchAgentStatus,
-    ui_notifications::{notify_supervisor_wake, notify_ui_agent_run_changed, notify_ui_refresh},
+    ui_notifications::{
+        enqueue_ui_agent_run_changed_in_tx, enqueue_ui_event_in_tx, notify_supervisor_wake,
+        notify_ui_refresh, UiEvent,
+    },
 };
 
 #[tauri::command]
@@ -55,11 +58,20 @@ pub(crate) async fn start_agent_in_pool(pool: &SqlitePool, agent_id: Uuid) -> Co
         return Err("agent already has a pending start command".to_owned());
     }
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query("update agents set status = 'queued' where id = $1")
         .bind(agent_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "agent_queued",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     let (redispatched_tasks, inbox_wake_available) =
         dispatch_agent_restart_backlog(pool, agent_id).await?;
     let pending_start_after_backlog: Option<Uuid> = sqlx::query_scalar(
@@ -77,6 +89,7 @@ pub(crate) async fn start_agent_in_pool(pool: &SqlitePool, agent_id: Uuid) -> Co
     .await
     .map_err(to_string)?;
     if pending_start_after_backlog.is_none() {
+        let mut transaction = pool.begin().await.map_err(to_string)?;
         sqlx::query(
             r#"
             insert into supervisor_commands (command_type, agent_id)
@@ -84,11 +97,18 @@ pub(crate) async fn start_agent_in_pool(pool: &SqlitePool, agent_id: Uuid) -> Co
             "#,
         )
         .bind(agent_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::Refresh {
+                reason: "supervisor_command",
+            },
+        )
+        .await?;
+        transaction.commit().await.map_err(to_string)?;
         let _ = notify_supervisor_wake(pool).await;
-        let _ = notify_ui_refresh(pool, "supervisor_command").await;
     }
     record_agent_activity(
         pool,
@@ -124,6 +144,7 @@ pub(crate) async fn stop_agent(run_id: Uuid, state: State<'_, AppState>) -> Comm
     .map_err(to_string)?;
 
     let agent_id: Uuid = row.get("agent_id");
+    let mut transaction = state.pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         insert into supervisor_commands (command_type, agent_id, run_id)
@@ -132,22 +153,29 @@ pub(crate) async fn stop_agent(run_id: Uuid, state: State<'_, AppState>) -> Comm
     )
     .bind(agent_id)
     .bind(run_id)
-    .execute(&state.pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    let _ = notify_supervisor_wake(&state.pool).await;
-    let _ = notify_ui_refresh(&state.pool, "supervisor_command").await;
     sqlx::query("update agent_runs set status = 'stopping' where id = $1")
         .bind(run_id)
-        .execute(&state.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-    notify_ui_agent_run_changed(&state.pool, run_id, "run_stopping").await;
+    enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_stopping").await?;
     sqlx::query("update agents set status = 'stopping' where id = $1")
         .bind(agent_id)
-        .execute(&state.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "supervisor_command",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
+    let _ = notify_supervisor_wake(&state.pool).await;
     record_agent_activity(
         &state.pool,
         Some(agent_id),
@@ -176,11 +204,18 @@ pub(crate) async fn uninstall_supervisor_service(
 ) -> CommandResult<LaunchAgentStatus> {
     let status = launch_agent::uninstall_supervisor_service()?;
 
+    let mut transaction = state.pool.begin().await.map_err(to_string)?;
     sqlx::query("update supervisor_state set status = 'offline', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') where id = 1")
-        .execute(&state.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-
-    let _ = notify_ui_refresh(&state.pool, "supervisor_service_uninstalled").await;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "supervisor_service_uninstalled",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(status)
 }

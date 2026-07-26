@@ -7,7 +7,7 @@ use crate::app::{to_string, CommandResult};
 use crate::events::activity::record_agent_activity;
 use crate::message_store::load_message_patch_in_tx;
 use crate::ui_notifications::{
-    enqueue_ui_event_in_tx, notify_ui_refresh, notify_ui_work_item_changed, UiEvent,
+    enqueue_ui_event_in_tx, enqueue_ui_work_item_changed_in_tx, reconcile_work_item_change, UiEvent,
 };
 
 const FRESHNESS_RETRY_CONTEXT_LIMIT: i64 = 16;
@@ -350,6 +350,7 @@ pub(crate) async fn hold_work_item_output_if_stale(
     let Some(stale) = stale_output_for_scope(pool, agent_id, &scope).await? else {
         return Ok(false);
     };
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let held_output_id: Uuid = sqlx::query_scalar(
         r#"
         insert into agent_held_outputs (
@@ -371,7 +372,7 @@ pub(crate) async fn hold_work_item_output_if_stale(
     .bind(stale.latest_seq)
     .bind(stale.latest_message_id)
     .bind("newer completed messages arrived before publish")
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
 
@@ -386,10 +387,12 @@ pub(crate) async fn hold_work_item_output_if_stale(
         "#,
     )
     .bind(work_item_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_ui_work_item_changed(pool, work_item_id, "work_item_held").await;
+    enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_held").await?;
+    transaction.commit().await.map_err(to_string)?;
+    reconcile_work_item_change(pool, work_item_id, "work_item_held").await?;
 
     let retry_disposition =
         queue_freshness_retry_work_item(pool, agent_id, work_item_id, held_output_id, body, &stale)
@@ -532,6 +535,7 @@ async fn load_agent_target_watermark(
 }
 
 async fn expire_old_held_outputs(pool: &SqlitePool) -> CommandResult<()> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let expired = sqlx::query(
         r#"
         update agent_held_outputs
@@ -545,13 +549,20 @@ async fn expire_old_held_outputs(pool: &SqlitePool) -> CommandResult<()> {
           and expires_at <= strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
         "#,
     )
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?
     .rows_affected();
     if expired > 0 {
-        let _ = notify_ui_refresh(pool, "held_outputs_expired").await;
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::Refresh {
+                reason: "held_outputs_expired",
+            },
+        )
+        .await?;
     }
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
@@ -624,6 +635,7 @@ async fn queue_freshness_retry_work_item(
         &source.context,
     );
     let retry_title = format!("Refresh held reply: {}", source.title);
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let retry_work_item_id: Uuid = sqlx::query_scalar(
         r#"
         insert into agent_work_items (
@@ -643,10 +655,13 @@ async fn queue_freshness_retry_work_item(
     .bind(context)
     .bind(context_max_seq)
     .bind(current_generation + 1)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_ui_work_item_changed(pool, retry_work_item_id, "work_item_created").await;
+    enqueue_ui_work_item_changed_in_tx(&mut transaction, retry_work_item_id, "work_item_created")
+        .await?;
+    transaction.commit().await.map_err(to_string)?;
+    reconcile_work_item_change(pool, retry_work_item_id, "work_item_created").await?;
     let scheduled = enqueue_agent_work_if_available(pool, agent_id, retry_work_item_id).await?;
     record_agent_activity(
         pool,

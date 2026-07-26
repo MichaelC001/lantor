@@ -12,6 +12,7 @@ use crate::agent_routing::resolve_agent_by_handle;
 use crate::db::db_connect;
 use crate::freshness::advance_agent_target_watermark;
 use crate::message_store::load_artifact;
+use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
 use crate::{
     app::{to_string, CommandResult},
     attachments::{attachment_summary_sql, format_attachment_size},
@@ -1178,13 +1179,6 @@ async fn resolve_inbox_item_id(
     }
 }
 
-async fn notify_context_tool_refresh(pool: &SqlitePool, reason: &str) {
-    let _ = sqlx::query("insert into ui_events (event_json) values ($1)")
-        .bind(serde_json::json!({ "type": "refresh", "reason": reason }).to_string())
-        .execute(pool)
-        .await;
-}
-
 fn memory_path(workspace: &Path) -> PathBuf {
     workspace.join("MEMORY.md")
 }
@@ -1486,6 +1480,7 @@ pub(crate) async fn agent_context_inbox_read(
         .or_else(|| arg_value(args, "--id"))
         .ok_or_else(|| "inbox-read requires --inbox-id <uuid-or-prefix>".to_owned())?;
     let inbox_id = resolve_inbox_item_id(pool, target.id, &raw_id).await?;
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update agent_inbox_items
@@ -1496,10 +1491,17 @@ pub(crate) async fn agent_context_inbox_read(
     )
     .bind(inbox_id)
     .bind(target.id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_context_tool_refresh(pool, "inbox_read").await;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "inbox_read",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
 
     let row = sqlx::query(&format!(
         r#"
@@ -1648,6 +1650,7 @@ pub(crate) async fn agent_context_inbox_archive(
         .or_else(|| arg_value(args, "--id"))
         .ok_or_else(|| "inbox-archive requires --inbox-id <uuid-or-prefix>".to_owned())?;
     let inbox_id = resolve_inbox_item_id(pool, target.id, &raw_id).await?;
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let row = sqlx::query(
         r#"
         update agent_inbox_items
@@ -1660,10 +1663,17 @@ pub(crate) async fn agent_context_inbox_archive(
     )
     .bind(inbox_id)
     .bind(target.id)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_context_tool_refresh(pool, "inbox_archived").await;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "inbox_archived",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(format!(
         "Archived Lantor inbox item {} for @{} kind={} title={:?}",
         short_id(row.get("id")),

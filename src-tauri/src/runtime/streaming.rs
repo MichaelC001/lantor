@@ -17,7 +17,9 @@ use crate::freshness::{
     try_complete_streaming_message_if_fresh,
 };
 use crate::message_store::load_message_patch_in_tx;
-use crate::ui_notifications::{enqueue_ui_event_in_tx, notify_ui_work_item_changed, UiEvent};
+use crate::ui_notifications::{
+    enqueue_ui_event_in_tx, enqueue_ui_work_item_changed_in_tx, reconcile_work_item_change, UiEvent,
+};
 
 pub(crate) const STREAMING_MESSAGE_BODY_LIMIT: usize = 200_000;
 pub(crate) const STREAMING_TRUNCATION_MARKER: &str = "\n\n[stream truncated by Lantor]";
@@ -641,6 +643,7 @@ async fn mark_work_item_silent(
     work_item_id: Uuid,
     reason: &str,
 ) -> CommandResult<()> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update agent_work_items
@@ -652,10 +655,12 @@ async fn mark_work_item_silent(
         "#,
     )
     .bind(work_item_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_ui_work_item_changed(pool, work_item_id, "work_item_silent").await;
+    enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_silent").await?;
+    transaction.commit().await.map_err(to_string)?;
+    reconcile_work_item_change(pool, work_item_id, "work_item_silent").await?;
     record_agent_activity(
         pool,
         Some(agent_id),

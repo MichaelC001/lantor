@@ -31,7 +31,10 @@ use crate::{
         build_streaming_work_item_prompt, build_work_item_prompt, load_agent_memory_context,
         prepend_memory_context,
     },
-    ui_notifications::{notify_ui_agent_run_changed, notify_ui_work_item_changed},
+    ui_notifications::{
+        enqueue_ui_agent_run_changed_in_tx, enqueue_ui_work_item_changed_in_tx,
+        reconcile_work_item_change,
+    },
     usage::agent_budget_exhausted,
 };
 
@@ -503,6 +506,7 @@ async fn supervisor_start_agent(
 
     if let Some(reason) = agent_budget_exhausted(pool, agent_id).await? {
         if let Some(work_item_id) = work_item_id {
+            let mut transaction = pool.begin().await.map_err(to_string)?;
             sqlx::query(
                 r#"
                 update agent_work_items
@@ -513,10 +517,13 @@ async fn supervisor_start_agent(
                 "#,
             )
             .bind(work_item_id)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(to_string)?;
-            notify_ui_work_item_changed(pool, work_item_id, "budget_exhausted").await;
+            enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "budget_exhausted")
+                .await?;
+            transaction.commit().await.map_err(to_string)?;
+            reconcile_work_item_change(pool, work_item_id, "budget_exhausted").await?;
         }
         record_agent_activity(
             pool,
@@ -725,6 +732,7 @@ async fn finalize_unstoppable_work_item(
         return Ok(());
     }
     let agent_id: Uuid = row.get("agent_id");
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update agent_work_items
@@ -735,9 +743,12 @@ async fn finalize_unstoppable_work_item(
         "#,
     )
     .bind(work_item_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
+    enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_cancelled")
+        .await?;
+    transaction.commit().await.map_err(to_string)?;
     let _ = crate::mark_task_after_work_item_finished(
         pool,
         work_item_id,
@@ -746,7 +757,7 @@ async fn finalize_unstoppable_work_item(
         "cancelled",
     )
     .await;
-    notify_ui_work_item_changed(pool, work_item_id, "work_item_cancelled").await;
+    reconcile_work_item_change(pool, work_item_id, "work_item_cancelled").await?;
     record_agent_activity(
         pool,
         Some(agent_id),
@@ -808,6 +819,7 @@ async fn supervisor_stop_run(
     let Some(pid) = pid else {
         // No process to signal: finalize run + work item instead of failing,
         // so cancel never leaves them stuck.
+        let mut transaction = pool.begin().await.map_err(to_string)?;
         sqlx::query(
             r#"
             update agent_runs
@@ -817,17 +829,18 @@ async fn supervisor_stop_run(
             "#,
         )
         .bind(run_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-        notify_ui_agent_run_changed(pool, run_id, "run_finished").await;
         sqlx::query(
             "update agents set status = 'idle' where id = $1 and status in ('queued', 'running', 'stopping')",
         )
         .bind(agent_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+        enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_finished").await?;
+        transaction.commit().await.map_err(to_string)?;
         finalize_unstoppable_work_item(pool, work_item_id, run_id, "run had no process").await?;
         record_agent_activity(
             pool,
@@ -841,17 +854,18 @@ async fn supervisor_stop_run(
         return Ok(());
     };
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query("update agent_runs set status = 'stopping' where id = $1")
         .bind(run_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-    notify_ui_agent_run_changed(pool, run_id, "run_stopping").await;
     sqlx::query("update agents set status = 'stopping' where id = $1")
         .bind(agent_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+    enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_stopping").await?;
     if let Some(work_item_id) = work_item_id {
         sqlx::query(
             r#"
@@ -862,10 +876,15 @@ async fn supervisor_stop_run(
             "#,
         )
         .bind(work_item_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-        notify_ui_work_item_changed(pool, work_item_id, "work_item_cancelling").await;
+        enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_cancelling")
+            .await?;
+    }
+    transaction.commit().await.map_err(to_string)?;
+    if let Some(work_item_id) = work_item_id {
+        reconcile_work_item_change(pool, work_item_id, "work_item_cancelling").await?;
     }
 
     if runtime.eq_ignore_ascii_case("codex")

@@ -3,7 +3,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
-use sqlx::{Executor, Row, Sqlite, SqlitePool, Transaction};
+use sqlx::{sqlite::SqliteRow, Executor, Row, Sqlite, SqlitePool, Transaction};
 use tauri::Emitter;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -130,42 +130,45 @@ pub(crate) async fn notify_ui_refresh(pool: &SqlitePool, reason: &str) -> Comman
     enqueue_ui_event(pool, &UiEvent::Refresh { reason }).await
 }
 
-pub(crate) async fn notify_ui_agent_run_upsert(
-    pool: &SqlitePool,
-    run: &AgentRunPatch,
+pub(crate) async fn enqueue_ui_agent_run_changed_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: Uuid,
     reason: &str,
 ) -> CommandResult<()> {
-    enqueue_ui_event(pool, &UiEvent::AgentRunUpsert { reason, run }).await
+    let run = load_agent_run_patch_in_tx(transaction, run_id).await?;
+    enqueue_ui_event_in_tx(transaction, &UiEvent::AgentRunUpsert { reason, run: &run }).await
 }
 
-pub(crate) async fn notify_ui_work_item_upsert(
-    pool: &SqlitePool,
-    work_item: &AgentWorkItemPatch,
+pub(crate) async fn enqueue_ui_work_item_changed_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    work_item_id: Uuid,
     reason: &str,
 ) -> CommandResult<()> {
-    enqueue_ui_event(pool, &UiEvent::WorkItemUpsert { reason, work_item }).await
+    let work_item = load_agent_work_item_patch_in_tx(transaction, work_item_id).await?;
+    enqueue_ui_event_in_tx(
+        transaction,
+        &UiEvent::WorkItemUpsert {
+            reason,
+            work_item: &work_item,
+        },
+    )
+    .await
 }
 
-pub(crate) async fn notify_ui_agent_run_changed(pool: &SqlitePool, run_id: Uuid, reason: &str) {
-    if let Ok(run) = load_agent_run_patch(pool, run_id).await {
-        let _ = notify_ui_agent_run_upsert(pool, &run, reason).await;
-    } else {
-        let _ = notify_ui_refresh(pool, reason).await;
-    }
-}
-
-pub(crate) async fn notify_ui_work_item_changed(
+pub(crate) async fn reconcile_work_item_change(
     pool: &SqlitePool,
     work_item_id: Uuid,
     reason: &str,
-) {
+) -> CommandResult<()> {
+    // Inbox rollover and timeline narration may create more business records,
+    // so they deliberately run after the work-item transaction. Preserve the
+    // prior best-effort behavior: the already-committed lifecycle transition
+    // must not be reported as failed because a follow-on reconciliation fails.
     let _ = sync_inbox_for_work_item(pool, work_item_id).await;
     if let Ok(work_item) = load_agent_work_item_patch(pool, work_item_id).await {
-        let _ = notify_ui_work_item_upsert(pool, &work_item, reason).await;
         let _ = maybe_insert_work_item_system_message(pool, &work_item, reason).await;
-    } else {
-        let _ = notify_ui_refresh(pool, reason).await;
     }
+    Ok(())
 }
 
 pub(crate) async fn insert_system_message(
@@ -448,7 +451,10 @@ async fn maybe_vacuum_ui_events(pool: &SqlitePool) {
     }
 }
 
-async fn load_agent_run_patch(pool: &SqlitePool, run_id: Uuid) -> CommandResult<AgentRunPatch> {
+async fn load_agent_run_patch_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: Uuid,
+) -> CommandResult<AgentRunPatch> {
     let row = sqlx::query(
         r#"
         select
@@ -472,11 +478,15 @@ async fn load_agent_run_patch(pool: &SqlitePool, run_id: Uuid) -> CommandResult<
         "#,
     )
     .bind(run_id)
-    .fetch_one(pool)
+    .fetch_one(&mut **transaction)
     .await
     .map_err(to_string)?;
 
-    Ok(AgentRunPatch {
+    Ok(agent_run_patch_from_row(&row))
+}
+
+fn agent_run_patch_from_row(row: &SqliteRow) -> AgentRunPatch {
+    AgentRunPatch {
         id: row.get("id"),
         agent_id: row.get("agent_id"),
         agent_handle: row.get("agent_handle"),
@@ -491,7 +501,7 @@ async fn load_agent_run_patch(pool: &SqlitePool, run_id: Uuid) -> CommandResult<
         cost_micros: row.get("cost_micros"),
         started_at: row.get("started_at"),
         stopped_at: row.get("stopped_at"),
-    })
+    }
 }
 
 async fn load_agent_work_item_patch(
@@ -530,7 +540,50 @@ async fn load_agent_work_item_patch(
     .await
     .map_err(to_string)?;
 
-    Ok(AgentWorkItemPatch {
+    Ok(agent_work_item_patch_from_row(&row))
+}
+
+async fn load_agent_work_item_patch_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    work_item_id: Uuid,
+) -> CommandResult<AgentWorkItemPatch> {
+    let row = sqlx::query(
+        r#"
+        select
+            w.id,
+            w.agent_id,
+            a.handle as agent_handle,
+            w.channel_id,
+            c.name as channel_name,
+            w.thread_root_id,
+            w.source_message_id,
+            w.inbox_item_id,
+            w.task_id,
+            t.number as task_number,
+            w.source_kind,
+            w.title,
+            w.status,
+            w.run_id,
+            w.created_at,
+            w.updated_at,
+            w.completed_at
+        from agent_work_items w
+        join agents a on a.id = w.agent_id
+        left join channels c on c.id = w.channel_id
+        left join tasks t on t.id = w.task_id
+        where w.id = $1
+        "#,
+    )
+    .bind(work_item_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(to_string)?;
+
+    Ok(agent_work_item_patch_from_row(&row))
+}
+
+fn agent_work_item_patch_from_row(row: &SqliteRow) -> AgentWorkItemPatch {
+    AgentWorkItemPatch {
         id: row.get("id"),
         agent_id: row.get("agent_id"),
         agent_handle: row.get("agent_handle"),
@@ -548,7 +601,7 @@ async fn load_agent_work_item_patch(
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         completed_at: row.get("completed_at"),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -558,9 +611,12 @@ mod tests {
     use uuid::Uuid;
 
     use crate::models::Artifact;
-    use crate::test_support::{drop_test_schema, test_pool};
+    use crate::test_support::{drop_test_schema, insert_test_agent, test_pool};
 
-    use super::{enqueue_ui_event, enqueue_ui_event_in_tx, UiEvent};
+    use super::{
+        enqueue_ui_agent_run_changed_in_tx, enqueue_ui_event, enqueue_ui_event_in_tx,
+        enqueue_ui_work_item_changed_in_tx, UiEvent,
+    };
 
     #[tokio::test]
     async fn ui_event_outbox_commits_and_rolls_back_with_business_writes() {
@@ -637,6 +693,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifecycle_patch_events_share_the_business_transaction() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "outbox-lifecycle").await?;
+            let work_item_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_work_items (agent_id, source_kind, title, context, status)
+                values ($1, 'test', 'Lifecycle event', '', 'queued')
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let run_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_runs (agent_id, work_item_id, command, working_directory, status)
+                values ($1, $2, 'test', '', 'starting')
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .bind(work_item_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let event_cursor: i64 =
+                sqlx::query_scalar("select coalesce(max(id), 0) from ui_events")
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+
+            let mut transaction = pool.begin().await.map_err(|err| err.to_string())?;
+            sqlx::query("update agent_runs set status = 'running' where id = $1")
+                .bind(run_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|err| err.to_string())?;
+            sqlx::query(
+                "update agent_work_items set status = 'running', run_id = $2 where id = $1",
+            )
+            .bind(work_item_id)
+            .bind(run_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|err| err.to_string())?;
+            enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "rolled_back").await?;
+            enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "rolled_back")
+                .await?;
+            transaction
+                .rollback()
+                .await
+                .map_err(|err| err.to_string())?;
+
+            let run_status: String =
+                sqlx::query_scalar("select status from agent_runs where id = $1")
+                    .bind(run_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            let work_status: String =
+                sqlx::query_scalar("select status from agent_work_items where id = $1")
+                    .bind(work_item_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            let rolled_back_events: i64 =
+                sqlx::query_scalar("select count(*) from ui_events where id > $1")
+                    .bind(event_cursor)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert_eq!(run_status, "starting");
+            assert_eq!(work_status, "queued");
+            assert_eq!(rolled_back_events, 0);
+
+            let mut transaction = pool.begin().await.map_err(|err| err.to_string())?;
+            sqlx::query("update agent_runs set status = 'running' where id = $1")
+                .bind(run_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|err| err.to_string())?;
+            sqlx::query(
+                "update agent_work_items set status = 'running', run_id = $2 where id = $1",
+            )
+            .bind(work_item_id)
+            .bind(run_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|err| err.to_string())?;
+            enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "committed").await?;
+            enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "committed").await?;
+            transaction.commit().await.map_err(|err| err.to_string())?;
+
+            let event_json: Vec<String> = sqlx::query_scalar(
+                "select event_json from ui_events where id > $1 order by id asc",
+            )
+            .bind(event_cursor)
+            .fetch_all(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let events = event_json
+                .iter()
+                .map(|event| serde_json::from_str::<Value>(event))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| err.to_string())?;
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0]["type"], "agent_run_upsert");
+            assert_eq!(events[0]["run"]["status"], "running");
+            assert_eq!(events[1]["type"], "work_item_upsert");
+            assert_eq!(events[1]["work_item"]["status"], "running");
+            assert_eq!(events[1]["work_item"]["run_id"], run_id.to_string());
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
     async fn artifact_upsert_event_omits_artifact_content() {
         let Some((pool, schema)) = test_pool().await else {
             return;
@@ -665,8 +844,8 @@ mod tests {
                     artifact: (&artifact).into(),
                 },
             )
-                .await
-                .map_err(|err| err.to_string())?;
+            .await
+            .map_err(|err| err.to_string())?;
             let event_json: String =
                 sqlx::query_scalar("select event_json from ui_events order by id desc limit 1")
                     .fetch_one(&pool)

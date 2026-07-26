@@ -6,9 +6,7 @@ use uuid::Uuid;
 
 use crate::events::activity::record_agent_activity;
 use crate::models::AgentSchedule;
-use crate::ui_notifications::{
-    enqueue_ui_event_in_tx, insert_system_message, notify_ui_refresh, UiEvent,
-};
+use crate::ui_notifications::{enqueue_ui_event_in_tx, insert_system_message, UiEvent};
 use crate::{
     app::{to_string, AppState, CommandResult},
     create_agent_inbox_item, ensure_agent_inbox_wake_work_item, AgentInboxItemInput,
@@ -17,6 +15,7 @@ use crate::{
 use super::parse_due_at;
 
 pub(super) async fn process_due_agent_schedules(pool: &SqlitePool) -> CommandResult<()> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let rows = sqlx::query(
         r#"
         update agent_schedules
@@ -49,11 +48,20 @@ pub(super) async fn process_due_agent_schedules(pool: &SqlitePool) -> CommandRes
             next_run_at
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *transaction)
     .await
     .map_err(to_string)?;
 
-    let fired_any = !rows.is_empty();
+    if !rows.is_empty() {
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::Refresh {
+                reason: "agent_schedule_due",
+            },
+        )
+        .await?;
+    }
+    transaction.commit().await.map_err(to_string)?;
     for row in rows {
         let schedule_id: Uuid = row.get("id");
         let agent_id: Uuid = row.get("agent_id");
@@ -93,14 +101,23 @@ pub(super) async fn process_due_agent_schedules(pool: &SqlitePool) -> CommandRes
         let scheduled = wake.as_ref().is_some_and(|(_, scheduled)| *scheduled);
         let work_item_id = wake.map(|(work_item_id, _)| work_item_id);
 
+        let mut transaction = pool.begin().await.map_err(to_string)?;
         sqlx::query(
             "update agent_schedules set last_work_item_id = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') where id = $1",
         )
         .bind(schedule_id)
         .bind(work_item_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::Refresh {
+                reason: "agent_schedule_due",
+            },
+        )
+        .await?;
+        transaction.commit().await.map_err(to_string)?;
 
         record_agent_activity(
             pool,
@@ -123,9 +140,6 @@ pub(super) async fn process_due_agent_schedules(pool: &SqlitePool) -> CommandRes
             .to_string(),
         )
         .await?;
-    }
-    if fired_any {
-        let _ = notify_ui_refresh(pool, "agent_schedule_due").await;
     }
     Ok(())
 }

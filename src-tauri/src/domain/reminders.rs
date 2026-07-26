@@ -6,9 +6,7 @@ use uuid::Uuid;
 
 use crate::events::activity::record_agent_activity;
 use crate::models::Reminder;
-use crate::ui_notifications::{
-    enqueue_ui_event_in_tx, insert_system_message, notify_ui_refresh, UiEvent,
-};
+use crate::ui_notifications::{enqueue_ui_event_in_tx, insert_system_message, UiEvent};
 use crate::{
     app::{to_string, AppState, CommandResult},
     create_agent_inbox_item, ensure_agent_inbox_wake_work_item, AgentInboxItemInput,
@@ -17,6 +15,7 @@ use crate::{
 use super::parse_due_at;
 
 pub(super) async fn process_due_reminders(pool: &SqlitePool) -> CommandResult<()> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let rows = sqlx::query(
         r#"
         update reminders
@@ -44,11 +43,20 @@ pub(super) async fn process_due_reminders(pool: &SqlitePool) -> CommandResult<()
         returning id, channel_id, creator_agent_id, thread_root_id, title, note, recurrence, status, due_at
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *transaction)
     .await
     .map_err(to_string)?;
 
-    let fired_any = !rows.is_empty();
+    if !rows.is_empty() {
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::Refresh {
+                reason: "reminder_due",
+            },
+        )
+        .await?;
+    }
+    transaction.commit().await.map_err(to_string)?;
     for row in rows {
         let reminder_id: Uuid = row.get("id");
         let channel_id: Option<Uuid> = row.get("channel_id");
@@ -92,9 +100,6 @@ pub(super) async fn process_due_reminders(pool: &SqlitePool) -> CommandResult<()
                 }
             }
         }
-    }
-    if fired_any {
-        let _ = notify_ui_refresh(pool, "reminder_due").await;
     }
     Ok(())
 }

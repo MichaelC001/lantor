@@ -54,7 +54,7 @@ use crate::domain::reminders::complete_reminder_in_pool;
 use crate::launch_agent;
 use crate::lifecycle_commands::start_agent_in_pool;
 use crate::system_commands::check_runtime_in_env;
-use crate::ui_notifications::notify_ui_refresh;
+use crate::ui_notifications::{enqueue_ui_event_in_tx, notify_ui_refresh, UiEvent};
 use crate::{
     app::{to_string, CommandResult},
     cancel_agent_work_in_pool, claim_task_in_pool, retry_agent_work_in_pool,
@@ -572,12 +572,30 @@ async fn api_uninstall_supervisor_service(
     State(state): State<Arc<WebState>>,
 ) -> Result<impl IntoResponse, Response> {
     let status = launch_agent::uninstall_supervisor_service().map_err(api_error)?;
-    sqlx::query("update supervisor_state set status = 'offline', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') where id = 1")
-        .execute(&state.pool)
+    let mut transaction = state
+        .pool
+        .begin()
         .await
         .map_err(to_string)
         .map_err(api_error)?;
-    let _ = notify_ui_refresh(&state.pool, "supervisor_service_uninstalled").await;
+    sqlx::query("update supervisor_state set status = 'offline', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') where id = 1")
+        .execute(&mut *transaction)
+        .await
+        .map_err(to_string)
+        .map_err(api_error)?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "supervisor_service_uninstalled",
+        },
+    )
+    .await
+    .map_err(api_error)?;
+    transaction
+        .commit()
+        .await
+        .map_err(to_string)
+        .map_err(api_error)?;
     Ok(Json(status))
 }
 

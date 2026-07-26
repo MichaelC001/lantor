@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::app::{to_string, CommandResult};
 use crate::message_store::insert_agent_message;
-use crate::ui_notifications::notify_ui_refresh;
+use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_agent_task_thread(
@@ -33,6 +33,7 @@ pub(crate) async fn create_agent_task_thread(
         .unwrap_or(title);
     let root_message_id =
         insert_agent_message(pool, agent_id, channel_id, None, root_body, true).await?;
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let task_row = sqlx::query(
         r#"
         update tasks
@@ -50,9 +51,17 @@ pub(crate) async fn create_agent_task_thread(
     .bind(final_status)
     .bind(assign_self)
     .bind(agent_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "task_create",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     let task_number: i64 = task_row.get("number");
     let thread_reply_id = match thread_body.map(str::trim).filter(|body| !body.is_empty()) {
         Some(thread_body) => Some(
@@ -68,6 +77,5 @@ pub(crate) async fn create_agent_task_thread(
         ),
         None => None,
     };
-    let _ = notify_ui_refresh(pool, "task_create").await;
     Ok((task_number, root_message_id, thread_reply_id))
 }

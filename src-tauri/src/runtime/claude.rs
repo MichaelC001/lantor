@@ -28,7 +28,8 @@ use crate::runtime::{
     },
 };
 use crate::ui_notifications::{
-    notify_supervisor_wake, notify_ui_agent_run_changed, notify_ui_work_item_changed,
+    enqueue_ui_agent_run_changed_in_tx, enqueue_ui_work_item_changed_in_tx, notify_supervisor_wake,
+    reconcile_work_item_change,
 };
 use crate::usage::{record_run_usage, usage_from_runtime_event};
 
@@ -318,6 +319,7 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
         Ok(runtime) => runtime,
         Err(err) => {
             if let Some(work_item_id) = work_item_id {
+                let mut transaction = pool.begin().await.map_err(to_string)?;
                 sqlx::query(
                     r#"
                     update agent_work_items
@@ -328,10 +330,17 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
                     "#,
                 )
                 .bind(work_item_id)
-                .execute(pool)
+                .execute(&mut *transaction)
                 .await
                 .map_err(to_string)?;
-                notify_ui_work_item_changed(pool, work_item_id, "work_item_failed").await;
+                enqueue_ui_work_item_changed_in_tx(
+                    &mut transaction,
+                    work_item_id,
+                    "work_item_failed",
+                )
+                .await?;
+                transaction.commit().await.map_err(to_string)?;
+                reconcile_work_item_change(pool, work_item_id, "work_item_failed").await?;
             }
             return Err(err);
         }
@@ -413,6 +422,7 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
         )
     };
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let run_id: Uuid = sqlx::query_scalar(
         r#"
         insert into agent_runs (agent_id, work_item_id, command, working_directory, status, log)
@@ -425,10 +435,10 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
     .bind(&command_text)
     .bind(&working_directory)
     .bind(initial_log)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_ui_agent_run_changed(pool, run_id, "run_created").await;
+    enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_created").await?;
 
     if let Some(work_item_id) = work_item_id {
         sqlx::query(
@@ -442,10 +452,28 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
         )
         .bind(work_item_id)
         .bind(run_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-        notify_ui_work_item_changed(pool, work_item_id, "work_item_running").await;
+        enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_running")
+            .await?;
+    }
+
+    sqlx::query("update agent_runs set status = 'running', pid = $2 where id = $1")
+        .bind(run_id)
+        .bind(runtime.pid)
+        .execute(&mut *transaction)
+        .await
+        .map_err(to_string)?;
+    sqlx::query("update agents set status = 'running' where id = $1")
+        .bind(agent_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(to_string)?;
+    enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "run_running").await?;
+    transaction.commit().await.map_err(to_string)?;
+    if let Some(work_item_id) = work_item_id {
+        reconcile_work_item_change(pool, work_item_id, "work_item_running").await?;
         record_agent_activity(
             pool,
             Some(agent_id),
@@ -456,19 +484,6 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
         )
         .await?;
     }
-
-    sqlx::query("update agent_runs set status = 'running', pid = $2 where id = $1")
-        .bind(run_id)
-        .bind(runtime.pid)
-        .execute(pool)
-        .await
-        .map_err(to_string)?;
-    notify_ui_agent_run_changed(pool, run_id, "run_running").await;
-    sqlx::query("update agents set status = 'running' where id = $1")
-        .bind(agent_id)
-        .execute(pool)
-        .await
-        .map_err(to_string)?;
     record_agent_activity(
         pool,
         Some(agent_id),

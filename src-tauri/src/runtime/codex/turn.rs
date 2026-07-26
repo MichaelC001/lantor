@@ -16,7 +16,8 @@ use crate::runtime::{
     turn_outcome::resolve_warm_turn_outcome,
 };
 use crate::ui_notifications::{
-    notify_supervisor_wake, notify_ui_agent_run_changed, notify_ui_work_item_changed,
+    enqueue_ui_agent_run_changed_in_tx, enqueue_ui_work_item_changed_in_tx, notify_supervisor_wake,
+    reconcile_work_item_change,
 };
 use crate::{
     app::{to_string, CommandResult},
@@ -48,6 +49,7 @@ pub(super) async fn finish_codex_steer_request(
     } else {
         ("queued", "null", None)
     };
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(&format!(
         r#"
         update agent_work_items
@@ -61,10 +63,17 @@ pub(super) async fn finish_codex_steer_request(
     .bind(steer.work_item_id)
     .bind(status)
     .bind(run_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_ui_work_item_changed(pool, steer.work_item_id, "codex_turn_steer_result").await;
+    enqueue_ui_work_item_changed_in_tx(
+        &mut transaction,
+        steer.work_item_id,
+        "codex_turn_steer_result",
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
+    reconcile_work_item_change(pool, steer.work_item_id, "codex_turn_steer_result").await?;
     if success {
         advance_agent_target_watermark_for_work_item(pool, agent_id, steer.work_item_id, 0).await?;
     } else if cancelled {
@@ -223,6 +232,33 @@ pub(super) async fn finish_warm_codex_active_turn(
             let _ = terminate_process_group(pid).await;
         }
     }
+    let final_work_status = if let Some(work_item_id) = active.work_item_id {
+        let current_work_status: Option<String> =
+            sqlx::query_scalar("select status from agent_work_items where id = $1")
+                .bind(work_item_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(to_string)?;
+        let was_silent = current_work_status.as_deref() == Some("silent");
+        let was_held = current_work_status.as_deref() == Some("held");
+        Some((
+            work_item_id,
+            if was_cancelled {
+                "cancelled"
+            } else if was_silent && success {
+                "silent"
+            } else if was_held && success {
+                "held"
+            } else if success {
+                "done"
+            } else {
+                "failed"
+            },
+        ))
+    } else {
+        None
+    };
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update agent_runs
@@ -236,38 +272,20 @@ pub(super) async fn finish_warm_codex_active_turn(
     .bind(active.run_id)
     .bind(outcome.run_status)
     .bind(&log_line)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    notify_ui_agent_run_changed(pool, active.run_id, "codex_turn_finished").await;
 
     sqlx::query("update agents set status = $2 where id = $1")
         .bind(agent_id)
         .bind(outcome.agent_status)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+    enqueue_ui_agent_run_changed_in_tx(&mut transaction, active.run_id, "codex_turn_finished")
+        .await?;
 
-    if let Some(work_item_id) = active.work_item_id {
-        let current_work_status: Option<String> =
-            sqlx::query_scalar("select status from agent_work_items where id = $1")
-                .bind(work_item_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(to_string)?;
-        let was_silent = current_work_status.as_deref() == Some("silent");
-        let was_held = current_work_status.as_deref() == Some("held");
-        let work_status = if was_cancelled {
-            "cancelled"
-        } else if was_silent && success {
-            "silent"
-        } else if was_held && success {
-            "held"
-        } else if success {
-            "done"
-        } else {
-            "failed"
-        };
+    if let Some((work_item_id, work_status)) = final_work_status {
         sqlx::query(
             r#"
             update agent_work_items
@@ -279,9 +297,14 @@ pub(super) async fn finish_warm_codex_active_turn(
         )
         .bind(work_item_id)
         .bind(work_status)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+        enqueue_ui_work_item_changed_in_tx(&mut transaction, work_item_id, "work_item_finished")
+            .await?;
+    }
+    transaction.commit().await.map_err(to_string)?;
+    if let Some((work_item_id, work_status)) = final_work_status {
         mark_task_after_work_item_finished(
             pool,
             work_item_id,
@@ -290,7 +313,7 @@ pub(super) async fn finish_warm_codex_active_turn(
             work_status,
         )
         .await?;
-        notify_ui_work_item_changed(pool, work_item_id, "work_item_finished").await;
+        reconcile_work_item_change(pool, work_item_id, "work_item_finished").await?;
         record_agent_activity(
             pool,
             Some(agent_id),

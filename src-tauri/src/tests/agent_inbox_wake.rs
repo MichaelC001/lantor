@@ -8,7 +8,7 @@ use crate::message_store::send_owner_message_in_pool;
 use crate::models::AttachmentUpload;
 use crate::prompts::WORK_ITEM_FINISH_PROMPT;
 use crate::test_support::{drop_test_schema, insert_test_agent, insert_test_channel, test_pool};
-use crate::ui_notifications::notify_ui_work_item_changed;
+use crate::ui_notifications::reconcile_work_item_change;
 use chrono::Utc;
 use serde_json::json;
 use sqlx::Row;
@@ -384,7 +384,7 @@ async fn inbox_wake_creates_work_items_without_serializing_unread_items() {
             .execute(&pool)
             .await
             .map_err(|err| err.to_string())?;
-        notify_ui_work_item_changed(&pool, initial_work_items[0], "test_done").await;
+        reconcile_work_item_change(&pool, initial_work_items[0], "test_done").await?;
 
         let final_work_items: Vec<Uuid> = sqlx::query_scalar(
             "select id from agent_work_items where agent_id = $1 order by created_at asc",
@@ -538,7 +538,7 @@ async fn inbox_wake_batches_unread_items_for_same_thread() {
             .execute(&pool)
             .await
             .map_err(|err| err.to_string())?;
-        notify_ui_work_item_changed(&pool, work_item_id, "test_done").await;
+        reconcile_work_item_change(&pool, work_item_id, "test_done").await?;
         let archived: i64 = sqlx::query_scalar(
             r#"
             select count(*)
