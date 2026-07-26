@@ -1,7 +1,9 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use serde_json::{json, Value};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Executor, Row, Sqlite, SqlitePool, Transaction};
 use tauri::Emitter;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -9,36 +11,123 @@ use uuid::Uuid;
 use crate::agent_inbox_wake::sync_inbox_for_work_item;
 use crate::app::{to_string, CommandResult};
 use crate::message_store::load_message;
-use crate::models::{AgentActivity, AgentRunPatch, AgentWorkItemPatch, Artifact, Message};
+use crate::models::{
+    AgentActivity, AgentRunPatch, AgentWorkItemPatch, Artifact, ChannelMember, Message,
+};
 
-pub(crate) const UI_REFRESH_CHANNEL: &str = "lantor_ui_refresh";
-const SUPERVISOR_WAKE_CHANNEL: &str = "lantor_supervisor_wake";
 const UI_REFRESH_EVENT: &str = "lantor://refresh";
 
-pub(crate) async fn notify_database_event(
-    pool: &SqlitePool,
-    channel: &str,
-    payload: &str,
-) -> CommandResult<()> {
-    if channel != UI_REFRESH_CHANNEL {
-        return Ok(());
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum UiEvent<'a> {
+    Refresh {
+        reason: &'a str,
+    },
+    MessageUpsert {
+        reason: &'a str,
+        message: &'a Message,
+    },
+    MessageDelta {
+        reason: &'a str,
+        message_id: Uuid,
+        append: &'a str,
+        delivery_state: &'a str,
+    },
+    MessageDelete {
+        reason: &'a str,
+        message_id: Uuid,
+    },
+    ActivityUpsert {
+        reason: &'a str,
+        activity: &'a AgentActivity,
+    },
+    AgentRunUpsert {
+        reason: &'a str,
+        run: &'a AgentRunPatch,
+    },
+    WorkItemUpsert {
+        reason: &'a str,
+        work_item: &'a AgentWorkItemPatch,
+    },
+    ArtifactUpsert {
+        reason: &'a str,
+        artifact: UiArtifactPayload<'a>,
+    },
+    ChannelMemberUpsert {
+        reason: &'a str,
+        member: &'a ChannelMember,
+    },
+    ChannelMemberRemove {
+        reason: &'a str,
+        channel_id: Uuid,
+        agent_id: Uuid,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct UiArtifactPayload<'a> {
+    id: Uuid,
+    message_id: Uuid,
+    channel_id: Uuid,
+    thread_root_id: Option<Uuid>,
+    creator_agent_id: Option<Uuid>,
+    creator_agent_handle: Option<&'a str>,
+    kind: &'a str,
+    title: &'a str,
+    summary: &'a str,
+    content: &'static str,
+    metadata: &'a Value,
+    created_at: &'a DateTime<Utc>,
+    updated_at: &'a DateTime<Utc>,
+}
+
+impl<'a> From<&'a Artifact> for UiArtifactPayload<'a> {
+    fn from(artifact: &'a Artifact) -> Self {
+        Self {
+            id: artifact.id,
+            message_id: artifact.message_id,
+            channel_id: artifact.channel_id,
+            thread_root_id: artifact.thread_root_id,
+            creator_agent_id: artifact.creator_agent_id,
+            creator_agent_handle: artifact.creator_agent_handle.as_deref(),
+            kind: &artifact.kind,
+            title: &artifact.title,
+            summary: &artifact.summary,
+            content: "",
+            metadata: &artifact.metadata,
+            created_at: &artifact.created_at,
+            updated_at: &artifact.updated_at,
+        }
     }
+}
+
+async fn insert_ui_event<'e, E>(executor: E, event: &UiEvent<'_>) -> CommandResult<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let event_json = serde_json::to_string(event).map_err(to_string)?;
     sqlx::query("insert into ui_events (event_json) values ($1)")
-        .bind(payload)
-        .execute(pool)
+        .bind(event_json)
+        .execute(executor)
         .await
         .map_err(to_string)?;
 
     Ok(())
 }
 
+pub(crate) async fn enqueue_ui_event(pool: &SqlitePool, event: &UiEvent<'_>) -> CommandResult<()> {
+    insert_ui_event(pool, event).await
+}
+
+pub(crate) async fn enqueue_ui_event_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    event: &UiEvent<'_>,
+) -> CommandResult<()> {
+    insert_ui_event(&mut **transaction, event).await
+}
+
 pub(crate) async fn notify_ui_refresh(pool: &SqlitePool, reason: &str) -> CommandResult<()> {
-    notify_database_event(
-        pool,
-        UI_REFRESH_CHANNEL,
-        &json!({ "type": "refresh", "reason": reason }).to_string(),
-    )
-    .await
+    enqueue_ui_event(pool, &UiEvent::Refresh { reason }).await
 }
 
 pub(crate) async fn notify_ui_message_upsert(
@@ -46,12 +135,7 @@ pub(crate) async fn notify_ui_message_upsert(
     message: &Message,
     reason: &str,
 ) -> CommandResult<()> {
-    notify_database_event(
-        pool,
-        UI_REFRESH_CHANNEL,
-        &json!({ "type": "message_upsert", "reason": reason, "message": message }).to_string(),
-    )
-    .await
+    enqueue_ui_event(pool, &UiEvent::MessageUpsert { reason, message }).await
 }
 
 pub(crate) async fn notify_ui_message_delta(
@@ -61,17 +145,14 @@ pub(crate) async fn notify_ui_message_delta(
     delivery_state: &str,
     reason: &str,
 ) -> CommandResult<()> {
-    notify_database_event(
+    enqueue_ui_event(
         pool,
-        UI_REFRESH_CHANNEL,
-        &json!({
-            "type": "message_delta",
-            "reason": reason,
-            "message_id": message_id,
-            "append": append,
-            "delivery_state": delivery_state
-        })
-        .to_string(),
+        &UiEvent::MessageDelta {
+            reason,
+            message_id,
+            append,
+            delivery_state,
+        },
     )
     .await
 }
@@ -81,13 +162,7 @@ pub(crate) async fn notify_ui_message_delete(
     message_id: Uuid,
     reason: &str,
 ) -> CommandResult<()> {
-    notify_database_event(
-        pool,
-        UI_REFRESH_CHANNEL,
-        &json!({ "type": "message_delete", "reason": reason, "message_id": message_id })
-            .to_string(),
-    )
-    .await
+    enqueue_ui_event(pool, &UiEvent::MessageDelete { reason, message_id }).await
 }
 
 pub(crate) async fn notify_ui_activity_upsert(
@@ -95,12 +170,7 @@ pub(crate) async fn notify_ui_activity_upsert(
     activity: &AgentActivity,
     reason: &str,
 ) -> CommandResult<()> {
-    notify_database_event(
-        pool,
-        UI_REFRESH_CHANNEL,
-        &json!({ "type": "activity_upsert", "reason": reason, "activity": activity }).to_string(),
-    )
-    .await
+    enqueue_ui_event(pool, &UiEvent::ActivityUpsert { reason, activity }).await
 }
 
 pub(crate) async fn notify_ui_agent_run_upsert(
@@ -108,12 +178,7 @@ pub(crate) async fn notify_ui_agent_run_upsert(
     run: &AgentRunPatch,
     reason: &str,
 ) -> CommandResult<()> {
-    notify_database_event(
-        pool,
-        UI_REFRESH_CHANNEL,
-        &json!({ "type": "agent_run_upsert", "reason": reason, "run": run }).to_string(),
-    )
-    .await
+    enqueue_ui_event(pool, &UiEvent::AgentRunUpsert { reason, run }).await
 }
 
 pub(crate) async fn notify_ui_work_item_upsert(
@@ -121,13 +186,7 @@ pub(crate) async fn notify_ui_work_item_upsert(
     work_item: &AgentWorkItemPatch,
     reason: &str,
 ) -> CommandResult<()> {
-    notify_database_event(
-        pool,
-        UI_REFRESH_CHANNEL,
-        &json!({ "type": "work_item_upsert", "reason": reason, "work_item": work_item })
-            .to_string(),
-    )
-    .await
+    enqueue_ui_event(pool, &UiEvent::WorkItemUpsert { reason, work_item }).await
 }
 
 pub(crate) async fn notify_ui_artifact_upsert(
@@ -135,15 +194,12 @@ pub(crate) async fn notify_ui_artifact_upsert(
     artifact: &Artifact,
     reason: &str,
 ) -> CommandResult<()> {
-    let mut artifact_payload = serde_json::to_value(artifact).map_err(to_string)?;
-    if let Value::Object(ref mut fields) = artifact_payload {
-        fields.insert("content".to_owned(), Value::String(String::new()));
-    }
-    notify_database_event(
+    enqueue_ui_event(
         pool,
-        UI_REFRESH_CHANNEL,
-        &json!({ "type": "artifact_upsert", "reason": reason, "artifact": artifact_payload })
-            .to_string(),
+        &UiEvent::ArtifactUpsert {
+            reason,
+            artifact: artifact.into(),
+        },
     )
     .await
 }
@@ -181,37 +237,29 @@ pub(crate) async fn notify_ui_channel_member_change(
             // than apply a half-built patch.
             return notify_ui_refresh(pool, reason).await;
         };
-        let agent_handle: String = row.get("agent_handle");
-        let agent_display_name: String = row.get("agent_display_name");
-        let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
-        notify_database_event(
+        let member = ChannelMember {
+            channel_id,
+            agent_id,
+            agent_handle: row.get("agent_handle"),
+            agent_display_name: row.get("agent_display_name"),
+            created_at: row.get("created_at"),
+        };
+        enqueue_ui_event(
             pool,
-            UI_REFRESH_CHANNEL,
-            &json!({
-                "type": "channel_member_upsert",
-                "reason": reason,
-                "member": {
-                    "channel_id": channel_id,
-                    "agent_id": agent_id,
-                    "agent_handle": agent_handle,
-                    "agent_display_name": agent_display_name,
-                    "created_at": created_at,
-                }
-            })
-            .to_string(),
+            &UiEvent::ChannelMemberUpsert {
+                reason,
+                member: &member,
+            },
         )
         .await
     } else {
-        notify_database_event(
+        enqueue_ui_event(
             pool,
-            UI_REFRESH_CHANNEL,
-            &json!({
-                "type": "channel_member_remove",
-                "reason": reason,
-                "channel_id": channel_id,
-                "agent_id": agent_id,
-            })
-            .to_string(),
+            &UiEvent::ChannelMemberRemove {
+                reason,
+                channel_id,
+                agent_id,
+            },
         )
         .await
     }
@@ -384,8 +432,10 @@ async fn maybe_insert_work_item_system_message(
     Ok(())
 }
 
-pub(crate) async fn notify_supervisor_wake(pool: &SqlitePool) -> CommandResult<()> {
-    notify_database_event(pool, SUPERVISOR_WAKE_CHANNEL, "wake").await
+pub(crate) async fn notify_supervisor_wake(_pool: &SqlitePool) -> CommandResult<()> {
+    // SQLite has no cross-process NOTIFY primitive. The supervisor observes
+    // queued commands through its existing short poll interval.
+    Ok(())
 }
 
 pub(crate) fn spawn_ui_refresh_listener(app: tauri::AppHandle, pool: SqlitePool) {
@@ -624,7 +674,81 @@ mod tests {
     use crate::models::Artifact;
     use crate::test_support::{drop_test_schema, test_pool};
 
-    use super::notify_ui_artifact_upsert;
+    use super::{enqueue_ui_event_in_tx, notify_ui_artifact_upsert, UiEvent};
+
+    #[tokio::test]
+    async fn ui_event_outbox_commits_and_rolls_back_with_business_writes() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let mut transaction = pool.begin().await.map_err(|err| err.to_string())?;
+            sqlx::query("update owner_profile set description = 'rolled back' where id = 1")
+                .execute(&mut *transaction)
+                .await
+                .map_err(|err| err.to_string())?;
+            enqueue_ui_event_in_tx(
+                &mut transaction,
+                &UiEvent::Refresh {
+                    reason: "rolled_back",
+                },
+            )
+            .await?;
+            transaction
+                .rollback()
+                .await
+                .map_err(|err| err.to_string())?;
+
+            let description: String =
+                sqlx::query_scalar("select description from owner_profile where id = 1")
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            let event_count: i64 = sqlx::query_scalar("select count(*) from ui_events")
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            assert_eq!(description, "local owner");
+            assert_eq!(event_count, 0);
+
+            let mut transaction = pool.begin().await.map_err(|err| err.to_string())?;
+            sqlx::query("update owner_profile set description = 'committed' where id = 1")
+                .execute(&mut *transaction)
+                .await
+                .map_err(|err| err.to_string())?;
+            enqueue_ui_event_in_tx(
+                &mut transaction,
+                &UiEvent::Refresh {
+                    reason: "committed",
+                },
+            )
+            .await?;
+            transaction.commit().await.map_err(|err| err.to_string())?;
+
+            let description: String =
+                sqlx::query_scalar("select description from owner_profile where id = 1")
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            let event_json: String =
+                sqlx::query_scalar("select event_json from ui_events order by id desc limit 1")
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert_eq!(description, "committed");
+            assert_eq!(
+                serde_json::from_str::<Value>(&event_json).map_err(|err| err.to_string())?,
+                serde_json::json!({
+                    "type": "refresh",
+                    "reason": "committed",
+                }),
+            );
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
+    }
 
     #[tokio::test]
     async fn artifact_upsert_event_omits_artifact_content() {

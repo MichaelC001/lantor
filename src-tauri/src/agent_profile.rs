@@ -1,7 +1,7 @@
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use crate::ui_notifications::notify_ui_refresh;
+use crate::ui_notifications::{enqueue_ui_event_in_tx, notify_ui_refresh, UiEvent};
 use crate::{
     agent_environment::normalize_agent_environment_variables,
     agent_workspace::load_agent_workspace_summary,
@@ -28,6 +28,7 @@ pub(crate) async fn update_owner_profile_in_pool(
         return Err("display name is empty".to_owned());
     }
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         insert into owner_profile (id, display_name, avatar, description, updated_at)
@@ -42,11 +43,17 @@ pub(crate) async fn update_owner_profile_in_pool(
     .bind(display_name)
     .bind(avatar.trim())
     .bind(description.trim())
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-
-    let _ = notify_ui_refresh(pool, "owner_profile_updated").await;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "owner_profile_updated",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
