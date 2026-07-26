@@ -9,8 +9,8 @@ use crate::{
     launch_agent,
     models::LaunchAgentStatus,
     ui_notifications::{
-        enqueue_ui_agent_run_changed_in_tx, enqueue_ui_event_in_tx, notify_supervisor_wake,
-        notify_ui_refresh, UiEvent,
+        enqueue_ui_agent_run_changed_in_tx, enqueue_ui_event, enqueue_ui_event_in_tx,
+        notify_supervisor_wake, UiEvent,
     },
 };
 
@@ -194,7 +194,13 @@ pub(crate) async fn install_supervisor_service(
     state: State<'_, AppState>,
 ) -> CommandResult<LaunchAgentStatus> {
     let status = launch_agent::install_supervisor_service(state.db_url())?;
-    let _ = notify_ui_refresh(&state.pool, "supervisor_service_installed").await;
+    let _ = enqueue_ui_event(
+        &state.pool,
+        &UiEvent::Refresh {
+            reason: "supervisor_service_installed",
+        },
+    )
+    .await;
     Ok(status)
 }
 

@@ -126,10 +126,6 @@ pub(crate) async fn enqueue_ui_event_in_tx(
     insert_ui_event(&mut **transaction, event).await
 }
 
-pub(crate) async fn notify_ui_refresh(pool: &SqlitePool, reason: &str) -> CommandResult<()> {
-    enqueue_ui_event(pool, &UiEvent::Refresh { reason }).await
-}
-
 pub(crate) async fn enqueue_ui_agent_run_changed_in_tx(
     transaction: &mut Transaction<'_, Sqlite>,
     run_id: Uuid,

@@ -54,7 +54,7 @@ use crate::domain::reminders::complete_reminder_in_pool;
 use crate::launch_agent;
 use crate::lifecycle_commands::start_agent_in_pool;
 use crate::system_commands::check_runtime_in_env;
-use crate::ui_notifications::{enqueue_ui_event_in_tx, notify_ui_refresh, UiEvent};
+use crate::ui_notifications::{enqueue_ui_event, enqueue_ui_event_in_tx, UiEvent};
 use crate::{
     app::{to_string, CommandResult},
     cancel_agent_work_in_pool, claim_task_in_pool, retry_agent_work_in_pool,
@@ -564,7 +564,13 @@ async fn api_install_supervisor_service(
     State(state): State<Arc<WebState>>,
 ) -> Result<impl IntoResponse, Response> {
     let status = launch_agent::install_supervisor_service(&state.db_url).map_err(api_error)?;
-    let _ = notify_ui_refresh(&state.pool, "supervisor_service_installed").await;
+    let _ = enqueue_ui_event(
+        &state.pool,
+        &UiEvent::Refresh {
+            reason: "supervisor_service_installed",
+        },
+    )
+    .await;
     Ok(Json(status))
 }
 
