@@ -72,40 +72,7 @@ fn ensure_agent_workspace_creates_index_memory_template_and_notes_dir() {
 }
 
 #[test]
-fn streaming_prompt_replaces_stdout_finish_contract() {
-    let prompt = build_work_item_prompt(
-        Uuid::nil(),
-        "Review the change",
-        "Latest user message: please review",
-        Some("lantor"),
-        None,
-        Some(Uuid::nil()),
-        &[],
-        None,
-    );
-    assert!(prompt.contains("Treat messages as conversation"));
-    assert!(prompt.contains(WORK_ITEM_FINISH_PROMPT));
-
-    let streaming = build_codex_streaming_prompt(&prompt);
-    assert!(streaming.contains("will stream your Codex assistant text"));
-    assert!(streaming.contains("Reply briefly to direct greetings"));
-    assert!(streaming.contains("pure acknowledgement"));
-    assert!(streaming.contains("you may emit standalone LANTOR_EVENT control lines"));
-    assert!(streaming.contains("Activity progress: before your final reply"));
-    assert!(streaming.contains("activity is not only for reasoning"));
-    assert!(streaming.contains("what you are doing or what you just learned"));
-    assert!(streaming.contains("artifact_create"));
-    assert!(streaming.contains("attachment_create"));
-    assert!(streaming.contains("channel_message_create"));
-    assert!(streaming.contains("handoff_create"));
-    assert!(streaming.contains("task_handoff"));
-    assert!(streaming.contains("task_claim"));
-    assert!(streaming.contains("Do not narrate every intermediate step in chat"));
-    assert!(!streaming.contains(WORK_ITEM_FINISH_PROMPT));
-}
-
-#[test]
-fn streaming_work_item_prompt_omits_repeated_standing_context() {
+fn streaming_prompt_does_not_repeat_standing_contract() {
     let prompt = build_streaming_work_item_prompt(
         Uuid::nil(),
         "Review the change",
@@ -117,14 +84,55 @@ fn streaming_work_item_prompt_omits_repeated_standing_context() {
         None,
     );
 
-    assert!(prompt.contains("Standing instructions are already installed"));
-    assert!(prompt.contains("authoritative over older warm-runtime context"));
-    assert!(prompt.contains("Same-channel/thread follow-ups may be delivered"));
-    assert!(prompt.contains("Latest user message: please review"));
+    let streaming = build_codex_streaming_prompt(&prompt);
+    assert_eq!(streaming, prompt);
+    assert!(streaming.contains("Latest user message: please review"));
+    assert!(!streaming.contains("Treat messages as conversation"));
+    assert!(!streaming.contains("pure acknowledgement"));
+    assert!(!streaming.contains("Standalone LANTOR_EVENT control lines"));
+    assert!(!streaming.contains("Activity progress:"));
+    assert!(!streaming.contains(WORK_ITEM_FINISH_PROMPT));
+}
+
+#[test]
+fn standalone_prompt_keeps_standing_and_finish_contract() {
+    let prompt = build_work_item_prompt(
+        Uuid::nil(),
+        "Review the change",
+        "Latest user message: please review",
+        Some("lantor"),
+        None,
+        Some(Uuid::nil()),
+        &[],
+        None,
+    );
+
+    assert!(prompt.contains("Operating policy:"));
+    assert!(prompt.contains("Standalone LANTOR_EVENT control lines:"));
     assert!(prompt.contains(WORK_ITEM_FINISH_PROMPT));
+}
+
+#[test]
+fn streaming_work_item_prompt_omits_repeated_standing_context() {
+    let prompt = build_streaming_work_item_prompt(
+        Uuid::nil(),
+        "Review the change",
+        "Latest user message: please review",
+        Some("lantor"),
+        None,
+        Some(Uuid::nil()),
+        &["@peer".to_owned()],
+        None,
+    );
+
+    assert!(prompt.contains("channel_agents: @peer"));
+    assert!(prompt.contains("Latest user message: please review"));
+    assert!(!prompt.contains(WORK_ITEM_FINISH_PROMPT));
     assert!(!prompt.contains("Operating policy:"));
     assert!(!prompt.contains("Agent context tools:"));
     assert!(!prompt.contains("Standalone LANTOR_EVENT control lines:"));
+    assert!(!prompt.contains("Standing instructions are already installed"));
+    assert!(prompt.len() < 500);
 }
 
 #[test]

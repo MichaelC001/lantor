@@ -1,7 +1,6 @@
 use super::{
     build_steer_followup_prompt, create_agent_inbox_item, ensure_agent_inbox_wake_work_item,
     inbox_wake_context, inbox_wake_context_with_thread_context, AgentInboxItemInput, InboxWakeItem,
-    InboxWakeSummary,
 };
 use crate::channels::open_dm_with_agent_in_pool;
 use crate::context_tool::short_id;
@@ -16,52 +15,42 @@ use sqlx::Row;
 use uuid::Uuid;
 
 #[test]
-fn inbox_wake_context_includes_message_headers_and_other_active_summary() {
+fn inbox_wake_context_keeps_selected_message_without_unrelated_summary() {
     let channel_id = Uuid::new_v4();
     let thread_root_id = Uuid::new_v4();
     let source_message_id = Uuid::new_v4();
     let inbox_id = Uuid::new_v4();
-    let context = inbox_wake_context(
-        &[InboxWakeItem {
-            id: inbox_id,
-            channel_id: Some(channel_id),
-            channel_name: Some("support".to_owned()),
-            channel_kind: Some("channel".to_owned()),
-            thread_root_id: Some(thread_root_id),
-            source_message_id: Some(source_message_id),
-            task_id: None,
-            kind: "owner_thread_followup".to_owned(),
-            priority: 90,
-            title: "Handle follow-up".to_owned(),
-            body_preview: "please use the latest numbers\nand reply directly".to_owned(),
-            attachment_summary: String::new(),
-            message_seq: None,
-            message_created_at: Some(Utc::now()),
-            sender_name: Some("Dylan".to_owned()),
-            sender_role: Some("owner".to_owned()),
-        }],
-        &[InboxWakeSummary {
-            target: "dm:Hancock".to_owned(),
-            count: 2,
-        }],
-    );
+    let context = inbox_wake_context(&[InboxWakeItem {
+        id: inbox_id,
+        channel_id: Some(channel_id),
+        channel_name: Some("support".to_owned()),
+        channel_kind: Some("channel".to_owned()),
+        thread_root_id: Some(thread_root_id),
+        source_message_id: Some(source_message_id),
+        task_id: None,
+        kind: "owner_thread_followup".to_owned(),
+        priority: 90,
+        title: "Handle follow-up".to_owned(),
+        body_preview: "please use the latest numbers\nand reply directly".to_owned(),
+        attachment_summary: String::new(),
+        message_seq: None,
+        message_created_at: Some(Utc::now()),
+        sender_name: Some("Dylan".to_owned()),
+        sender_role: Some("owner".to_owned()),
+    }]);
 
     assert!(context.contains("[target=#support:"));
     assert!(context.contains(&format!("msg={}", short_id(source_message_id))));
     assert!(context.contains("type=owner"));
     assert!(context.contains("Dylan: please use the latest numbers and reply directly"));
-    assert!(context.contains("Warm-runtime guard"));
-    assert!(context.contains("mention in a thread with prior messages"));
-    assert!(context.contains("use the recent same-thread context or history-read"));
-    assert!(context.contains("source message is not self-contained"));
-    assert!(context.contains("existing-thread mentions"));
+    assert!(context.contains("call inbox-read only when"));
     assert!(context.contains(&format!("inbox_id: {inbox_id}")));
-    assert!(context.contains("Other active inbox targets:"));
-    assert!(context.contains("- dm:Hancock: 2 active"));
+    assert!(!context.contains("Other active inbox targets:"));
+    assert!(!context.contains("Warm-runtime guard"));
 }
 
 #[test]
-fn inbox_wake_context_includes_existing_thread_recovery_rule_and_recent_context() {
+fn inbox_wake_context_includes_recent_thread_context_without_repeating_policy() {
     let thread_root_id = Uuid::new_v4();
     let source_message_id = Uuid::new_v4();
     let context = inbox_wake_context_with_thread_context(
@@ -83,40 +72,34 @@ fn inbox_wake_context_includes_existing_thread_recovery_rule_and_recent_context(
             sender_name: Some("Dylan".to_owned()),
             sender_role: Some("owner".to_owned()),
         }],
-        &[],
         Some("[target=#support:abc msg=abc time=2026-01-01T00:00:00+00:00 type=agent delivery=error] Agent: partial work"),
     );
 
-    assert!(context.contains("Existing-thread context rule"));
-    assert!(context.contains("Treat the thread as task context first"));
     assert!(context.contains("Recent same-thread context"));
     assert!(context.contains("partial work"));
-    assert!(context.contains("interrupted/error agent reply"));
+    assert!(!context.contains("Existing-thread context rule"));
 }
 
 #[test]
 fn inbox_wake_context_tells_task_available_agents_to_claim_silently() {
-    let context = inbox_wake_context(
-        &[InboxWakeItem {
-            id: Uuid::new_v4(),
-            channel_id: Some(Uuid::new_v4()),
-            channel_name: Some("builders".to_owned()),
-            channel_kind: Some("channel".to_owned()),
-            thread_root_id: Some(Uuid::new_v4()),
-            source_message_id: Some(Uuid::new_v4()),
-            task_id: Some(Uuid::new_v4()),
-            kind: "task_available".to_owned(),
-            priority: 70,
-            title: "Implement queue behavior".to_owned(),
-            body_preview: "Implement queue behavior".to_owned(),
-            attachment_summary: String::new(),
-            message_seq: None,
-            message_created_at: Some(Utc::now()),
-            sender_name: Some("Dylan".to_owned()),
-            sender_role: Some("owner".to_owned()),
-        }],
-        &[],
-    );
+    let context = inbox_wake_context(&[InboxWakeItem {
+        id: Uuid::new_v4(),
+        channel_id: Some(Uuid::new_v4()),
+        channel_name: Some("builders".to_owned()),
+        channel_kind: Some("channel".to_owned()),
+        thread_root_id: Some(Uuid::new_v4()),
+        source_message_id: Some(Uuid::new_v4()),
+        task_id: Some(Uuid::new_v4()),
+        kind: "task_available".to_owned(),
+        priority: 70,
+        title: "Implement queue behavior".to_owned(),
+        body_preview: "Implement queue behavior".to_owned(),
+        attachment_summary: String::new(),
+        message_seq: None,
+        message_created_at: Some(Utc::now()),
+        sender_name: Some("Dylan".to_owned()),
+        sender_role: Some("owner".to_owned()),
+    }]);
 
     assert!(context.contains("Task claim opportunity mode:"));
     assert!(context.contains("competitive, unassigned task opportunity"));
@@ -154,14 +137,13 @@ fn steer_followup_prompt_uses_compact_inbox_headers() {
 
     assert!(prompt.contains("Same-channel/thread live inbox follow-up."));
     assert!(prompt.contains("Default reply target for normal assistant text: #support:"));
-    assert!(prompt.contains("existing-thread mention"));
-    assert!(prompt.contains("interrupted/error reply"));
+    assert!(prompt.contains("newest input for the active turn"));
     assert!(prompt.contains(&format!("msg={}", short_id(source_message_id))));
     assert!(prompt.contains("attachments:"));
     assert!(prompt.contains("attachment_id=00000000-0000-0000-0000-000000000001"));
     assert!(prompt.contains("attachment-info"));
     assert!(prompt.contains(&format!("inbox_id: {inbox_id}")));
-    assert!(prompt.contains("archived automatically"));
+    assert!(!prompt.contains("archived automatically"));
     assert!(!prompt.contains("inbox-archive --inbox-id <id>"));
     assert!(!prompt.contains("Current Lantor inbox processing turn:"));
     assert!(!prompt.contains("title: Handle follow-up"));
@@ -274,7 +256,7 @@ async fn inbox_wake_injects_recent_thread_context_for_existing_thread_mention() 
         .await
         .map_err(|err| err.to_string())?;
 
-        assert!(context.contains("Existing-thread context rule"));
+        assert!(!context.contains("Existing-thread context rule"));
         assert!(context.contains("Recent same-thread context"));
         assert!(context.contains("please debug the network failure"));
         assert!(context.contains(&attachment_id.to_string()));

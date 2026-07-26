@@ -913,7 +913,7 @@ async fn load_channel_agent_roster(
     };
     let rows = sqlx::query(
         r#"
-        select a.handle, a.display_name, a.runtime, a.model, a.status
+        select a.handle
         from channels c
         join channel_members cm on cm.channel_id = c.id
         join agents a on a.id = cm.agent_id
@@ -933,11 +933,7 @@ async fn load_channel_agent_roster(
         .into_iter()
         .map(|row| {
             let handle: String = row.get("handle");
-            let display_name: String = row.get("display_name");
-            let runtime: String = row.get("runtime");
-            let model: String = row.get("model");
-            let status: String = row.get("status");
-            format!("@{handle} - {display_name} - {runtime}/{model} - {status}")
+            format!("@{handle}")
         })
         .collect())
 }
@@ -1143,9 +1139,7 @@ mod tests {
             .map_err(|err| err.to_string())?;
 
             let roster = load_channel_agent_roster(&pool, Some(channel_id), current_id).await?;
-            assert_eq!(roster.len(), 1);
-            assert!(roster[0].contains("@peer"));
-            assert!(!roster[0].contains("@current"));
+            assert_eq!(roster, vec!["@peer"]);
             Ok(())
         }
         .await;

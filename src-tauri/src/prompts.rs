@@ -82,10 +82,6 @@ fn lantor_live_delivery_prompt() -> &'static str {
 - If a live follow-up changes priority or direction, adapt to the latest request; if it says to stop or ignore a topic, stop that work and state only any uncommitted local changes that now need confirmation or discard. Otherwise finish the current selected work and then handle any remaining active inbox items."#
 }
 
-fn streaming_activity_guidance_prompt() -> &'static str {
-    "Activity progress: before your final reply, keep users informed with standalone LANTOR_EVENT activity lines whenever you start a meaningful step, switch work modes, or learn something useful. Use the matching kind (`thinking`, `command`, `file_edit`, `tools`, or `acting`) and a concrete user-facing title/detail; activity is not only for reasoning and should not be limited to generic `Thinking`, `Running`, or phase labels."
-}
-
 fn lantor_control_api_prompt() -> &'static str {
     r#"Standalone LANTOR_EVENT control lines:
 LANTOR_EVENT {"type":"activity","kind":"thinking|command|file_edit|tools|acting","title":"<short user-facing status>","detail":"<optional compact detail>"}
@@ -108,12 +104,6 @@ LANTOR_EVENT {"type":"channel_invite","channel":"existing-channel","agent_handle
 For activity events, write title/detail as user-facing progress, for example: title='Reading the stream parser', detail='I am checking where control lines become inline progress before changing the prompt contract.'
 For profile_update avatar, you may use emoji/initials, an image URL, or a DiceBear spec like `dicebear:dylan:Hancock`. Choose a stable seed from your handle or memory. Generated DiceBear profile avatars should use the dylan style.
 Use task_create only for durable globally tracked work. Use task_claim only when you received an unassigned task opportunity and can start it now; for those competitive claim opportunities, emit the hidden task_claim control line first and avoid visible replies/activity until Lantor sends you the follow-up task_assigned turn. Lantor accepts at most one claimant atomically and ignores stale claims without chat noise. Use task_handoff when you are the current task assignee and need to transfer an active task to another agent with a reason; omit task_number only when the current turn is tied to the task. Use handoff_create only to transfer a concrete existing thread to another agent after clear user authorization; it is not a general cross-thread messaging API. Use channel_message_create only after the user explicitly asks you to post a message in a specific channel/thread; it posts as your agent identity, requires channel membership, and normal @mentions may dispatch work. Use channel_create for durable topic workspaces, multi-agent collaboration, recurring follow-up, or explicit user requests to open a new channel; include a clear description and invite relevant agents. Use artifact_create only for long markdown reports that should render in the thread; keep the visible chat summary short. Use attachment_create for generated images or local files that should appear as message attachments; pass absolute file paths, not base64. Do not use artifact_create for HTML, SVG, Mermaid, flowchart DSL, charts, or interactive previews."#
-}
-
-fn streaming_reply_contract_prompt(runtime_name: &str) -> String {
-    format!(
-        "Reply normally only when a visible response is useful. Lantor will stream your {runtime_name} assistant text into the current channel/thread automatically. Normal visible replies may use GitHub-flavored markdown, including lists, code blocks, links, and tables; wide markdown tables render as horizontally scrollable content. Use markdown artifacts for long reports that should render as a separate thread card, and keep the visible chat summary short. Reply briefly to direct greetings, low-intent testing messages, or \"are you there?\" checks so the user can tell you are alive. If the latest user message is only a pure acknowledgement, thanks, emoji-only message, non-actionable chatter, or a competitive task_claim attempt that should wait for a task_assigned turn, output exactly `LANTOR_SILENT_REPLY: <short reason>` and nothing else. Keep visible thread messages high-density: final results, decisions, blockers, user questions, and handoffs only. Do not narrate every intermediate step in chat. In warm streaming mode you may emit standalone LANTOR_EVENT control lines for activity, reminders, memory, profile, channel, artifact_create, attachment_create, channel_message_create, handoff_create, task_handoff, task_claim, usage, durable task_create, or task_status; Lantor consumes and hides those lines. Treat task_claim as a request to atomically claim an unassigned task only when you can start it now; emit it before any visible reply/activity and wait for the follow-up task_assigned turn before doing the task visibly. If another agent wins, Lantor ignores your stale claim. Treat channel_message_create as a user-authorized way to post a normal agent message into a specific channel/thread, not as a background notification API. Treat task_handoff as the controlled way for the current assignee to transfer an active task to another agent with a reason. Treat handoff_create as a constrained transfer of one existing thread to another agent after clear user authorization, not a general message API. Treat channel_create as a normal tool for durable topics, multi-agent collaboration, recurring follow-up, or explicit user requests to open a new channel."
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -143,20 +133,14 @@ fn build_work_item_prompt_inner(
         lines.push(format!("thread_root_id: {thread_root_id}"));
     }
     if !available_agents.is_empty() {
-        lines.push("available_agents_in_channel:".to_owned());
-        for agent in available_agents {
-            lines.push(format!("- {agent}"));
-        }
-        lines.push(
-            "If you need input from another agent, mention their @handle in your visible reply. Lantor will dispatch them in this same thread. Use this sparingly, and never mention yourself for delegation."
-            .to_owned(),
-        );
+        lines.push(format!(
+            "channel_agents: {} (mention one only when its input is needed)",
+            available_agents.join(", ")
+        ));
     }
     if include_standing_context {
         lines.push(lantor_operating_policy_prompt().to_owned());
         lines.push(lantor_memory_management_prompt().to_owned());
-    } else {
-        lines.push("Standing instructions are already installed for this warm runtime. Handle the current request directly, but treat the inbox message and its thread as authoritative over older warm-runtime context. Same-channel/thread follow-ups may be delivered into this active turn; treat them as newer input for this live conversation. If the latest owner message explicitly mentions another agent and does not mention you, do not perform the requested work; treat it as assigned to the mentioned agent and reply silently unless directly asked to acknowledge. Use Lantor context tools only when needed, archive handled inbox items, and keep visible replies concise.".to_owned());
     }
     if let Some(agent_profile_hint) = agent_profile_hint {
         let agent_profile_hint = agent_profile_hint.trim();
@@ -172,8 +156,8 @@ fn build_work_item_prompt_inner(
     if include_standing_context {
         lines.push(lantor_context_tools_prompt().to_owned());
         lines.push(lantor_control_api_prompt().to_owned());
+        lines.push(WORK_ITEM_FINISH_PROMPT.to_owned());
     }
-    lines.push(WORK_ITEM_FINISH_PROMPT.to_owned());
     lines.join("\n")
 }
 
@@ -327,11 +311,7 @@ pub(crate) fn build_codex_streaming_prompt(prompt: &str) -> String {
         return "No current Lantor agent request is assigned. Reply with a short ready status."
             .to_owned();
     }
-    let prompt = prompt.replace(
-        WORK_ITEM_FINISH_PROMPT,
-        &streaming_reply_contract_prompt("Codex"),
-    );
-    format!("{prompt}\n\n{}", streaming_activity_guidance_prompt())
+    prompt.to_owned()
 }
 
 pub(crate) fn build_claude_streaming_prompt(prompt: &str) -> String {
@@ -339,11 +319,7 @@ pub(crate) fn build_claude_streaming_prompt(prompt: &str) -> String {
         return "No current Lantor agent request is assigned. Reply with a short ready status."
             .to_owned();
     }
-    let prompt = prompt.replace(
-        WORK_ITEM_FINISH_PROMPT,
-        &streaming_reply_contract_prompt("Claude"),
-    );
-    format!("{prompt}\n\n{}", streaming_activity_guidance_prompt())
+    prompt.to_owned()
 }
 
 pub(crate) fn codex_developer_instructions(handle: &str, memory_context: Option<&str>) -> String {
