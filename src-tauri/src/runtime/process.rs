@@ -29,6 +29,7 @@ use crate::{
 };
 
 const LANTOR_CONTEXT_TOOL_ENV: &str = "LANTOR_CONTEXT_TOOL";
+const WORK_ITEM_PROMPT_ENV_LIMIT: usize = 128 * 1024;
 
 pub(crate) struct ProcessAgentLaunch {
     pub(crate) agent_id: Uuid,
@@ -617,7 +618,34 @@ pub(crate) async fn start_process_agent(
         .map(|id| id.to_string())
         .unwrap_or_else(String::new);
     command.env("LANTOR_WORK_ITEM_ID", work_item_id_value);
-    command.env("LANTOR_WORK_ITEM_PROMPT", &work_item_prompt);
+    // Oversized env vars make spawn fail with E2BIG (macOS arg+env budget is
+    // ~1MB); hand large prompts over via a file and keep a truncated preview
+    // in the env var so simple launch commands keep working.
+    if work_item_prompt.len() > WORK_ITEM_PROMPT_ENV_LIMIT {
+        let prompt_path = env::temp_dir().join(format!("lantor-work-item-prompt-{run_id}.txt"));
+        match tokio::fs::write(&prompt_path, &work_item_prompt).await {
+            Ok(()) => {
+                let mut cut = WORK_ITEM_PROMPT_ENV_LIMIT;
+                while !work_item_prompt.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                command.env("LANTOR_WORK_ITEM_PROMPT_FILE", &prompt_path);
+                command.env(
+                    "LANTOR_WORK_ITEM_PROMPT",
+                    format!(
+                        "{}\n\n[prompt truncated: full text in the file at $LANTOR_WORK_ITEM_PROMPT_FILE]",
+                        &work_item_prompt[..cut]
+                    ),
+                );
+            }
+            Err(_) => {
+                // Best effort: fall back to the env var (same behavior as before).
+                command.env("LANTOR_WORK_ITEM_PROMPT", &work_item_prompt);
+            }
+        }
+    } else {
+        command.env("LANTOR_WORK_ITEM_PROMPT", &work_item_prompt);
+    }
     #[cfg(unix)]
     command.process_group(0);
     if !working_directory.is_empty() {
