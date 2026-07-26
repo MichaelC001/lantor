@@ -12,7 +12,40 @@ use crate::events::activity::record_agent_activity;
 use crate::message_store::insert_agent_handoff_message;
 use crate::ui_notifications::insert_system_message;
 
+/// Blank out fenced code blocks and inline code spans so `@handle` text inside
+/// code never dispatches real work. Replaces code content with spaces to keep
+/// the scan simple.
+fn scrub_code_spans(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut in_fence = false;
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            out.push('\n');
+            continue;
+        }
+        if in_fence {
+            out.push('\n');
+            continue;
+        }
+        let mut in_code = false;
+        for ch in line.chars() {
+            if ch == '`' {
+                in_code = !in_code;
+                out.push(' ');
+            } else if in_code {
+                out.push(' ');
+            } else {
+                out.push(ch);
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn extract_agent_mentions(body: &str) -> Vec<String> {
+    let body = &scrub_code_spans(body);
     let mut handles: Vec<String> = Vec::new();
     let mut chars = body.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {

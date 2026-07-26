@@ -27,6 +27,20 @@ fn ignores_empty_or_email_like_at_signs() {
     assert!(mentions.is_empty());
 }
 
+#[test]
+fn ignores_mentions_inside_code_blocks_and_inline_code() {
+    let mentions = extract_agent_mentions(
+        "```\n@fenced should not dispatch\n```\nuse `@inline` here, but ping @Hancock for real",
+    );
+    assert_eq!(mentions, vec!["Hancock"]);
+}
+
+#[test]
+fn unclosed_fence_suppresses_rest_of_message() {
+    let mentions = extract_agent_mentions("before @Speed\n```rust\nlet x = \"@Hancock\";");
+    assert_eq!(mentions, vec!["Speed"]);
+}
+
 #[tokio::test]
 async fn dm_rejects_tasks_and_auto_dispatches_owner_messages() {
     let Some((pool, schema)) = test_pool().await else {
