@@ -28,7 +28,15 @@ pub(super) async fn finish_warm_claude_active_turn(
     let (active, session_id) = {
         let mut state = runtime.state.lock().await;
         state.last_activity = Instant::now();
-        let active = state.active.take();
+        let mut active = state.active.take();
+        if success {
+            if let Some(next_memory_context) = active
+                .as_mut()
+                .and_then(|active| active.pending_memory_context.take())
+            {
+                state.injected_memory_context = next_memory_context;
+            }
+        }
         if let Some(active) = active.as_ref() {
             state.last_surface = Some(ClaudeSurface {
                 channel_id: active.channel_id,

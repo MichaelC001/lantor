@@ -18,14 +18,17 @@ use crate::agent_environment::apply_agent_environment_variables;
 use crate::agent_memory::append_run_log;
 use crate::events::activity::{record_agent_activity, record_agent_activity_throttled};
 use crate::freshness::advance_agent_target_watermark_for_work_item;
-use crate::prompts::{build_codex_streaming_prompt, codex_developer_instructions};
+use crate::prompts::{
+    build_codex_streaming_prompt, codex_developer_instructions, prepend_memory_context,
+};
 use crate::runtime::{
+    memory_context_update,
     process::{
         classify_agent_output_activity, cleanup_failed_warm_start,
         configure_agent_context_tool_env, configure_agent_identity_env, load_runtime_thread_id,
         terminate_process_group, upsert_runtime_thread_id,
     },
-    runtime_launch_context_changed,
+    runtime_environment_changed,
     streaming::{
         adopt_streaming_agent_message_key, append_streaming_agent_message_deferred_completion,
         delete_streaming_agent_message_by_key, ensure_streaming_agent_message,
@@ -73,7 +76,6 @@ struct WarmCodexRuntime {
     thread_id: String,
     pid: Option<i32>,
     environment_variables: String,
-    memory_context: Option<String>,
 }
 
 struct WarmCodexState {
@@ -81,6 +83,7 @@ struct WarmCodexState {
     active: Option<CodexActiveTurn>,
     next_request_id: i64,
     pending_rotation_marker: Option<String>,
+    injected_memory_context: Option<String>,
     last_activity: Instant,
 }
 
@@ -101,6 +104,7 @@ struct CodexActiveTurn {
     stream_keys: HashSet<String>,
     completed_agent_message_stream_keys: HashSet<String>,
     latest_agent_message_stream_key: Option<String>,
+    pending_memory_context: Option<Option<String>>,
     steer_requests: HashMap<i64, CodexSteerRequest>,
     steer_disabled: bool,
     interrupt_request_id: Option<i64>,
@@ -226,7 +230,6 @@ async fn get_or_spawn_warm_codex_runtime(
     service_tier: &str,
     working_directory: &str,
     environment_variables: &str,
-    memory_context: Option<&str>,
 ) -> CommandResult<Arc<WarmCodexRuntime>> {
     let context_rotate_threshold = codex_context_rotate_input_tokens();
     let rotation_candidate =
@@ -236,14 +239,10 @@ async fn get_or_spawn_warm_codex_runtime(
         runtimes.get(&agent_id).cloned()
     } {
         let mut state = runtime.state.lock().await;
-        let launch_context_changed = runtime_launch_context_changed(
-            &runtime.environment_variables,
-            runtime.memory_context.as_deref(),
-            environment_variables,
-            memory_context,
-        );
+        let environment_changed =
+            runtime_environment_changed(&runtime.environment_variables, environment_variables);
         if state.alive
-            && (rotation_candidate.is_some() || launch_context_changed)
+            && (rotation_candidate.is_some() || environment_changed)
             && state.active.is_none()
         {
             state.alive = false;
@@ -270,7 +269,6 @@ async fn get_or_spawn_warm_codex_runtime(
         service_tier,
         working_directory,
         environment_variables,
-        memory_context,
         context_rotate_threshold,
     )
     .await?;
@@ -292,7 +290,6 @@ async fn spawn_warm_codex_runtime(
     service_tier: &str,
     working_directory: &str,
     environment_variables: &str,
-    memory_context: Option<&str>,
     context_rotate_threshold: i64,
 ) -> CommandResult<Arc<WarmCodexRuntime>> {
     let cwd = effective_codex_cwd(working_directory)?;
@@ -339,7 +336,7 @@ async fn spawn_warm_codex_runtime(
     };
     let stderr = child.stderr.take();
     let mut reader = BufReader::new(stdout);
-    let developer_instructions = codex_developer_instructions(handle, memory_context);
+    let developer_instructions = codex_developer_instructions(handle);
     let model_value = codex_model_value(model);
     let mut next_request_id = 1_i64;
     let initialize_id = next_request_id;
@@ -515,15 +512,12 @@ async fn spawn_warm_codex_runtime(
             active: None,
             next_request_id,
             pending_rotation_marker: rotation_marker,
+            injected_memory_context: None,
             last_activity: Instant::now(),
         }),
         thread_id,
         pid,
         environment_variables: environment_variables.to_owned(),
-        memory_context: memory_context
-            .map(str::trim)
-            .filter(|context| !context.is_empty())
-            .map(str::to_owned),
     });
 
     tokio::spawn(codex_warm_stdout_reader(
@@ -857,7 +851,6 @@ pub(crate) async fn supervisor_start_codex_streaming_agent(
         &service_tier,
         &working_directory,
         &environment_variables,
-        memory_context.as_deref(),
     )
     .await?;
 
@@ -896,12 +889,24 @@ pub(crate) async fn supervisor_start_codex_streaming_agent(
         }
     }
 
-    let codex_prompt = {
+    let (codex_prompt, memory_update) = {
         let mut state = runtime.state.lock().await;
-        match state.pending_rotation_marker.take() {
+        let prompt = match state.pending_rotation_marker.take() {
             Some(marker) => prepend_codex_rotation_marker(&codex_prompt, &marker),
             None => codex_prompt,
-        }
+        };
+        let memory_update = memory_context_update(
+            state.injected_memory_context.as_deref(),
+            memory_context.as_deref(),
+        );
+        (prompt, memory_update)
+    };
+    let (codex_turn_prompt, next_injected_memory_context) = match memory_update {
+        Some((memory_prompt, next_memory_context)) => (
+            prepend_memory_context(codex_prompt.clone(), Some(&memory_prompt)),
+            Some(next_memory_context),
+        ),
+        None => (codex_prompt.clone(), None),
     };
 
     let initial_log = if codex_prompt.is_empty() {
@@ -1052,6 +1057,7 @@ pub(crate) async fn supervisor_start_codex_streaming_agent(
                 stream_keys,
                 completed_agent_message_stream_keys: HashSet::new(),
                 latest_agent_message_stream_key: None,
+                pending_memory_context: next_injected_memory_context,
                 steer_requests: HashMap::new(),
                 steer_disabled: false,
                 interrupt_request_id: None,
@@ -1080,7 +1086,7 @@ pub(crate) async fn supervisor_start_codex_streaming_agent(
             "threadId": runtime.thread_id.clone(),
             "input": [{
                 "type": "text",
-                "text": codex_prompt,
+                "text": codex_turn_prompt,
                 "text_elements": []
             }],
             "cwd": cwd,
@@ -1644,18 +1650,19 @@ mod tests {
                     stream_keys: HashSet::from([stream_key]),
                     completed_agent_message_stream_keys: HashSet::new(),
                     latest_agent_message_stream_key: None,
+                    pending_memory_context: None,
                     steer_requests: HashMap::new(),
                     steer_disabled: false,
                     interrupt_request_id: None,
                 }),
                 next_request_id: 2,
                 pending_rotation_marker: None,
+                injected_memory_context: None,
                 last_activity: Instant::now(),
             }),
             thread_id: "test-codex-thread".to_owned(),
             pid: None,
             environment_variables: String::new(),
-            memory_context: None,
         }))
     }
 
@@ -1675,12 +1682,12 @@ mod tests {
                 active: None,
                 next_request_id: 1,
                 pending_rotation_marker: None,
+                injected_memory_context: None,
                 last_activity: Instant::now(),
             }),
             thread_id: "test-codex-thread".to_owned(),
             pid: child.id().map(|id| id as i32),
             environment_variables: String::new(),
-            memory_context: None,
         });
         let pool =
             sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("create lazy sqlite pool");
@@ -1961,6 +1968,7 @@ mod tests {
             stream_keys: HashSet::from([pending_stream_key]),
             completed_agent_message_stream_keys: HashSet::new(),
             latest_agent_message_stream_key: None,
+            pending_memory_context: None,
             steer_requests: HashMap::new(),
             steer_disabled: false,
             interrupt_request_id: None,

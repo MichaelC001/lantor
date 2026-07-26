@@ -110,7 +110,16 @@ pub(super) async fn finish_warm_codex_active_turn(
     let active = {
         let mut state = runtime.state.lock().await;
         state.last_activity = std::time::Instant::now();
-        state.active.take()
+        let mut active = state.active.take();
+        if success {
+            if let Some(next_memory_context) = active
+                .as_mut()
+                .and_then(|active| active.pending_memory_context.take())
+            {
+                state.injected_memory_context = next_memory_context;
+            }
+        }
+        active
     };
     let Some(active) = active else {
         return Ok(());

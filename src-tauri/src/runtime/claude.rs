@@ -14,14 +14,15 @@ use crate::agent_memory::append_run_log;
 use crate::app::{to_string, CommandResult};
 use crate::events::activity::{record_agent_activity, record_agent_activity_throttled};
 use crate::freshness::advance_agent_target_watermark_for_work_item;
-use crate::prompts::{build_claude_streaming_prompt, claude_system_prompt};
+use crate::prompts::{build_claude_streaming_prompt, claude_system_prompt, prepend_memory_context};
 use crate::runtime::{
+    memory_context_update,
     process::{
         classify_agent_output_activity, cleanup_failed_warm_start,
         configure_agent_context_tool_env, configure_agent_identity_env, terminate_process_group,
         upsert_runtime_thread_id,
     },
-    runtime_launch_context_changed,
+    runtime_environment_changed,
     streaming::{
         append_streaming_agent_message, ensure_streaming_agent_message, streaming_message_exists,
     },
@@ -57,7 +58,6 @@ struct WarmClaudeRuntime {
     state: AsyncMutex<WarmClaudeState>,
     pid: Option<i32>,
     environment_variables: String,
-    memory_context: Option<String>,
 }
 
 struct WarmClaudeState {
@@ -65,6 +65,7 @@ struct WarmClaudeState {
     active: Option<ClaudeActiveTurn>,
     session_id: Option<String>,
     last_surface: Option<ClaudeSurface>,
+    injected_memory_context: Option<String>,
     last_activity: Instant,
 }
 
@@ -76,6 +77,7 @@ struct ClaudeActiveTurn {
     channel_id: Option<Uuid>,
     thread_root_id: Option<Uuid>,
     stream_key: String,
+    pending_memory_context: Option<Option<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,7 +93,6 @@ struct ClaudeRuntimeConfig<'a> {
     reasoning_effort: &'a str,
     working_directory: &'a str,
     environment_variables: &'a str,
-    memory_context: Option<&'a str>,
 }
 
 async fn get_or_spawn_warm_claude_runtime(
@@ -105,13 +106,11 @@ async fn get_or_spawn_warm_claude_runtime(
         runtimes.get(&agent_id).cloned()
     } {
         let mut state = runtime.state.lock().await;
-        let launch_context_changed = runtime_launch_context_changed(
+        let environment_changed = runtime_environment_changed(
             &runtime.environment_variables,
-            runtime.memory_context.as_deref(),
             config.environment_variables,
-            config.memory_context,
         );
-        if state.alive && launch_context_changed && state.active.is_none() {
+        if state.alive && environment_changed && state.active.is_none() {
             state.alive = false;
             drop(state);
             if let Some(pid) = runtime.pid {
@@ -151,7 +150,7 @@ async fn spawn_warm_claude_runtime(
     let mut command = Command::new("claude");
     command
         .arg("--system-prompt")
-        .arg(claude_system_prompt(config.handle, config.memory_context))
+        .arg(claude_system_prompt(config.handle))
         .arg("--model")
         .arg(&model);
     if !effort.is_empty() {
@@ -221,15 +220,11 @@ async fn spawn_warm_claude_runtime(
             active: None,
             session_id: None,
             last_surface: None,
+            injected_memory_context: None,
             last_activity: Instant::now(),
         }),
         pid,
         environment_variables: config.environment_variables.to_owned(),
-        memory_context: config
-            .memory_context
-            .map(str::trim)
-            .filter(|context| !context.is_empty())
-            .map(str::to_owned),
     });
 
     upsert_runtime_thread_id(
@@ -316,7 +311,6 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
             reasoning_effort: &effort,
             working_directory: &working_directory,
             environment_variables: &environment_variables,
-            memory_context: memory_context.as_deref(),
         },
     )
     .await
@@ -388,14 +382,27 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
         channel_id,
         thread_root_id,
     };
-    let surface_boundary = {
+    let (surface_boundary, memory_update) = {
         let state = runtime.state.lock().await;
-        claude_surface_boundary_marker(state.last_surface, current_surface).unwrap_or_default()
+        (
+            claude_surface_boundary_marker(state.last_surface, current_surface).unwrap_or_default(),
+            memory_context_update(
+                state.injected_memory_context.as_deref(),
+                memory_context.as_deref(),
+            ),
+        )
     };
     let claude_prompt = if surface_boundary.is_empty() {
         claude_prompt
     } else {
         format!("{surface_boundary}{claude_prompt}")
+    };
+    let (claude_turn_prompt, next_injected_memory_context) = match memory_update {
+        Some((memory_prompt, next_memory_context)) => (
+            prepend_memory_context(claude_prompt.clone(), Some(&memory_prompt)),
+            Some(next_memory_context),
+        ),
+        None => (claude_prompt.clone(), None),
     };
 
     let initial_log = if claude_prompt.is_empty() {
@@ -503,6 +510,7 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
                 channel_id,
                 thread_root_id,
                 stream_key,
+                pending_memory_context: next_injected_memory_context,
             });
             Ok(())
         }
@@ -523,7 +531,7 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
 
     let write_result = {
         let mut stdin = runtime.stdin.lock().await;
-        claude_write_input(&mut stdin, claude_user_input(&claude_prompt)).await
+        claude_write_input(&mut stdin, claude_user_input(&claude_turn_prompt)).await
     };
 
     if let Err(err) = write_result {
@@ -878,14 +886,15 @@ mod tests {
                     channel_id: Some(channel_id),
                     thread_root_id: None,
                     stream_key,
+                    pending_memory_context: None,
                 }),
                 session_id: Some("test-claude-session".to_owned()),
                 last_surface: None,
+                injected_memory_context: None,
                 last_activity: Instant::now(),
             }),
             pid: None,
             environment_variables: String::new(),
-            memory_context: None,
         }))
     }
 
