@@ -204,67 +204,6 @@ pub(crate) async fn notify_ui_artifact_upsert(
     .await
 }
 
-/// Targeted membership change. Lets the frontend patch `channel_members`
-/// in-place instead of falling back to a full bootstrap refresh, which on
-/// mobile reads as several hundred milliseconds of "tap didn't hit" lag
-/// after the optimistic flip would otherwise have to wait.
-pub(crate) async fn notify_ui_channel_member_change(
-    pool: &SqlitePool,
-    channel_id: Uuid,
-    agent_id: Uuid,
-    member: bool,
-    reason: &str,
-) -> CommandResult<()> {
-    if member {
-        let row = sqlx::query(
-            r#"
-            select a.handle as agent_handle,
-                   a.display_name as agent_display_name,
-                   cm.created_at as created_at
-            from channel_members cm
-            join agents a on a.id = cm.agent_id
-            where cm.channel_id = $1 and cm.agent_id = $2
-            "#,
-        )
-        .bind(channel_id)
-        .bind(agent_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(to_string)?;
-        let Some(row) = row else {
-            // Row was already removed by a racing change; fall back to a
-            // generic refresh so the UI can resync from bootstrap rather
-            // than apply a half-built patch.
-            return notify_ui_refresh(pool, reason).await;
-        };
-        let member = ChannelMember {
-            channel_id,
-            agent_id,
-            agent_handle: row.get("agent_handle"),
-            agent_display_name: row.get("agent_display_name"),
-            created_at: row.get("created_at"),
-        };
-        enqueue_ui_event(
-            pool,
-            &UiEvent::ChannelMemberUpsert {
-                reason,
-                member: &member,
-            },
-        )
-        .await
-    } else {
-        enqueue_ui_event(
-            pool,
-            &UiEvent::ChannelMemberRemove {
-                reason,
-                channel_id,
-                agent_id,
-            },
-        )
-        .await
-    }
-}
-
 pub(crate) async fn notify_ui_agent_run_changed(pool: &SqlitePool, run_id: Uuid, reason: &str) {
     if let Ok(run) = load_agent_run_patch(pool, run_id).await {
         let _ = notify_ui_agent_run_upsert(pool, &run, reason).await;

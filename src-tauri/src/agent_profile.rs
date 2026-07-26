@@ -1,7 +1,7 @@
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use crate::ui_notifications::{enqueue_ui_event_in_tx, notify_ui_refresh, UiEvent};
+use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
 use crate::{
     agent_environment::normalize_agent_environment_variables,
     agent_workspace::load_agent_workspace_summary,
@@ -171,6 +171,7 @@ pub(crate) async fn create_agent_in_pool(
     let environment_variables =
         normalize_agent_environment_variables(environment_variables.as_deref())?;
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let agent_id: Uuid = sqlx::query_scalar(
         r#"
         insert into agents (
@@ -208,9 +209,17 @@ pub(crate) async fn create_agent_in_pool(
     .bind(daily_budget_micros)
     .bind(&reasoning_effort)
     .bind(&service_tier)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "agent_created",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     record_agent_activity(
         pool,
         Some(agent_id),
@@ -223,8 +232,6 @@ pub(crate) async fn create_agent_in_pool(
         ),
     )
     .await?;
-
-    let _ = notify_ui_refresh(pool, "agent_created").await;
     Ok(agent_id)
 }
 
@@ -282,6 +289,7 @@ pub(crate) async fn update_agent_in_pool(
     let environment_variables =
         normalize_agent_environment_variables(environment_variables.as_deref())?;
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update agents
@@ -315,9 +323,17 @@ pub(crate) async fn update_agent_in_pool(
     .bind(daily_budget_micros)
     .bind(&reasoning_effort)
     .bind(&service_tier)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "agent_updated",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     record_agent_activity(
         pool,
         Some(agent_id),
@@ -330,8 +346,6 @@ pub(crate) async fn update_agent_in_pool(
         ),
     )
     .await?;
-
-    let _ = notify_ui_refresh(pool, "agent_updated").await;
     Ok(())
 }
 
@@ -400,10 +414,15 @@ pub(crate) async fn delete_agent_in_pool(pool: &SqlitePool, agent_id: Uuid) -> C
     if result.rows_affected() == 0 {
         return Err("agent does not exist".to_owned());
     }
+    enqueue_ui_event_in_tx(
+        &mut tx,
+        &UiEvent::Refresh {
+            reason: "agent_deleted",
+        },
+    )
+    .await?;
     tx.commit().await.map_err(to_string)?;
     remove_attachment_files(&attachment_paths);
-
-    let _ = notify_ui_refresh(pool, "agent_deleted").await;
 
     Ok(())
 }

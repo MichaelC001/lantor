@@ -1,12 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Executor, Row, Sqlite, SqlitePool};
 use tauri::State;
 use uuid::Uuid;
 
 use crate::events::activity::record_agent_activity;
 use crate::models::Reminder;
-use crate::ui_notifications::{insert_system_message, notify_ui_refresh};
+use crate::ui_notifications::{
+    enqueue_ui_event_in_tx, insert_system_message, notify_ui_refresh, UiEvent,
+};
 use crate::{
     app::{to_string, AppState, CommandResult},
     create_agent_inbox_item, ensure_agent_inbox_wake_work_item, AgentInboxItemInput,
@@ -57,17 +59,12 @@ pub(super) async fn process_due_reminders(pool: &SqlitePool) -> CommandResult<()
         let recurrence: String = row.get("recurrence");
         let status: String = row.get("status");
         let next_due_at: DateTime<Utc> = row.get("due_at");
-        insert_reminder_event(
-            pool,
-            reminder_id,
-            "fired",
-            if recurrence == "none" {
-                String::new()
-            } else {
-                format!("next_due_at={}", next_due_at.to_rfc3339())
-            },
-        )
-        .await?;
+        let fired_detail = if recurrence == "none" {
+            String::new()
+        } else {
+            format!("next_due_at={}", next_due_at.to_rfc3339())
+        };
+        insert_reminder_event(pool, reminder_id, "fired", &fired_detail).await?;
 
         if let Some(channel_id) = channel_id {
             let mut body = format!("Reminder: {title}");
@@ -177,12 +174,15 @@ fn normalize_recurrence(value: &str) -> CommandResult<String> {
     }
 }
 
-async fn insert_reminder_event(
-    pool: &SqlitePool,
+async fn insert_reminder_event<'e, E>(
+    executor: E,
     reminder_id: Uuid,
     event_type: &str,
-    detail: impl AsRef<str>,
-) -> CommandResult<()> {
+    detail: &str,
+) -> CommandResult<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     sqlx::query(
         r#"
         insert into reminder_events (reminder_id, event_type, detail)
@@ -191,8 +191,8 @@ async fn insert_reminder_event(
     )
     .bind(reminder_id)
     .bind(event_type)
-    .bind(detail.as_ref())
-    .execute(pool)
+    .bind(detail)
+    .execute(executor)
     .await
     .map_err(to_string)?;
     Ok(())
@@ -229,6 +229,7 @@ pub(crate) async fn create_reminder_in_pool(
         }
     }
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let reminder_id: Uuid = sqlx::query_scalar(
         r#"
         insert into reminders (
@@ -246,11 +247,19 @@ pub(crate) async fn create_reminder_in_pool(
     .bind(note.trim())
     .bind(due_at)
     .bind(&recurrence)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
-    insert_reminder_event(pool, reminder_id, "created", due_at.to_rfc3339()).await?;
-    let _ = notify_ui_refresh(pool, "reminder_created").await;
+    let created_detail = due_at.to_rfc3339();
+    insert_reminder_event(&mut *transaction, reminder_id, "created", &created_detail).await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "reminder_created",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(reminder_id)
 }
 
@@ -258,6 +267,7 @@ pub(crate) async fn cancel_reminder_in_pool(
     pool: &SqlitePool,
     reminder_id: Uuid,
 ) -> CommandResult<()> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let affected = sqlx::query(
         r#"
         update reminders
@@ -268,15 +278,22 @@ pub(crate) async fn cancel_reminder_in_pool(
         "#,
     )
     .bind(reminder_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?
     .rows_affected();
     if affected == 0 {
         return Err("reminder does not exist or is not active".to_owned());
     }
-    insert_reminder_event(pool, reminder_id, "cancelled", "").await?;
-    let _ = notify_ui_refresh(pool, "reminder_cancelled").await;
+    insert_reminder_event(&mut *transaction, reminder_id, "cancelled", "").await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "reminder_cancelled",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
@@ -316,6 +333,7 @@ pub(crate) async fn snooze_reminder(
     if !(1..=10_080).contains(&minutes) {
         return Err("snooze minutes must be between 1 and 10080".to_owned());
     }
+    let mut transaction = state.pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update reminders
@@ -327,17 +345,19 @@ pub(crate) async fn snooze_reminder(
     )
     .bind(reminder_id)
     .bind(minutes)
-    .execute(&state.pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    insert_reminder_event(
-        &state.pool,
-        reminder_id,
-        "snoozed",
-        format!("{minutes} minutes"),
+    let snooze_detail = format!("{minutes} minutes");
+    insert_reminder_event(&mut *transaction, reminder_id, "snoozed", &snooze_detail).await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "reminder_snoozed",
+        },
     )
     .await?;
-    let _ = notify_ui_refresh(&state.pool, "reminder_snoozed").await;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
@@ -353,6 +373,7 @@ pub(crate) async fn complete_reminder_in_pool(
     pool: &SqlitePool,
     reminder_id: Uuid,
 ) -> CommandResult<()> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update reminders
@@ -363,11 +384,18 @@ pub(crate) async fn complete_reminder_in_pool(
         "#,
     )
     .bind(reminder_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    insert_reminder_event(pool, reminder_id, "completed", "").await?;
-    let _ = notify_ui_refresh(pool, "reminder_completed").await;
+    insert_reminder_event(&mut *transaction, reminder_id, "completed", "").await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "reminder_completed",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 

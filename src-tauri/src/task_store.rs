@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::app::{to_string, CommandResult};
 use crate::events::activity::record_agent_activity;
 use crate::models::Task;
-use crate::ui_notifications::notify_ui_refresh;
+use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
 
 pub(crate) async fn update_task_status_in_pool(
     pool: &SqlitePool,
@@ -17,6 +17,7 @@ pub(crate) async fn update_task_status_in_pool(
         return Err(format!("unsupported task status: {status}"));
     }
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let affected = sqlx::query(
         r#"
         update tasks
@@ -26,13 +27,21 @@ pub(crate) async fn update_task_status_in_pool(
     )
     .bind(task_id)
     .bind(status)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?
     .rows_affected();
     if affected == 0 {
         return Err("task does not exist".to_owned());
     }
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "task_status_updated",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     record_agent_activity(
         pool,
         None,
@@ -43,7 +52,6 @@ pub(crate) async fn update_task_status_in_pool(
     )
     .await?;
 
-    let _ = notify_ui_refresh(pool, "task_status_updated").await;
     Ok(())
 }
 
@@ -82,6 +90,13 @@ pub(crate) async fn update_task_title_in_pool(
         .await
         .map_err(to_string)?;
 
+    enqueue_ui_event_in_tx(
+        &mut tx,
+        &UiEvent::Refresh {
+            reason: "task_title_updated",
+        },
+    )
+    .await?;
     tx.commit().await.map_err(to_string)?;
     record_agent_activity(
         pool,
@@ -92,7 +107,6 @@ pub(crate) async fn update_task_title_in_pool(
         json!({ "task_id": task_id, "title": title }).to_string(),
     )
     .await?;
-    let _ = notify_ui_refresh(pool, "task_title_updated").await;
     Ok(())
 }
 

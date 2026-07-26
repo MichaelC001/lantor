@@ -6,7 +6,9 @@ use uuid::Uuid;
 
 use crate::events::activity::record_agent_activity;
 use crate::models::AgentSchedule;
-use crate::ui_notifications::{insert_system_message, notify_ui_refresh};
+use crate::ui_notifications::{
+    enqueue_ui_event_in_tx, insert_system_message, notify_ui_refresh, UiEvent,
+};
 use crate::{
     app::{to_string, AppState, CommandResult},
     create_agent_inbox_item, ensure_agent_inbox_wake_work_item, AgentInboxItemInput,
@@ -197,6 +199,7 @@ pub(crate) async fn create_agent_schedule(
         }
     }
 
+    let mut transaction = state.pool.begin().await.map_err(to_string)?;
     if channel_kind != "dm" {
         sqlx::query(
             r#"
@@ -207,7 +210,7 @@ pub(crate) async fn create_agent_schedule(
         )
         .bind(channel_id)
         .bind(agent_id)
-        .execute(&state.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
     }
@@ -228,9 +231,17 @@ pub(crate) async fn create_agent_schedule(
     .bind(prompt)
     .bind(&cadence)
     .bind(next_run_at)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "agent_schedule_created",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
 
     record_agent_activity(
         &state.pool,
@@ -246,7 +257,6 @@ pub(crate) async fn create_agent_schedule(
         .to_string(),
     )
     .await?;
-    let _ = notify_ui_refresh(&state.pool, "agent_schedule_created").await;
     Ok(schedule_id)
 }
 
@@ -260,6 +270,7 @@ pub(crate) async fn update_agent_schedule_status(
     if !matches!(status, "active" | "paused" | "cancelled") {
         return Err(format!("unsupported schedule status: {status}"));
     }
+    let mut transaction = state.pool.begin().await.map_err(to_string)?;
     let row = sqlx::query(
         r#"
         update agent_schedules
@@ -271,13 +282,21 @@ pub(crate) async fn update_agent_schedule_status(
     )
     .bind(schedule_id)
     .bind(status)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *transaction)
     .await
     .map_err(to_string)?;
     let Some(row) = row else {
         return Err("schedule does not exist or is already cancelled".to_owned());
     };
     let agent_id: Uuid = row.get("agent_id");
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "agent_schedule_updated",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     record_agent_activity(
         &state.pool,
         Some(agent_id),
@@ -292,7 +311,6 @@ pub(crate) async fn update_agent_schedule_status(
         schedule_id.to_string(),
     )
     .await?;
-    let _ = notify_ui_refresh(&state.pool, "agent_schedule_updated").await;
     Ok(())
 }
 

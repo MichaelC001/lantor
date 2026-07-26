@@ -1,13 +1,67 @@
 use std::collections::HashSet;
 
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::app::{to_string, CommandResult};
 use crate::attachments::remove_attachment_files;
 use crate::events::activity::record_agent_activity;
 use crate::models::{Channel, ChannelMember, ThreadActivity};
-use crate::ui_notifications::{notify_ui_channel_member_change, notify_ui_refresh};
+use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
+
+async fn enqueue_channel_member_change_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    channel_id: Uuid,
+    agent_id: Uuid,
+    member: bool,
+    reason: &str,
+) -> CommandResult<()> {
+    if !member {
+        return enqueue_ui_event_in_tx(
+            transaction,
+            &UiEvent::ChannelMemberRemove {
+                reason,
+                channel_id,
+                agent_id,
+            },
+        )
+        .await;
+    }
+
+    let row = sqlx::query(
+        r#"
+        select a.handle as agent_handle,
+               a.display_name as agent_display_name,
+               cm.created_at as created_at
+        from channel_members cm
+        join agents a on a.id = cm.agent_id
+        where cm.channel_id = $1 and cm.agent_id = $2
+        "#,
+    )
+    .bind(channel_id)
+    .bind(agent_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(to_string)?;
+    let Some(row) = row else {
+        return enqueue_ui_event_in_tx(transaction, &UiEvent::Refresh { reason }).await;
+    };
+    let member = ChannelMember {
+        channel_id,
+        agent_id,
+        agent_handle: row.get("agent_handle"),
+        agent_display_name: row.get("agent_display_name"),
+        created_at: row.get("created_at"),
+    };
+    enqueue_ui_event_in_tx(
+        transaction,
+        &UiEvent::ChannelMemberUpsert {
+            reason,
+            member: &member,
+        },
+    )
+    .await
+}
 
 pub(crate) async fn load_channels(pool: &SqlitePool) -> CommandResult<Vec<Channel>> {
     let rows = sqlx::query(
@@ -216,6 +270,7 @@ pub(crate) async fn create_channel_in_pool(
         return Err("channel name is empty".to_owned());
     }
     ensure_channel_name_available(pool, &normalized, None).await?;
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let channel_id = sqlx::query_scalar(
         r#"
         insert into channels (name, description, kind)
@@ -225,11 +280,17 @@ pub(crate) async fn create_channel_in_pool(
     )
     .bind(normalized)
     .bind(description.trim())
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
-
-    let _ = notify_ui_refresh(pool, "channel_created").await;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "channel_created",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(channel_id)
 }
 
@@ -239,16 +300,63 @@ pub(crate) async fn create_channel_with_members(
     description: &str,
     agent_ids: Option<Vec<Uuid>>,
 ) -> CommandResult<Uuid> {
-    let channel_id = create_channel_in_pool(pool, name, description).await?;
+    let normalized = normalize_channel_name(name);
+    if normalized.is_empty() {
+        return Err("channel name is empty".to_owned());
+    }
+    ensure_channel_name_available(pool, &normalized, None).await?;
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
+    let channel_id: Uuid = sqlx::query_scalar(
+        r#"
+        insert into channels (name, description, kind)
+        values ($1, $2, 'channel')
+        returning id
+        "#,
+    )
+    .bind(normalized)
+    .bind(description.trim())
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(to_string)?;
     if let Some(ids) = agent_ids {
         let mut seen = HashSet::new();
         for agent_id in ids {
             if !seen.insert(agent_id) {
                 continue;
             }
-            add_agent_to_channel(pool, channel_id, agent_id).await?;
+            sqlx::query(
+                r#"
+                insert into channel_members (channel_id, agent_id)
+                values ($1, $2)
+                on conflict (channel_id, agent_id) do nothing
+                "#,
+            )
+            .bind(channel_id)
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(to_string)?;
+            enqueue_channel_member_change_in_tx(
+                &mut transaction,
+                channel_id,
+                agent_id,
+                true,
+                "channel_membership_updated",
+            )
+            .await?;
         }
     }
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "channel_created",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(channel_id)
 }
 
@@ -275,6 +383,7 @@ pub(crate) async fn update_channel_in_pool(
     }
     ensure_channel_name_available(pool, &normalized, Some(channel_id)).await?;
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         update channels
@@ -285,11 +394,17 @@ pub(crate) async fn update_channel_in_pool(
     .bind(channel_id)
     .bind(normalized)
     .bind(description.trim())
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-
-    let _ = notify_ui_refresh(pool, "channel_updated").await;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "channel_updated",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
@@ -323,6 +438,7 @@ pub(crate) async fn set_channel_agent_membership_in_pool(
         return Err("agent does not exist".to_owned());
     }
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     if member {
         sqlx::query(
             r#"
@@ -333,17 +449,26 @@ pub(crate) async fn set_channel_agent_membership_in_pool(
         )
         .bind(channel_id)
         .bind(agent_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
     } else {
         sqlx::query("delete from channel_members where channel_id = $1 and agent_id = $2")
             .bind(channel_id)
             .bind(agent_id)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(to_string)?;
     }
+    enqueue_channel_member_change_in_tx(
+        &mut transaction,
+        channel_id,
+        agent_id,
+        member,
+        "channel_membership_updated",
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
 
     record_agent_activity(
         pool,
@@ -359,14 +484,6 @@ pub(crate) async fn set_channel_agent_membership_in_pool(
     )
     .await?;
 
-    let _ = notify_ui_channel_member_change(
-        pool,
-        channel_id,
-        agent_id,
-        member,
-        "channel_membership_updated",
-    )
-    .await;
     Ok(())
 }
 
@@ -398,10 +515,15 @@ pub(crate) async fn delete_channel_in_pool(
     if result.rows_affected() == 0 {
         return Err("channel does not exist".to_owned());
     }
+    enqueue_ui_event_in_tx(
+        &mut tx,
+        &UiEvent::Refresh {
+            reason: "channel_deleted",
+        },
+    )
+    .await?;
     tx.commit().await.map_err(to_string)?;
     remove_attachment_files(&attachment_paths);
-
-    let _ = notify_ui_refresh(pool, "channel_deleted").await;
 
     Ok(())
 }
@@ -463,6 +585,13 @@ pub(crate) async fn open_dm_with_agent_in_pool(
     .await
     .map_err(to_string)?;
 
+    enqueue_ui_event_in_tx(
+        &mut tx,
+        &UiEvent::Refresh {
+            reason: "dm_opened",
+        },
+    )
+    .await?;
     tx.commit().await.map_err(to_string)?;
     record_agent_activity(
         pool,
@@ -473,8 +602,6 @@ pub(crate) async fn open_dm_with_agent_in_pool(
         format!("@{agent_handle}"),
     )
     .await?;
-
-    let _ = notify_ui_refresh(pool, "dm_opened").await;
     Ok(channel_id.to_string())
 }
 
@@ -529,6 +656,7 @@ pub(crate) async fn add_agent_to_channel(
     if kind.as_deref() == Some("dm") {
         return Err("direct message membership is fixed".to_owned());
     }
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         insert into channel_members (channel_id, agent_id)
@@ -538,17 +666,18 @@ pub(crate) async fn add_agent_to_channel(
     )
     .bind(channel_id)
     .bind(agent_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
-    let _ = notify_ui_channel_member_change(
-        pool,
+    enqueue_channel_member_change_in_tx(
+        &mut transaction,
         channel_id,
         agent_id,
         true,
         "channel_membership_updated",
     )
-    .await;
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
@@ -567,11 +696,47 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        create_channel_in_pool, delete_channel_in_pool, load_channels, load_thread_activities,
-        open_dm_with_agent_in_pool, set_channel_agent_membership_in_pool, update_channel_in_pool,
+        create_channel_in_pool, create_channel_with_members, delete_channel_in_pool, load_channels,
+        load_thread_activities, open_dm_with_agent_in_pool, set_channel_agent_membership_in_pool,
+        update_channel_in_pool,
     };
     use crate::attachments::write_attachment_file;
     use crate::db::{db_connect_with_url, migrate};
+
+    #[tokio::test]
+    async fn create_channel_with_members_rolls_back_the_channel_on_invalid_membership() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let result = create_channel_with_members(
+                &pool,
+                "atomic-channel",
+                "must roll back",
+                Some(vec![Uuid::new_v4()]),
+            )
+            .await;
+            assert!(result.is_err());
+
+            let channel_count: i64 =
+                sqlx::query_scalar("select count(*) from channels where name = 'atomic-channel'")
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            let event_count: i64 = sqlx::query_scalar(
+                "select count(*) from ui_events where json_extract(event_json, '$.reason') = 'channel_created'",
+            )
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(channel_count, 0);
+            assert_eq!(event_count, 0);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
+    }
 
     #[tokio::test]
     async fn channel_unread_count_compares_mixed_timezone_timestamps_by_instant() {

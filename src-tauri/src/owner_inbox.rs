@@ -5,18 +5,24 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::app::{to_string, CommandResult};
-use crate::ui_notifications::notify_ui_refresh;
+use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
 
 pub(crate) async fn dismiss_inbox_items_in_pool<I>(pool: &SqlitePool, items: I) -> CommandResult<()>
 where
     I: IntoIterator<Item = (String, DateTime<Utc>)>,
 {
-    let mut updated = false;
-    for item in items {
-        let item_id = item.0.trim();
-        if item_id.is_empty() {
-            continue;
-        }
+    let items = items
+        .into_iter()
+        .filter_map(|(item_id, dismissed_until)| {
+            let item_id = item_id.trim().to_owned();
+            (!item_id.is_empty()).then_some((item_id, dismissed_until))
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Ok(());
+    }
+    let mut transaction = pool.begin().await.map_err(to_string)?;
+    for (item_id, dismissed_until) in items {
         sqlx::query(
             r#"
             insert into owner_inbox_hidden_items (item_id, hidden_until, hidden_at)
@@ -30,16 +36,19 @@ where
             "#,
         )
         .bind(item_id)
-        .bind(item.1)
-        .execute(pool)
+        .bind(dismissed_until)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-        updated = true;
     }
-
-    if updated {
-        notify_ui_refresh(pool, "owner_inbox_dismissed").await?;
-    }
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "owner_inbox_dismissed",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
@@ -50,12 +59,18 @@ pub(crate) async fn mark_inbox_items_read_in_pool<I>(
 where
     I: IntoIterator<Item = (String, DateTime<Utc>)>,
 {
-    let mut updated = false;
-    for item in items {
-        let item_id = item.0.trim();
-        if item_id.is_empty() {
-            continue;
-        }
+    let items = items
+        .into_iter()
+        .filter_map(|(item_id, read_until)| {
+            let item_id = item_id.trim().to_owned();
+            (!item_id.is_empty()).then_some((item_id, read_until))
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Ok(());
+    }
+    let mut transaction = pool.begin().await.map_err(to_string)?;
+    for (item_id, read_until) in items {
         sqlx::query(
             r#"
             insert into owner_inbox_read_state (item_id, read_until, read_at)
@@ -69,20 +84,24 @@ where
             "#,
         )
         .bind(item_id)
-        .bind(item.1)
-        .execute(pool)
+        .bind(read_until)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-        updated = true;
     }
-
-    if updated {
-        notify_ui_refresh(pool, "owner_inbox_read").await?;
-    }
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "owner_inbox_read",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
 pub(crate) async fn mark_all_owner_inbox_read_in_pool(pool: &SqlitePool) -> CommandResult<()> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
         r#"
         insert into owner_inbox_read_state (item_id, read_until, read_at)
@@ -100,7 +119,7 @@ pub(crate) async fn mark_all_owner_inbox_read_in_pool(pool: &SqlitePool) -> Comm
             read_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
         "#,
     )
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
 
@@ -121,7 +140,7 @@ pub(crate) async fn mark_all_owner_inbox_read_in_pool(pool: &SqlitePool) -> Comm
             read_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
         "#,
     )
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
 
@@ -134,11 +153,18 @@ pub(crate) async fn mark_all_owner_inbox_read_in_pool(pool: &SqlitePool) -> Comm
         on conflict (channel_id) do update set last_read_at = excluded.last_read_at
         "#,
     )
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
 
-    notify_ui_refresh(pool, "owner_inbox_mark_all_read").await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "owner_inbox_mark_all_read",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
@@ -151,6 +177,7 @@ pub(crate) async fn mark_channel_read_in_pool(
     // moves past a newer message; an unconditional notify here previously fed a
     // refresh -> effect -> mark-read -> refresh loop that kept every client
     // re-running a full bootstrap forever.
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let result = sqlx::query(
         r#"
         insert into channel_read_state (channel_id, last_read_at)
@@ -165,13 +192,20 @@ pub(crate) async fn mark_channel_read_in_pool(
         "#,
     )
     .bind(channel_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
 
     if result.rows_affected() > 0 {
-        let _ = notify_ui_refresh(pool, "channel_read").await;
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::Refresh {
+                reason: "channel_read",
+            },
+        )
+        .await?;
     }
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 

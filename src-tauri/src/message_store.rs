@@ -12,7 +12,9 @@ use crate::agent_work_dispatch::dispatch_unassigned_task_availability;
 use crate::attachments::{
     remove_attachment_files, write_attachment_file, PendingAttachmentWrites, ATTACHMENT_SIZE_LIMIT,
 };
-use crate::ui_notifications::{notify_ui_message_upsert, notify_ui_refresh};
+use crate::ui_notifications::{
+    enqueue_ui_event_in_tx, notify_ui_message_upsert, notify_ui_refresh, UiEvent,
+};
 use crate::{
     app::{to_string, CommandResult},
     models::{
@@ -882,9 +884,10 @@ pub(crate) async fn set_message_saved_in_pool(
     message_id: Uuid,
     saved: bool,
 ) -> CommandResult<()> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let exists: bool = sqlx::query_scalar("select exists(select 1 from messages where id = $1)")
         .bind(message_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(to_string)?;
     if !exists {
@@ -900,17 +903,24 @@ pub(crate) async fn set_message_saved_in_pool(
             "#,
         )
         .bind(message_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
     } else {
         sqlx::query("delete from saved_messages where message_id = $1")
             .bind(message_id)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(to_string)?;
     }
-    let _ = notify_ui_refresh(pool, "saved_message_updated").await;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::Refresh {
+            reason: "saved_message_updated",
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
