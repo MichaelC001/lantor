@@ -3,11 +3,9 @@ use uuid::Uuid;
 
 use crate::{
     app::{AppState, CommandResult},
-    message_store::{
-        delete_message_in_pool,
-        load_older_channel_messages_without_artifact_content as load_older_channel_messages_in_pool,
-        load_recent_channel_message_page_without_artifact_content, send_owner_message_in_pool,
-        set_message_saved_in_pool, update_message_in_pool, WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
+    application::messages::{
+        self as application, LoadChannelMessagesRequest, LoadOlderChannelMessagesRequest,
+        MessageIdRequest, SendMessageRequest, SetMessageSavedRequest, UpdateMessageRequest,
     },
     models::{AttachmentUpload, ChannelMessagePage, Message},
 };
@@ -21,13 +19,15 @@ pub(crate) async fn send_message(
     attachments: Option<Vec<AttachmentUpload>>,
     state: State<'_, AppState>,
 ) -> CommandResult<Message> {
-    send_owner_message_in_pool(
+    application::send_message(
         &state.pool,
-        channel_id,
-        thread_root_id,
-        &body,
-        as_task,
-        attachments.unwrap_or_default(),
+        SendMessageRequest {
+            channel_id,
+            thread_root_id,
+            body,
+            as_task,
+            attachments,
+        },
     )
     .await
 }
@@ -37,12 +37,7 @@ pub(crate) async fn load_channel_messages(
     channel_id: Uuid,
     state: State<'_, AppState>,
 ) -> CommandResult<ChannelMessagePage> {
-    load_recent_channel_message_page_without_artifact_content(
-        &state.pool,
-        channel_id,
-        WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
-    )
-    .await
+    application::load_channel_messages(&state.pool, LoadChannelMessagesRequest { channel_id }).await
 }
 
 #[tauri::command]
@@ -52,7 +47,15 @@ pub(crate) async fn load_older_channel_messages(
     limit: i64,
     state: State<'_, AppState>,
 ) -> CommandResult<ChannelMessagePage> {
-    load_older_channel_messages_in_pool(&state.pool, channel_id, before_seq, limit).await
+    application::load_older_channel_messages(
+        &state.pool,
+        LoadOlderChannelMessagesRequest {
+            channel_id,
+            before_seq,
+            limit,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -61,7 +64,7 @@ pub(crate) async fn update_message(
     body: String,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    update_message_in_pool(&state.pool, message_id, &body).await
+    application::update_message(&state.pool, UpdateMessageRequest { message_id, body }).await
 }
 
 #[tauri::command]
@@ -69,7 +72,7 @@ pub(crate) async fn delete_message(
     message_id: Uuid,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    delete_message_in_pool(&state.pool, message_id).await
+    application::delete_message(&state.pool, MessageIdRequest { message_id }).await
 }
 
 #[tauri::command]
@@ -78,5 +81,5 @@ pub(crate) async fn set_message_saved(
     saved: bool,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    set_message_saved_in_pool(&state.pool, message_id, saved).await
+    application::set_message_saved(&state.pool, SetMessageSavedRequest { message_id, saved }).await
 }

@@ -1,62 +1,41 @@
-use chrono::{DateTime, Utc};
-use serde::Deserialize;
 use tauri::State;
 use uuid::Uuid;
 
 use crate::{
     app::{AppState, CommandResult},
-    owner_inbox::{
-        dismiss_inbox_items_in_pool, mark_all_owner_inbox_read_in_pool, mark_channel_read_in_pool,
-        mark_inbox_items_read_in_pool, update_thread_followed_in_pool,
+    application::inbox::{
+        self as application, InboxItemTimestamp, InboxItemsRequest, MarkChannelReadRequest,
+        UpdateThreadFollowedRequest,
     },
 };
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DismissInboxItemInput {
-    item_id: String,
-    dismissed_until: DateTime<Utc>,
-}
 
 #[tauri::command]
 pub(crate) async fn mark_channel_read(
     channel_id: Uuid,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    mark_channel_read_in_pool(&state.pool, channel_id).await
+    application::mark_channel_read(&state.pool, MarkChannelReadRequest { channel_id }).await
 }
 
 #[tauri::command]
 pub(crate) async fn dismiss_inbox_items(
-    items: Vec<DismissInboxItemInput>,
+    items: Vec<InboxItemTimestamp>,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    dismiss_inbox_items_in_pool(
-        &state.pool,
-        items
-            .into_iter()
-            .map(|item| (item.item_id, item.dismissed_until)),
-    )
-    .await
+    application::dismiss_inbox_items(&state.pool, InboxItemsRequest { items }).await
 }
 
 #[tauri::command]
 pub(crate) async fn mark_inbox_items_read(
-    items: Vec<DismissInboxItemInput>,
+    items: Vec<InboxItemTimestamp>,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    mark_inbox_items_read_in_pool(
-        &state.pool,
-        items
-            .into_iter()
-            .map(|item| (item.item_id, item.dismissed_until)),
-    )
-    .await
+    application::mark_inbox_items_read(&state.pool, InboxItemsRequest { items }).await
 }
 
 #[tauri::command]
 pub(crate) async fn mark_all_inbox_read(state: State<'_, AppState>) -> CommandResult<()> {
-    mark_all_owner_inbox_read_in_pool(&state.pool).await
+    application::mark_all_inbox_read(&state.pool).await
 }
 
 #[tauri::command]
@@ -65,5 +44,12 @@ pub(crate) async fn update_thread_followed(
     followed: bool,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    update_thread_followed_in_pool(&state.pool, thread_root_id, followed).await
+    application::update_thread_followed(
+        &state.pool,
+        UpdateThreadFollowedRequest {
+            thread_root_id,
+            followed,
+        },
+    )
+    .await
 }

@@ -1,0 +1,118 @@
+use serde::Deserialize;
+use sqlx::SqlitePool;
+use uuid::Uuid;
+
+use crate::{
+    app::CommandResult,
+    message_store::{
+        delete_message_in_pool, load_older_channel_messages_without_artifact_content,
+        load_recent_channel_message_page_without_artifact_content, send_owner_message_in_pool,
+        set_message_saved_in_pool, update_message_in_pool, WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
+    },
+    models::{AttachmentUpload, ChannelMessagePage, Message},
+};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SendMessageRequest {
+    pub(crate) channel_id: Uuid,
+    pub(crate) thread_root_id: Option<Uuid>,
+    pub(crate) body: String,
+    pub(crate) as_task: bool,
+    pub(crate) attachments: Option<Vec<AttachmentUpload>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LoadChannelMessagesRequest {
+    pub(crate) channel_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LoadOlderChannelMessagesRequest {
+    pub(crate) channel_id: Uuid,
+    pub(crate) before_seq: i64,
+    pub(crate) limit: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateMessageRequest {
+    pub(crate) message_id: Uuid,
+    pub(crate) body: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MessageIdRequest {
+    pub(crate) message_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetMessageSavedRequest {
+    pub(crate) message_id: Uuid,
+    pub(crate) saved: bool,
+}
+
+pub(crate) async fn send_message(
+    pool: &SqlitePool,
+    request: SendMessageRequest,
+) -> CommandResult<Message> {
+    send_owner_message_in_pool(
+        pool,
+        request.channel_id,
+        request.thread_root_id,
+        &request.body,
+        request.as_task,
+        request.attachments.unwrap_or_default(),
+    )
+    .await
+}
+
+pub(crate) async fn load_channel_messages(
+    pool: &SqlitePool,
+    request: LoadChannelMessagesRequest,
+) -> CommandResult<ChannelMessagePage> {
+    load_recent_channel_message_page_without_artifact_content(
+        pool,
+        request.channel_id,
+        WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
+    )
+    .await
+}
+
+pub(crate) async fn load_older_channel_messages(
+    pool: &SqlitePool,
+    request: LoadOlderChannelMessagesRequest,
+) -> CommandResult<ChannelMessagePage> {
+    load_older_channel_messages_without_artifact_content(
+        pool,
+        request.channel_id,
+        request.before_seq,
+        request.limit,
+    )
+    .await
+}
+
+pub(crate) async fn update_message(
+    pool: &SqlitePool,
+    request: UpdateMessageRequest,
+) -> CommandResult<()> {
+    update_message_in_pool(pool, request.message_id, &request.body).await
+}
+
+pub(crate) async fn delete_message(
+    pool: &SqlitePool,
+    request: MessageIdRequest,
+) -> CommandResult<()> {
+    delete_message_in_pool(pool, request.message_id).await
+}
+
+pub(crate) async fn set_message_saved(
+    pool: &SqlitePool,
+    request: SetMessageSavedRequest,
+) -> CommandResult<()> {
+    set_message_saved_in_pool(pool, request.message_id, request.saved).await
+}

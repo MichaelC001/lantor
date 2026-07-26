@@ -17,7 +17,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
@@ -31,30 +30,30 @@ use tower_http::{
 };
 use uuid::Uuid;
 
-use crate::agent_profile::{
-    create_agent_in_pool, delete_agent_in_pool, update_agent_in_pool, update_owner_profile_in_pool,
-};
 use crate::agent_workspace::{agent_workspace_list_in_pool, agent_workspace_read_file_in_pool};
-use crate::bootstrap::load_web_bootstrap;
-use crate::channels::{
-    add_agent_to_channel, create_channel_in_pool, delete_channel_in_pool,
-    open_dm_with_agent_in_pool, set_channel_agent_membership_in_pool, update_channel_in_pool,
+use crate::application::{
+    agents::{self as agent_commands, CreateAgentRequest, OwnerProfileRequest, UpdateAgentRequest},
+    artifacts::{self as artifact_commands, ArtifactReadRequest},
+    bootstrap::{
+        self as bootstrap_command, BootstrapRequest as ApplicationBootstrapRequest,
+        BootstrapSurface,
+    },
+    channels::{
+        self as channel_commands, ChannelIdRequest, CreateChannelRequest,
+        SetChannelAgentMembershipRequest, UpdateChannelRequest,
+    },
+    inbox::{self as inbox_commands, InboxItemsRequest, MarkChannelReadRequest},
+    messages::{
+        self as message_commands, LoadChannelMessagesRequest, LoadOlderChannelMessagesRequest,
+        SendMessageRequest, SetMessageSavedRequest,
+    },
+    tasks::{self as task_commands, UpdateTaskStatusRequest, UpdateTaskTitleRequest},
+    AgentIdRequest,
 };
 use crate::domain::reminders::complete_reminder_in_pool;
 use crate::launch_agent;
 use crate::lifecycle_commands::start_agent_in_pool;
-use crate::message_store::{
-    load_artifact, load_older_channel_messages_without_artifact_content,
-    load_recent_channel_message_page_without_artifact_content, send_owner_message_in_pool,
-    set_message_saved_in_pool, WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
-};
-use crate::models::AttachmentUpload;
-use crate::owner_inbox::{
-    dismiss_inbox_items_in_pool, mark_all_owner_inbox_read_in_pool, mark_channel_read_in_pool,
-    mark_inbox_items_read_in_pool,
-};
 use crate::system_commands::check_runtime_in_env;
-use crate::task_store::{update_task_status_in_pool, update_task_title_in_pool};
 use crate::ui_notifications::notify_ui_refresh;
 use crate::{
     app::{to_string, CommandResult},
@@ -75,24 +74,6 @@ struct ApiError {
     message: String,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SendMessageRequest {
-    channel_id: Uuid,
-    thread_root_id: Option<Uuid>,
-    body: String,
-    as_task: bool,
-    attachments: Option<Vec<AttachmentUpload>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LoadOlderChannelMessagesRequest {
-    channel_id: Uuid,
-    before_seq: i64,
-    limit: i64,
-}
-
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BootstrapQuery {
@@ -108,46 +89,8 @@ struct EventsQuery {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LoadChannelMessagesRequest {
-    channel_id: Uuid,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct RuntimeCheckRequest {
     runtime: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ChannelIdRequest {
-    channel_id: Uuid,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateChannelRequest {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    agent_ids: Option<Vec<Uuid>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateChannelRequest {
-    channel_id: Uuid,
-    name: String,
-    description: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetChannelAgentMembershipRequest {
-    channel_id: Uuid,
-    agent_id: Uuid,
-    member: bool,
 }
 
 #[derive(Deserialize)]
@@ -158,54 +101,8 @@ struct ReminderIdRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DismissInboxItemRequest {
-    item_id: String,
-    dismissed_until: DateTime<Utc>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DismissInboxItemsRequest {
-    items: Vec<DismissInboxItemRequest>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ArtifactReadRequest {
-    artifact_id: Uuid,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetMessageSavedRequest {
-    message_id: Uuid,
-    saved: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentIdRequest {
-    agent_id: Uuid,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct WorkItemIdRequest {
     work_item_id: Uuid,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TaskStatusRequest {
-    task_id: Uuid,
-    status: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TaskTitleRequest {
-    task_id: Uuid,
-    title: String,
 }
 
 #[derive(Deserialize)]
@@ -218,54 +115,9 @@ struct ClaimTaskRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateAgentRequest {
-    handle: String,
-    display_name: String,
-    role: Option<String>,
-    runtime: String,
-    model: String,
-    reasoning_effort: Option<String>,
-    service_tier: Option<String>,
-    avatar: Option<String>,
-    description: Option<String>,
-    launch_command: String,
-    environment_variables: Option<String>,
-    working_directory: String,
-    daily_budget_micros: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateAgentRequest {
-    agent_id: Uuid,
-    handle: String,
-    display_name: String,
-    role: Option<String>,
-    runtime: String,
-    model: String,
-    reasoning_effort: Option<String>,
-    service_tier: Option<String>,
-    avatar: Option<String>,
-    description: String,
-    launch_command: String,
-    environment_variables: Option<String>,
-    working_directory: String,
-    daily_budget_micros: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct AgentWorkspaceRequest {
     agent_id: Uuid,
     path: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OwnerProfileRequest {
-    display_name: String,
-    avatar: String,
-    description: String,
 }
 
 pub(crate) const DEFAULT_LANTOR_WEB_BIND: &str = "127.0.0.1:8787";
@@ -451,11 +303,14 @@ async fn api_bootstrap(
         .channel_id
         .as_deref()
         .and_then(|channel_id| Uuid::parse_str(channel_id).ok());
-    load_web_bootstrap(
+    bootstrap_command::bootstrap(
         &state.pool,
         state.db_url.clone(),
-        channel_id,
-        current_channel_only,
+        BootstrapSurface::Web,
+        ApplicationBootstrapRequest {
+            channel_id,
+            current_channel_only,
+        },
     )
     .await
     .map(Json)
@@ -475,90 +330,57 @@ async fn api_send_message(
     State(state): State<Arc<WebState>>,
     Json(request): Json<SendMessageRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    send_owner_message_in_pool(
-        &state.pool,
-        request.channel_id,
-        request.thread_root_id,
-        &request.body,
-        request.as_task,
-        request.attachments.unwrap_or_default(),
-    )
-    .await
-    .map(Json)
-    .map_err(api_error)
+    message_commands::send_message(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
 }
 
 async fn api_load_older_channel_messages(
     State(state): State<Arc<WebState>>,
     Json(request): Json<LoadOlderChannelMessagesRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    load_older_channel_messages_without_artifact_content(
-        &state.pool,
-        request.channel_id,
-        request.before_seq,
-        request.limit,
-    )
-    .await
-    .map(Json)
-    .map_err(api_error)
+    message_commands::load_older_channel_messages(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
 }
 
 async fn api_load_channel_messages(
     State(state): State<Arc<WebState>>,
     Json(request): Json<LoadChannelMessagesRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    load_recent_channel_message_page_without_artifact_content(
-        &state.pool,
-        request.channel_id,
-        WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
-    )
-    .await
-    .map(Json)
-    .map_err(api_error)
+    message_commands::load_channel_messages(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
 }
 
 async fn api_create_channel(
     State(state): State<Arc<WebState>>,
     Json(request): Json<CreateChannelRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    let description = request.description.unwrap_or_default();
-    let channel_id = create_channel_in_pool(&state.pool, &request.name, &description)
+    let result = channel_commands::create_channel(&state.pool, request)
         .await
         .map_err(api_error)?;
-    if let Some(ids) = request.agent_ids {
-        let mut seen = std::collections::HashSet::new();
-        for agent_id in ids {
-            if !seen.insert(agent_id) {
-                continue;
-            }
-            add_agent_to_channel(&state.pool, channel_id, agent_id)
-                .await
-                .map_err(api_error)?;
-        }
-    }
-    Ok(Json(json!({ "ok": true, "channelId": channel_id })))
+    Ok(Json(json!({ "ok": true, "channelId": result.channel_id })))
 }
 
 async fn api_update_channel(
     State(state): State<Arc<WebState>>,
     Json(request): Json<UpdateChannelRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    update_channel_in_pool(
-        &state.pool,
-        request.channel_id,
-        request.name,
-        request.description,
-    )
-    .await
-    .map(|_| Json(json!({ "ok": true })))
-    .map_err(api_error)
+    channel_commands::update_channel(&state.pool, request)
+        .await
+        .map(|_| Json(json!({ "ok": true })))
+        .map_err(api_error)
 }
 
 async fn api_delete_channel(
     State(state): State<Arc<WebState>>,
     Json(request): Json<ChannelIdRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    delete_channel_in_pool(&state.pool, request.channel_id)
+    channel_commands::delete_channel(&state.pool, request)
         .await
         .map(|_| Json(json!({ "ok": true })))
         .map_err(api_error)
@@ -568,58 +390,27 @@ async fn api_create_agent(
     State(state): State<Arc<WebState>>,
     Json(request): Json<CreateAgentRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    create_agent_in_pool(
-        &state.pool,
-        request.handle,
-        request.display_name,
-        request.role,
-        request.runtime,
-        request.model,
-        request.reasoning_effort,
-        request.service_tier,
-        request.avatar,
-        request.description,
-        request.launch_command,
-        request.environment_variables,
-        request.working_directory,
-        request.daily_budget_micros,
-    )
-    .await
-    .map(|agent_id| Json(agent_id.to_string()))
-    .map_err(api_error)
+    agent_commands::create_agent(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
 }
 
 async fn api_update_agent(
     State(state): State<Arc<WebState>>,
     Json(request): Json<UpdateAgentRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    update_agent_in_pool(
-        &state.pool,
-        request.agent_id,
-        request.handle,
-        request.display_name,
-        request.role,
-        request.runtime,
-        request.model,
-        request.reasoning_effort,
-        request.service_tier,
-        request.avatar,
-        request.description,
-        request.launch_command,
-        request.environment_variables,
-        request.working_directory,
-        request.daily_budget_micros,
-    )
-    .await
-    .map(|_| Json(json!({ "ok": true })))
-    .map_err(api_error)
+    agent_commands::update_agent(&state.pool, request)
+        .await
+        .map(|_| Json(json!({ "ok": true })))
+        .map_err(api_error)
 }
 
 async fn api_delete_agent(
     State(state): State<Arc<WebState>>,
     Json(request): Json<AgentIdRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    delete_agent_in_pool(&state.pool, request.agent_id)
+    agent_commands::delete_agent(&state.pool, request)
         .await
         .map(|_| Json(json!({ "ok": true })))
         .map_err(api_error)
@@ -639,37 +430,27 @@ async fn api_set_channel_agent_membership(
     State(state): State<Arc<WebState>>,
     Json(request): Json<SetChannelAgentMembershipRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    set_channel_agent_membership_in_pool(
-        &state.pool,
-        request.channel_id,
-        request.agent_id,
-        request.member,
-    )
-    .await
-    .map(|_| Json(json!({ "ok": true })))
-    .map_err(api_error)
+    channel_commands::set_channel_agent_membership(&state.pool, request)
+        .await
+        .map(|_| Json(json!({ "ok": true })))
+        .map_err(api_error)
 }
 
 async fn api_update_owner_profile(
     State(state): State<Arc<WebState>>,
     Json(request): Json<OwnerProfileRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    update_owner_profile_in_pool(
-        &state.pool,
-        request.display_name,
-        request.avatar,
-        request.description,
-    )
-    .await
-    .map(|_| Json(json!({ "ok": true })))
-    .map_err(api_error)
+    agent_commands::update_owner_profile(&state.pool, request)
+        .await
+        .map(|_| Json(json!({ "ok": true })))
+        .map_err(api_error)
 }
 
 async fn api_mark_channel_read(
     State(state): State<Arc<WebState>>,
-    Json(request): Json<ChannelIdRequest>,
+    Json(request): Json<MarkChannelReadRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    mark_channel_read_in_pool(&state.pool, request.channel_id)
+    inbox_commands::mark_channel_read(&state.pool, request)
         .await
         .map(|_| Json(json!({ "ok": true })))
         .map_err(api_error)
@@ -677,40 +458,28 @@ async fn api_mark_channel_read(
 
 async fn api_dismiss_inbox_items(
     State(state): State<Arc<WebState>>,
-    Json(request): Json<DismissInboxItemsRequest>,
+    Json(request): Json<InboxItemsRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    dismiss_inbox_items_in_pool(
-        &state.pool,
-        request
-            .items
-            .into_iter()
-            .map(|item| (item.item_id, item.dismissed_until)),
-    )
-    .await
-    .map(|_| Json(json!({ "ok": true })))
-    .map_err(api_error)
+    inbox_commands::dismiss_inbox_items(&state.pool, request)
+        .await
+        .map(|_| Json(json!({ "ok": true })))
+        .map_err(api_error)
 }
 
 async fn api_mark_inbox_items_read(
     State(state): State<Arc<WebState>>,
-    Json(request): Json<DismissInboxItemsRequest>,
+    Json(request): Json<InboxItemsRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    mark_inbox_items_read_in_pool(
-        &state.pool,
-        request
-            .items
-            .into_iter()
-            .map(|item| (item.item_id, item.dismissed_until)),
-    )
-    .await
-    .map(|_| Json(json!({ "ok": true })))
-    .map_err(api_error)
+    inbox_commands::mark_inbox_items_read(&state.pool, request)
+        .await
+        .map(|_| Json(json!({ "ok": true })))
+        .map_err(api_error)
 }
 
 async fn api_mark_all_inbox_read(
     State(state): State<Arc<WebState>>,
 ) -> Result<impl IntoResponse, Response> {
-    mark_all_owner_inbox_read_in_pool(&state.pool)
+    inbox_commands::mark_all_inbox_read(&state.pool)
         .await
         .map(|_| Json(json!({ "ok": true })))
         .map_err(api_error)
@@ -720,7 +489,7 @@ async fn api_set_message_saved(
     State(state): State<Arc<WebState>>,
     Json(request): Json<SetMessageSavedRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    set_message_saved_in_pool(&state.pool, request.message_id, request.saved)
+    message_commands::set_message_saved(&state.pool, request)
         .await
         .map(|_| Json(json!({ "ok": true })))
         .map_err(api_error)
@@ -738,9 +507,9 @@ async fn api_complete_reminder(
 
 async fn api_update_task_status(
     State(state): State<Arc<WebState>>,
-    Json(request): Json<TaskStatusRequest>,
+    Json(request): Json<UpdateTaskStatusRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    update_task_status_in_pool(&state.pool, request.task_id, request.status)
+    task_commands::update_task_status(&state.pool, request)
         .await
         .map(|_| Json(json!({ "ok": true })))
         .map_err(api_error)
@@ -748,9 +517,9 @@ async fn api_update_task_status(
 
 async fn api_update_task_title(
     State(state): State<Arc<WebState>>,
-    Json(request): Json<TaskTitleRequest>,
+    Json(request): Json<UpdateTaskTitleRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    update_task_title_in_pool(&state.pool, request.task_id, request.title)
+    task_commands::update_task_title(&state.pool, request)
         .await
         .map(|_| Json(json!({ "ok": true })))
         .map_err(api_error)
@@ -816,7 +585,7 @@ async fn api_artifact_read(
     State(state): State<Arc<WebState>>,
     Json(request): Json<ArtifactReadRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    load_artifact(&state.pool, request.artifact_id)
+    artifact_commands::artifact_read(&state.pool, request)
         .await
         .map(Json)
         .map_err(api_error)
@@ -826,7 +595,7 @@ async fn api_open_dm_with_agent(
     State(state): State<Arc<WebState>>,
     Json(request): Json<AgentIdRequest>,
 ) -> Result<impl IntoResponse, Response> {
-    open_dm_with_agent_in_pool(&state.pool, request.agent_id)
+    channel_commands::open_dm_with_agent(&state.pool, request)
         .await
         .map(Json)
         .map_err(api_error)

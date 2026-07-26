@@ -2,11 +2,11 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::{
-    agent_profile::{
-        create_agent_in_pool, delete_agent_in_pool, update_agent_in_pool,
-        update_owner_profile_in_pool,
-    },
     app::{AppState, CommandResult},
+    application::agents::{
+        self as application, CreateAgentRequest, OwnerProfileRequest, UpdateAgentRequest,
+    },
+    application::AgentIdRequest,
 };
 
 #[tauri::command]
@@ -16,7 +16,15 @@ pub(crate) async fn update_owner_profile(
     description: String,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    update_owner_profile_in_pool(&state.pool, display_name, avatar, description).await
+    application::update_owner_profile(
+        &state.pool,
+        OwnerProfileRequest {
+            display_name,
+            avatar,
+            description,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -37,24 +45,25 @@ pub(crate) async fn create_agent(
     daily_budget_micros: Option<i64>,
     state: State<'_, AppState>,
 ) -> CommandResult<String> {
-    create_agent_in_pool(
+    application::create_agent(
         &state.pool,
-        handle,
-        display_name,
-        role,
-        runtime,
-        model,
-        reasoning_effort,
-        service_tier,
-        avatar,
-        description,
-        launch_command,
-        environment_variables,
-        working_directory,
-        daily_budget_micros,
+        CreateAgentRequest {
+            handle,
+            display_name,
+            role,
+            runtime,
+            model,
+            reasoning_effort,
+            service_tier,
+            avatar,
+            description,
+            launch_command,
+            environment_variables,
+            working_directory,
+            daily_budget_micros,
+        },
     )
     .await
-    .map(|agent_id| agent_id.to_string())
 }
 
 #[tauri::command]
@@ -76,27 +85,29 @@ pub(crate) async fn update_agent(
     daily_budget_micros: Option<i64>,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    update_agent_in_pool(
+    application::update_agent(
         &state.pool,
-        agent_id,
-        handle,
-        display_name,
-        role,
-        runtime,
-        model,
-        reasoning_effort,
-        service_tier,
-        avatar,
-        description,
-        launch_command,
-        environment_variables,
-        working_directory,
-        daily_budget_micros,
+        UpdateAgentRequest {
+            agent_id,
+            handle,
+            display_name,
+            role,
+            runtime,
+            model,
+            reasoning_effort,
+            service_tier,
+            avatar,
+            description,
+            launch_command,
+            environment_variables,
+            working_directory,
+            daily_budget_micros,
+        },
     )
     .await
 }
 
 #[tauri::command]
 pub(crate) async fn delete_agent(agent_id: Uuid, state: State<'_, AppState>) -> CommandResult<()> {
-    delete_agent_in_pool(&state.pool, agent_id).await
+    application::delete_agent(&state.pool, AgentIdRequest { agent_id }).await
 }

@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     app::{AppState, CommandResult},
-    message_store::load_artifact,
+    application::artifacts::{self as application, ArtifactReadRequest},
     models::Artifact,
 };
 
@@ -12,5 +12,5 @@ pub(crate) async fn artifact_read(
     artifact_id: Uuid,
     state: State<'_, AppState>,
 ) -> CommandResult<Artifact> {
-    load_artifact(&state.pool, artifact_id).await
+    application::artifact_read(&state.pool, ArtifactReadRequest { artifact_id }).await
 }

@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     app::{AppState, CommandResult},
-    task_store::{update_task_status_in_pool, update_task_title_in_pool},
+    application::tasks::{self as application, UpdateTaskStatusRequest, UpdateTaskTitleRequest},
 };
 
 #[tauri::command]
@@ -12,7 +12,7 @@ pub(crate) async fn update_task_status(
     status: String,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    update_task_status_in_pool(&state.pool, task_id, status).await
+    application::update_task_status(&state.pool, UpdateTaskStatusRequest { task_id, status }).await
 }
 
 #[tauri::command]
@@ -21,5 +21,5 @@ pub(crate) async fn update_task_title(
     title: String,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    update_task_title_in_pool(&state.pool, task_id, title).await
+    application::update_task_title(&state.pool, UpdateTaskTitleRequest { task_id, title }).await
 }

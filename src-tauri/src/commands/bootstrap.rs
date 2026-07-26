@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     app::{AppState, CommandResult},
-    bootstrap::load_tauri_bootstrap,
+    application::bootstrap::{self as application, BootstrapRequest, BootstrapSurface},
     models::Bootstrap,
 };
 
@@ -13,11 +13,14 @@ pub(crate) async fn bootstrap(
     current_channel_only: Option<bool>,
     state: State<'_, AppState>,
 ) -> CommandResult<Bootstrap> {
-    load_tauri_bootstrap(
+    application::bootstrap(
         &state.pool,
         state.db_url().to_owned(),
-        channel_id,
-        current_channel_only.unwrap_or(false),
+        BootstrapSurface::Tauri,
+        BootstrapRequest {
+            channel_id,
+            current_channel_only: current_channel_only.unwrap_or(false),
+        },
     )
     .await
 }

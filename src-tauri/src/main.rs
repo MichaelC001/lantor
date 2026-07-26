@@ -9,6 +9,7 @@ mod agent_routing;
 mod agent_work_dispatch;
 mod agent_workspace;
 mod app;
+mod application;
 mod artifact_store;
 mod attachments;
 mod bootstrap;
