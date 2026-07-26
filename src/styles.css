@@ -893,6 +893,7 @@ button,
 .mobile-nav-button,
 .mobile-bottom-nav,
 .thread-mobile-back,
+.thread-mobile-actions,
 .agent-mobile-back {
   display: none;
 }
@@ -10329,7 +10330,7 @@ body.resizing-column * {
 
   .channel,
   .dm {
-    min-height: 42px;
+    min-height: 44px;
     padding-top: 8px;
     padding-bottom: 8px;
     font-size: var(--type-size-body);
@@ -10360,7 +10361,7 @@ body.resizing-column * {
 
   .topbar {
     overflow: visible;
-    min-height: 48px;
+    min-height: 54px;
     justify-content: flex-start;
     gap: 8px;
     padding: calc(5px + env(safe-area-inset-top)) 10px 5px;
@@ -10368,19 +10369,19 @@ body.resizing-column * {
 
   .mobile-nav-button {
     display: grid;
-    width: 30px;
-    height: 30px;
+    width: 44px;
+    height: 44px;
     flex: 0 0 auto;
     place-items: center;
-    border-radius: 8px;
+    border-radius: 13px;
     background: var(--panel-strong);
     color: var(--ink);
     box-shadow: inset 0 0 0 1px var(--line);
   }
 
   .mobile-nav-button svg {
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
   }
 
   .desktop-history-controls {
@@ -10394,19 +10395,19 @@ body.resizing-column * {
   }
 
   .hash-card.dm-card {
-    width: 30px;
-    height: 30px;
+    width: 44px;
+    height: 44px;
   }
 
   .hash-card.dm-card .agent-avatar {
-    width: 30px;
-    height: 30px;
-    border-radius: 10px;
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
   }
 
   .channel-title {
     flex: 1 1 0;
-    max-width: calc(100vw - 118px);
+    max-width: none;
     min-width: 0;
     overflow: hidden;
     gap: 10px;
@@ -10437,20 +10438,20 @@ body.resizing-column * {
 
   .channel-header-actions {
     flex: 0 0 auto;
-    max-width: 66px;
+    max-width: 92px;
     min-width: 0;
     gap: 4px;
   }
 
   .channel-agent-count-trigger {
-    min-width: 30px;
-    height: 30px;
-    padding: 0 5px;
+    min-width: 44px;
+    height: 44px;
+    padding: 0 8px;
   }
 
   .channel-agent-count-trigger.empty {
-    width: 30px;
-    min-width: 30px;
+    width: 44px;
+    min-width: 44px;
     padding: 0;
   }
 
@@ -10459,8 +10460,8 @@ body.resizing-column * {
   }
 
   .channel-action-trigger {
-    width: 30px;
-    height: 30px;
+    width: 44px;
+    height: 44px;
   }
 
   .channel-agent-preview {
@@ -10480,7 +10481,7 @@ body.resizing-column * {
 
   .message-card,
   .reply-list article {
-    grid-template-columns: 34px minmax(0, 1fr);
+    grid-template-columns: 44px minmax(0, 1fr);
     gap: 8px;
     padding: 8px 12px;
   }
@@ -10499,11 +10500,11 @@ body.resizing-column * {
   .mobile-message-save-tag {
     display: inline-grid;
     flex: 0 0 auto;
-    width: 28px;
-    min-width: 28px;
-    height: 28px;
-    min-height: 28px;
-    margin: -4px 0 -4px auto;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    margin: -12px 0 -12px auto;
     padding: 0;
     place-items: center;
     border: 1px solid rgba(138, 91, 0, 0.12);
@@ -10538,9 +10539,9 @@ body.resizing-column * {
   }
 
   .message-agent-avatar-trigger {
-    width: 34px;
-    height: 34px;
-    border-radius: 12px;
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
   }
 
   .avatar,
@@ -10610,12 +10611,12 @@ body.resizing-column * {
   .reply-composer {
     align-items: end;
     gap: 6px 8px;
-    margin-bottom: calc(68px + env(safe-area-inset-bottom));
-    padding: 4px 12px;
+    margin-bottom: calc(78px + env(safe-area-inset-bottom));
+    padding: 6px 12px;
   }
 
   .composer {
-    grid-template-columns: 34px 34px minmax(0, 1fr) 34px;
+    grid-template-columns: 44px 44px minmax(0, 1fr) 44px;
     grid-template-areas:
       "picker picker picker picker"
       "attachments attachments attachments attachments"
@@ -10624,7 +10625,7 @@ body.resizing-column * {
 
   .composer:not(:has(.task-toggle)),
   .reply-composer {
-    grid-template-columns: 34px minmax(0, 1fr) 34px;
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
     grid-template-areas:
       "picker picker picker"
       "attachments attachments attachments"
@@ -10653,9 +10654,9 @@ body.resizing-column * {
   .composer textarea,
   .reply-composer textarea {
     grid-area: input;
-    min-height: 38px;
+    min-height: 44px;
     max-height: 112px;
-    padding: 7px 13px;
+    padding: 10px 13px;
     border-radius: 14px;
     font-size: var(--type-size-control);
     line-height: 20px;
@@ -10665,12 +10666,26 @@ body.resizing-column * {
   .composer .composer-reference-input,
   .reply-composer .composer-reference-input {
     grid-area: input;
+    border: 0;
     border-radius: 14px;
+    box-shadow: inset 0 0 0 1px var(--control-border);
+  }
+
+  .composer .composer-reference-input:focus-within,
+  .reply-composer .composer-reference-input:focus-within {
+    box-shadow:
+      inset 0 0 0 1px var(--accent-soft-hover-border),
+      0 0 0 3px var(--state-focus-ring);
+  }
+
+  .composer .composer-reference-input textarea,
+  .reply-composer .composer-reference-input textarea {
+    display: block;
   }
 
   .composer .composer-reference-overlay,
   .reply-composer .composer-reference-overlay {
-    padding: 7px 13px;
+    padding: 10px 13px;
     font-size: var(--type-size-control);
     line-height: 20px;
   }
@@ -10699,12 +10714,12 @@ body.resizing-column * {
   .reply-composer .reply-send,
   .attach-button,
   .task-toggle {
-    width: 34px;
-    min-width: 34px;
-    min-height: 34px;
-    height: 34px;
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    height: 44px;
     padding: 0;
-    border-radius: 999px;
+    border-radius: 13px;
     box-shadow: none;
   }
 
@@ -10746,7 +10761,7 @@ body.resizing-column * {
   .mobile-bottom-nav {
     position: fixed;
     right: 10px;
-    bottom: calc(8px + env(safe-area-inset-bottom));
+    bottom: calc(14px + env(safe-area-inset-bottom));
     left: 10px;
     z-index: 80;
     display: grid;
@@ -10770,7 +10785,7 @@ body.resizing-column * {
     position: relative;
     display: grid;
     min-width: 0;
-    min-height: 42px;
+    min-height: 44px;
     place-items: center;
     align-content: center;
     gap: 2px;
@@ -10816,6 +10831,12 @@ body.resizing-column * {
     padding: calc(4px + env(safe-area-inset-top)) 10px 4px;
   }
 
+  .thread header {
+    position: relative;
+    z-index: 10;
+    overflow: visible;
+  }
+
   .thread header > div,
   .agent-title {
     flex: 1 1 0;
@@ -10824,7 +10845,7 @@ body.resizing-column * {
   }
 
   .thread-title {
-    max-width: calc(100vw - 88px);
+    max-width: none;
     overflow: hidden;
   }
 
@@ -10835,14 +10856,70 @@ body.resizing-column * {
   .thread header .thread-mobile-back,
   .agent-drawer-head .agent-mobile-back {
     display: grid;
-    width: 30px;
-    height: 30px;
+    width: 44px;
+    height: 44px;
     flex: 0 0 auto;
     place-items: center;
-    border-radius: 10px;
+    border-radius: 13px;
     background: var(--panel-strong);
     color: var(--ink);
     box-shadow: inset 0 0 0 1px var(--line);
+  }
+
+  .thread-header-actions {
+    display: none;
+  }
+
+  .thread-mobile-actions {
+    position: relative;
+    display: block;
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+
+  .thread header .thread-mobile-actions-trigger {
+    display: grid;
+    width: 44px;
+    height: 44px;
+    place-items: center;
+    border-radius: 13px;
+    background: var(--panel-strong);
+    color: var(--ink);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+
+  .thread-mobile-actions-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 8;
+    display: grid;
+    width: min(240px, calc(100vw - 20px));
+    gap: 3px;
+    padding: 6px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--bg-elevated);
+    box-shadow: var(--surface-shadow);
+  }
+
+  .thread header .thread-mobile-actions-menu button {
+    display: flex;
+    width: 100%;
+    min-height: 44px;
+    height: auto;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .thread header .thread-mobile-actions-menu button:hover:not(:disabled),
+  .thread header .thread-mobile-actions-menu button:focus-visible:not(:disabled) {
+    background: var(--bg-selected-soft);
   }
 
   .thread header .thread-close {
@@ -10871,8 +10948,8 @@ body.resizing-column * {
 
   .agent-drawer-head .agent-head-action {
     flex: 0 0 auto;
-    width: 30px;
-    height: 30px;
+    width: 44px;
+    height: 44px;
   }
 
   .thread h2,
@@ -10909,7 +10986,7 @@ body.resizing-column * {
   }
 
   .thread-message-with-avatar {
-    grid-template-columns: 34px minmax(0, 1fr);
+    grid-template-columns: 44px minmax(0, 1fr);
     gap: 8px;
   }
 
@@ -11083,8 +11160,8 @@ body.resizing-column * {
   .search-mobile-top-back {
     display: grid;
     flex: 0 0 auto;
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     place-items: center;
     border-radius: 13px;
     background: var(--panel-strong);
@@ -11105,8 +11182,8 @@ body.resizing-column * {
 
   .search-mobile-back {
     display: none;
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     place-items: center;
     border-radius: 13px;
     background: var(--panel-strong);
@@ -11119,7 +11196,7 @@ body.resizing-column * {
   }
 
   .search-panel-head input {
-    height: 42px;
+    height: 44px;
     padding: 0 12px;
     border: 1px solid var(--line);
     border-radius: 14px;
@@ -11128,8 +11205,8 @@ body.resizing-column * {
   }
 
   .search-clear {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     border-radius: 13px;
   }
 
@@ -11150,7 +11227,7 @@ body.resizing-column * {
 
   .search-filter-group button,
   .search-time-filter {
-    min-height: 36px;
+    min-height: 44px;
     padding: 8px 11px;
     white-space: nowrap;
   }
@@ -11187,10 +11264,22 @@ body.resizing-column * {
   }
 
   .activity-feed-head {
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    gap: 10px;
+    grid-template-areas: "summary close";
+    grid-template-columns: minmax(0, 1fr) 44px;
+    gap: 8px;
     min-height: 64px;
     padding: calc(10px + env(safe-area-inset-top)) 12px 10px;
+  }
+
+  .activity-panel .activity-feed-head {
+    grid-template-areas:
+      "summary close"
+      "actions actions";
+  }
+
+  .activity-feed-head > div:first-child {
+    grid-area: summary;
+    min-width: 0;
   }
 
   .activity-feed-head h2 {
@@ -11199,17 +11288,27 @@ body.resizing-column * {
 
   .activity-feed-head p {
     font-size: var(--type-size-meta);
+    white-space: nowrap;
   }
 
   .activity-feed-head-actions {
+    display: grid;
+    grid-area: actions;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
     gap: 6px;
+  }
+
+  .activity-feed-back {
+    grid-area: close;
+    width: 44px;
+    height: 44px;
   }
 
   .activity-feed-mark-all,
   .activity-feed-dismiss-all {
-    grid-column: auto;
-    width: auto;
-    height: 40px;
+    width: 100%;
+    height: 44px;
     padding: 0 10px;
     white-space: nowrap;
     font-size: var(--type-size-meta);
@@ -11221,7 +11320,7 @@ body.resizing-column * {
   }
 
   .activity-feed-filters button {
-    height: 36px;
+    height: 44px;
     padding: 0 12px;
   }
 
@@ -11236,7 +11335,7 @@ body.resizing-column * {
   }
 
   .activity-feed-new-activity button {
-    min-height: 36px;
+    min-height: 44px;
     padding: 8px 14px;
   }
 
@@ -11347,8 +11446,8 @@ body.resizing-column * {
 
   .activity-feed-check,
   .activity-feed-dismiss {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
   }
 
   :root[data-theme="dark"] .search-backdrop,

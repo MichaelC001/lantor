@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowLeft, Bookmark, CheckCircle2, Crosshair, FileImage, Hash, Maximize2, MessageSquare, Minimize2, Paperclip, Quote, RotateCcw, Send, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, Bookmark, CheckCircle2, Crosshair, FileImage, Hash, Maximize2, MessageSquare, Minimize2, MoreHorizontal, Paperclip, Quote, RotateCcw, Send, X } from "lucide-react";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type TextareaHTMLAttributes, type WheelEvent as ReactWheelEvent } from "react";
 import { useAutoGrowTextarea } from "../hooks/useAutoGrowTextarea";
 import { useCoarsePointer } from "../hooks/useCoarsePointer";
@@ -205,6 +205,7 @@ export function ThreadPanel({
   onResizeStart,
 }: ThreadPanelProps) {
   const [showBackToBottom, setShowBackToBottom] = useState(false);
+  const [showMobileThreadActions, setShowMobileThreadActions] = useState(false);
   const [messageMenu, setMessageMenu] = useState<MessageMenuState>(null);
   const [tapFocusedMessageId, setTapFocusedMessageId] = useState<string | null>(null);
   const [expandedThreadMessageStateByThread, setExpandedThreadMessageStateByThread] = useState<Map<string, ThreadMessageExpansionState>>(() => new Map());
@@ -236,6 +237,10 @@ export function ThreadPanel({
     if (!entry || Date.now() - entry.lastTouchedAt > THREAD_MESSAGE_EXPANSION_TTL_MS) return new Set<string>();
     return entry.messageIds;
   }, [activeThreadExpansionKey, expandedThreadMessageStateByThread]);
+
+  useEffect(() => {
+    setShowMobileThreadActions(false);
+  }, [activeThreadExpansionKey]);
   const surfaceLabel = channel
     ? isDm
       ? `Thread in DM with @${dmAgent?.handle || "agent"}`
@@ -808,6 +813,81 @@ export function ThreadPanel({
             Thread <span>{channel ? isDm ? `- @${dmAgent?.handle || "agent"}` : `- #${channel.name}` : "- no channel"}</span>
           </h2>
         </div>
+        <span className="thread-mobile-actions">
+          <button
+            type="button"
+            className="thread-mobile-actions-trigger"
+            aria-label="Thread actions"
+            aria-expanded={showMobileThreadActions}
+            onClick={() => setShowMobileThreadActions((current) => !current)}
+          >
+            <MoreHorizontal size={20} />
+          </button>
+          {showMobileThreadActions && (
+            <span className="thread-mobile-actions-menu" role="menu" aria-label="Thread actions">
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!activeRoot}
+                onClick={() => {
+                  setShowMobileThreadActions(false);
+                  exportThreadVectorImage();
+                }}
+              >
+                <FileImage size={18} />
+                <span>Export as SVG</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!hasCollapsibleThreadMessages || areAllThreadMessagesExpanded}
+                onClick={() => {
+                  setShowMobileThreadActions(false);
+                  expandAllThreadMessages();
+                }}
+              >
+                <Maximize2 size={18} />
+                <span>Expand all messages</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!hasCollapsibleThreadMessages || areAllThreadMessagesFolded}
+                onClick={() => {
+                  setShowMobileThreadActions(false);
+                  foldAllThreadMessages();
+                }}
+              >
+                <Minimize2 size={18} />
+                <span>Fold all messages</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!activeRoot}
+                onClick={() => {
+                  setShowMobileThreadActions(false);
+                  if (activeRoot) onLocateRoot(activeRoot);
+                }}
+              >
+                <Crosshair size={18} />
+                <span>{isDm ? "Locate in DM" : "Locate in channel"}</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!activeRoot}
+                onClick={() => {
+                  setShowMobileThreadActions(false);
+                  if (activeRoot) insertMessageReference(activeRoot, "thread");
+                }}
+              >
+                <Quote size={18} />
+                <span>Reference thread</span>
+              </button>
+            </span>
+          )}
+        </span>
         <span className="thread-header-actions">
           <button
             type="button"
