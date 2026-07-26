@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import type { Bootstrap } from "./types";
 
 export type PerfCause = "full-refresh" | "message-upsert" | "activity-flush";
@@ -62,7 +61,6 @@ let nextSampleId = 1;
 let samples: PerfSample[] = [];
 let pendingCommits: PendingCommit[] = [];
 let longTasks: Array<{ startTime: number; durationMs: number }> = [];
-const subscribers = new Set<() => void>();
 
 function runtime(): "tauri" | "web" {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__) ? "tauri" : "web";
@@ -73,10 +71,6 @@ export function shouldEnablePerfTelemetry() {
   const params = new URLSearchParams(window.location.search);
   return params.has("lantorPerf")
     || window.localStorage.getItem(PERF_STORAGE_KEY) === "1";
-}
-
-function notify() {
-  for (const subscriber of subscribers) subscriber();
 }
 
 function percentile(values: number[], percentileValue: number) {
@@ -123,7 +117,6 @@ function snapshot(): PerfSnapshot {
 
 function publishSample(sample: PerfSample) {
   samples = [sample, ...samples].slice(0, MAX_SAMPLES);
-  notify();
 }
 
 export function createPerfDraft(cause: PerfCause): PendingCommit {
@@ -199,7 +192,6 @@ export function initPerfTelemetry() {
         samples = [];
         pendingCommits = [];
         longTasks = [];
-        notify();
       },
     };
   }
@@ -218,23 +210,6 @@ export function initPerfTelemetry() {
   } catch {
     // Some runtimes expose PerformanceObserver but not longtask.
   }
-}
-
-export function subscribePerfSamples(subscriber: () => void) {
-  subscribers.add(subscriber);
-  return () => {
-    subscribers.delete(subscriber);
-  };
-}
-
-export function getPerfSnapshot() {
-  return snapshot();
-}
-
-export function usePerfSnapshot() {
-  const [value, setValue] = useState(getPerfSnapshot);
-  useEffect(() => subscribePerfSamples(() => setValue(getPerfSnapshot())), []);
-  return value;
 }
 
 declare global {

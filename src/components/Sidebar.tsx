@@ -11,7 +11,7 @@ import {
   Settings,
   UserRound,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FocusEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   Agent,
   Bootstrap,
@@ -81,7 +81,10 @@ export function Sidebar({
 }: SidebarProps) {
   const [collapsedSections, setCollapsedSections] = useState({ channels: false, dms: false });
   const [channelSortMode, setChannelSortMode] = useState<ChannelSortMode>(() => loadSidebarChannelSortMode());
+  const [showMobileOwnerMenu, setShowMobileOwnerMenu] = useState(false);
   const dmListRef = useRef<HTMLElement | null>(null);
+  const mobileOwnerMenuRef = useRef<HTMLDivElement | null>(null);
+  const mobileOwnerTriggerRef = useRef<HTMLButtonElement | null>(null);
   const normalChannels = useMemo(() => {
     const latestActivityByChannel = new Map<string, number>();
     for (const message of data.messages) {
@@ -135,6 +138,34 @@ export function Sidebar({
     });
   }, [mobileFocus]);
 
+  useEffect(() => {
+    if (!showMobileOwnerMenu) return;
+    function handlePointerDown(event: PointerEvent) {
+      const root = mobileOwnerMenuRef.current;
+      if (!root) return;
+      const target = event.target as Node | null;
+      if (target && root.contains(target)) return;
+      setShowMobileOwnerMenu(false);
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setShowMobileOwnerMenu(false);
+      window.requestAnimationFrame(() => mobileOwnerTriggerRef.current?.focus());
+    }
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showMobileOwnerMenu]);
+
+  function handleMobileOwnerMenuBlur(event: FocusEvent<HTMLDivElement>) {
+    if (event.currentTarget.contains(event.relatedTarget)) return;
+    setShowMobileOwnerMenu(false);
+  }
+
   return (
     <aside className="sidebar">
       <button
@@ -146,6 +177,63 @@ export function Sidebar({
         <div className="workspace-switch" aria-label={APP_DISPLAY_NAME}>
           <img className="workspace-switch-logo" src="/lantor-icon.png" alt="" aria-hidden="true" />
           <strong>{APP_DISPLAY_NAME}</strong>
+        </div>
+        <div
+          className="mobile-owner"
+          ref={mobileOwnerMenuRef}
+          onBlur={handleMobileOwnerMenuBlur}
+        >
+          <button
+            type="button"
+            className="mobile-owner-trigger"
+            ref={mobileOwnerTriggerRef}
+            aria-label="Open owner menu"
+            aria-haspopup="menu"
+            aria-expanded={showMobileOwnerMenu}
+            title={data.owner_profile.display_name}
+            onClick={() => setShowMobileOwnerMenu((current) => !current)}
+          >
+            <AgentAvatar agent={ownerAsAvatarAgent(data.owner_profile)} size="md" showStatus={false} />
+          </button>
+          {showMobileOwnerMenu && (
+            <div className="mobile-owner-menu" role="menu" aria-label="Owner menu">
+              <div className="mobile-owner-summary" role="presentation">
+                <AgentAvatar agent={ownerAsAvatarAgent(data.owner_profile)} size="md" showStatus={false} />
+                <span>
+                  <strong>{data.owner_profile.display_name}</strong>
+                  <small>{data.owner_profile.description || "local owner"}</small>
+                </span>
+              </div>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setShowMobileOwnerMenu(false);
+                  openOwnerProfileModal();
+                }}
+              >
+                <UserRound size={18} />
+                <span>
+                  <strong>Edit profile</strong>
+                  <small>Name, avatar, and description</small>
+                </span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setShowMobileOwnerMenu(false);
+                  openSettingsModal();
+                }}
+              >
+                <Settings size={18} />
+                <span>
+                  <strong>Settings</strong>
+                  <small>Appearance and app preferences</small>
+                </span>
+              </button>
+            </div>
+          )}
         </div>
       </section>
 

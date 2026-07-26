@@ -894,6 +894,7 @@ button,
 .mobile-bottom-nav,
 .thread-mobile-back,
 .thread-mobile-actions,
+.mobile-owner,
 .agent-mobile-back {
   display: none;
 }
@@ -4524,9 +4525,7 @@ mark {
 }
 
 :root[data-theme="dark"] .theme-choice-grid button.selected strong,
-:root[data-theme="dark"] .theme-choice-grid button.selected small,
-:root[data-theme="dark"] .chat-text-size-grid button.selected strong,
-:root[data-theme="dark"] .chat-text-size-grid button.selected small {
+:root[data-theme="dark"] .chat-text-size-grid button.selected strong {
   color: var(--accent);
 }
 
@@ -6635,7 +6634,7 @@ body.resizing-column * {
 .settings-panel {
   display: grid;
   align-content: start;
-  gap: 16px;
+  gap: 14px;
   min-width: 0;
 }
 
@@ -6651,16 +6650,9 @@ body.resizing-column * {
   font-weight: var(--type-weight-bold);
 }
 
-.settings-section-head p {
-  margin: 0;
-  color: var(--muted);
-  font-size: var(--type-size-body);
-  line-height: 1.4;
-}
-
 .settings-fieldset {
   display: grid;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -6668,7 +6660,7 @@ body.resizing-column * {
 }
 
 .settings-fieldset legend {
-  margin-bottom: 8px;
+  margin-bottom: 4px;
   padding: 0;
   color: var(--muted);
   font-size: var(--type-size-meta);
@@ -6693,13 +6685,12 @@ body.resizing-column * {
 }
 
 .theme-choice-grid button {
-  position: relative;
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   min-width: 0;
-  min-height: 62px;
+  min-height: 52px;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 13px;
@@ -6709,10 +6700,9 @@ body.resizing-column * {
 }
 
 .chat-text-size-grid button {
-  position: relative;
   display: grid;
   min-width: 0;
-  min-height: 58px;
+  min-height: 52px;
   place-items: center;
   gap: 4px;
   padding: 9px 8px;
@@ -6731,36 +6721,9 @@ body.resizing-column * {
   color: var(--accent);
 }
 
-.theme-choice-grid button.selected::after,
-.chat-text-size-grid button.selected::after {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  display: grid;
-  width: 18px;
-  height: 18px;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-ink);
-  content: "✓";
-  font-size: var(--type-size-caption);
-  font-weight: var(--type-weight-bold);
-  line-height: 1;
-}
-
 .theme-choice-grid button.selected strong,
-.theme-choice-grid button.selected small,
-.chat-text-size-grid button.selected strong,
-.chat-text-size-grid button.selected small {
+.chat-text-size-grid button.selected strong {
   color: var(--accent);
-}
-
-.theme-choice-grid span,
-.chat-text-size-grid span {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
 }
 
 .theme-choice-grid strong,
@@ -6770,75 +6733,8 @@ body.resizing-column * {
   font-weight: var(--type-weight-semibold);
 }
 
-.theme-choice-grid small,
-.chat-text-size-grid small {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: var(--type-size-caption);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.settings-hint {
-  margin: 0;
-  color: var(--muted);
-  font-size: var(--type-size-meta);
-  line-height: 1.4;
-}
-
 .settings-attachments-fieldset {
-  margin-top: 8px;
-}
-
-.settings-perf-fieldset {
-  margin-top: 8px;
-}
-
-.settings-perf-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.settings-perf-card {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel-strong);
-}
-
-.settings-perf-card strong,
-.settings-perf-latest strong {
-  overflow: hidden;
-  color: var(--ink);
-  font-size: var(--type-size-meta);
-  font-weight: var(--type-weight-semibold);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.settings-perf-card small,
-.settings-perf-card span,
-.settings-perf-latest span,
-.settings-perf-latest small {
-  color: var(--muted);
-  font-size: var(--type-size-caption);
-  line-height: 1.35;
-}
-
-.settings-perf-latest {
-  display: grid;
-  grid-template-columns: auto minmax(0, auto) minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-  min-width: 0;
-  padding: 9px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
+  margin-top: 0;
 }
 
 .settings-toggle-row {
@@ -6847,7 +6743,8 @@ body.resizing-column * {
   justify-content: space-between;
   gap: 14px;
   min-width: 0;
-  padding: 11px 12px;
+  min-height: 52px;
+  padding: 9px 10px;
   border: 1px solid var(--line);
   border-radius: 13px;
   background: var(--panel-strong);
@@ -6862,22 +6759,10 @@ body.resizing-column * {
   color: var(--muted);
 }
 
-.settings-toggle-copy > span {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
 .settings-toggle-copy strong {
   color: var(--ink);
   font-size: var(--type-size-body);
   font-weight: var(--type-weight-semibold);
-}
-
-.settings-toggle-copy small {
-  color: var(--muted);
-  font-size: var(--type-size-caption);
-  line-height: 1.3;
 }
 
 .settings-toggle-row input {
@@ -10281,10 +10166,12 @@ body.resizing-column * {
   }
 
   .workspace {
+    position: relative;
+    z-index: 6;
     display: flex;
     align-items: center;
     justify-content: flex-start;
-    gap: 10px;
+    gap: 8px;
     padding: calc(12px + env(safe-area-inset-top)) 14px 10px;
   }
 
@@ -10304,6 +10191,111 @@ body.resizing-column * {
 
   .workspace-switch strong {
     font-size: var(--type-size-title);
+  }
+
+  .mobile-owner {
+    position: relative;
+    display: block;
+    flex: 0 0 auto;
+  }
+
+  .mobile-owner-trigger {
+    display: grid;
+    width: 44px;
+    height: 44px;
+    padding: 4px;
+    place-items: center;
+    border-radius: 15px;
+    background: var(--bg-control-flat);
+    color: var(--ink);
+    box-shadow: inset 0 0 0 1px var(--control-border);
+  }
+
+  .mobile-owner-trigger:hover,
+  .mobile-owner-trigger[aria-expanded="true"] {
+    background: var(--bg-hover);
+  }
+
+  .mobile-owner-trigger:focus-visible {
+    outline: none;
+    box-shadow:
+      inset 0 0 0 1px var(--accent-soft-hover-border),
+      0 0 0 3px var(--state-focus-ring);
+  }
+
+  .mobile-owner-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 12;
+    display: grid;
+    width: min(260px, calc(100vw - 28px));
+    gap: 4px;
+    padding: 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 18px;
+    background: var(--surface-floating);
+    box-shadow: var(--surface-shadow);
+  }
+
+  .mobile-owner-summary {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    margin-bottom: 2px;
+    padding: 7px 8px 10px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .mobile-owner-summary > span,
+  .mobile-owner-menu > button > span {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+  }
+
+  .mobile-owner-summary strong,
+  .mobile-owner-summary small,
+  .mobile-owner-menu > button strong,
+  .mobile-owner-menu > button small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-owner-summary strong,
+  .mobile-owner-menu > button strong {
+    color: var(--ink-primary);
+    font-size: var(--type-size-body);
+    font-weight: var(--type-weight-semibold);
+  }
+
+  .mobile-owner-summary small,
+  .mobile-owner-menu > button small {
+    color: var(--ink-muted);
+    font-size: var(--type-size-caption);
+  }
+
+  .mobile-owner-menu > button {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    min-height: 52px;
+    padding: 7px 10px;
+    border-radius: 13px;
+    background: transparent;
+    color: var(--ink-muted);
+    text-align: left;
+  }
+
+  .mobile-owner-menu > button:hover,
+  .mobile-owner-menu > button:focus-visible {
+    background: var(--bg-hover);
+    color: var(--accent);
+    outline: none;
   }
 
   .quick-actions {
@@ -11468,6 +11460,21 @@ body.resizing-column * {
     left: 12px !important;
     width: auto;
     min-width: 0;
+  }
+
+  /* Give the compact Settings sheet more of the narrow viewport. */
+  .modal-backdrop:has(.settings-panel) {
+    padding: 14px;
+  }
+
+  .modal-card:has(.settings-panel) {
+    max-width: calc(100vw - 28px);
+    max-height: calc(100dvh - 28px);
+  }
+
+  .modal-card:has(.settings-panel) .modal-body {
+    max-height: calc(100dvh - 104px);
+    padding: 16px;
   }
 
   /* Mobile: drop modal backdrop blur — full-viewport backdrop-filter forces
