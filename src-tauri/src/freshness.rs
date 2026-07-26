@@ -35,6 +35,14 @@ enum FreshnessRetryDisposition {
     Suppressed,
 }
 
+struct FreshnessRetrySource {
+    work_item_id: Uuid,
+    source_message_id: Option<Uuid>,
+    task_id: Option<Uuid>,
+    title: String,
+    context: String,
+}
+
 pub(crate) async fn advance_agent_target_watermark(
     pool: &SqlitePool,
     agent_id: Uuid,
@@ -553,10 +561,6 @@ async fn queue_freshness_retry_work_item(
             w.channel_id,
             c.name as channel_name,
             w.thread_root_id,
-            w.source_message_id,
-            w.task_id,
-            w.title,
-            w.context,
             w.freshness_generation
         from agent_work_items w
         left join channels c on c.id = w.channel_id
@@ -576,17 +580,24 @@ async fn queue_freshness_retry_work_item(
     };
     let thread_root_id: Option<Uuid> = row.get("thread_root_id");
     let channel_name: Option<String> = row.get("channel_name");
-    let title: String = row.get("title");
-    let original_context: String = row.get("context");
     let current_generation: i64 = row.get("freshness_generation");
     if current_generation >= FRESHNESS_RETRY_MAX_GENERATIONS {
         return Ok(FreshnessRetryDisposition::Suppressed);
     }
-    let rendered =
-        render_recent_surface_context(pool, channel_id, channel_name.as_deref(), thread_root_id)
-            .await?;
+    let Some(source) = load_freshness_retry_source(pool, agent_id, work_item_id).await? else {
+        return Ok(FreshnessRetryDisposition::Suppressed);
+    };
+    let rendered = render_surface_context_delta(
+        pool,
+        channel_id,
+        channel_name.as_deref(),
+        thread_root_id,
+        stale.seen_seq,
+    )
+    .await?;
     let context_max_seq = stale.latest_seq.max(rendered.max_seq);
     let context = freshness_retry_context(
+        source.work_item_id,
         work_item_id,
         held_output_id,
         channel_name.as_deref(),
@@ -594,9 +605,9 @@ async fn queue_freshness_retry_work_item(
         stale,
         held_body,
         &rendered.body,
-        &original_context,
+        &source.context,
     );
-    let retry_title = format!("Refresh held reply: {title}");
+    let retry_title = format!("Refresh held reply: {}", source.title);
     let retry_work_item_id: Uuid = sqlx::query_scalar(
         r#"
         insert into agent_work_items (
@@ -610,8 +621,8 @@ async fn queue_freshness_retry_work_item(
     .bind(agent_id)
     .bind(channel_id)
     .bind(thread_root_id)
-    .bind(row.get::<Option<Uuid>, _>("source_message_id"))
-    .bind(row.get::<Option<Uuid>, _>("task_id"))
+    .bind(source.source_message_id)
+    .bind(source.task_id)
     .bind(retry_title)
     .bind(context)
     .bind(context_max_seq)
@@ -642,6 +653,49 @@ async fn queue_freshness_retry_work_item(
     Ok(FreshnessRetryDisposition::Requeued(retry_work_item_id))
 }
 
+async fn load_freshness_retry_source(
+    pool: &SqlitePool,
+    agent_id: Uuid,
+    work_item_id: Uuid,
+) -> CommandResult<Option<FreshnessRetrySource>> {
+    let row = sqlx::query(
+        r#"
+        with recursive ancestry(work_item_id) as (
+            select $1
+            union
+            select held.work_item_id
+            from agent_held_outputs held
+            join ancestry on held.retry_work_item_id = ancestry.work_item_id
+            where held.work_item_id is not null
+        )
+        select
+            source.id,
+            source.source_message_id,
+            source.task_id,
+            source.title,
+            source.context
+        from ancestry
+        join agent_work_items source on source.id = ancestry.work_item_id
+        where source.agent_id = $2
+        order by source.freshness_generation asc
+        limit 1
+        "#,
+    )
+    .bind(work_item_id)
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(to_string)?;
+
+    Ok(row.map(|row| FreshnessRetrySource {
+        work_item_id: row.get("id"),
+        source_message_id: row.get("source_message_id"),
+        task_id: row.get("task_id"),
+        title: row.get("title"),
+        context: row.get("context"),
+    }))
+}
+
 async fn load_existing_pending_freshness_retry(
     pool: &SqlitePool,
     work_item_id: Uuid,
@@ -669,11 +723,12 @@ struct RenderedSurfaceContext {
     max_seq: i64,
 }
 
-async fn render_recent_surface_context(
+async fn render_surface_context_delta(
     pool: &SqlitePool,
     channel_id: Uuid,
     channel_name: Option<&str>,
     thread_root_id: Option<Uuid>,
+    after_seq: i64,
 ) -> CommandResult<RenderedSurfaceContext> {
     let rows = if let Some(thread_root_id) = thread_root_id {
         sqlx::query(
@@ -682,14 +737,16 @@ async fn render_recent_surface_context(
             from messages
             where channel_id = $1
               and (id = $2 or thread_root_id = $2)
+              and seq > $3
               and delivery_state = 'complete'
               and length(trim(body)) > 0
             order by seq desc
-            limit $3
+            limit $4
             "#,
         )
         .bind(channel_id)
         .bind(thread_root_id)
+        .bind(after_seq)
         .bind(FRESHNESS_RETRY_CONTEXT_LIMIT)
         .fetch_all(pool)
         .await
@@ -701,13 +758,15 @@ async fn render_recent_surface_context(
             from messages
             where channel_id = $1
               and thread_root_id is null
+              and seq > $2
               and delivery_state = 'complete'
               and length(trim(body)) > 0
             order by seq desc
-            limit $2
+            limit $3
             "#,
         )
         .bind(channel_id)
+        .bind(after_seq)
         .bind(FRESHNESS_RETRY_CONTEXT_LIMIT)
         .fetch_all(pool)
         .await
@@ -746,14 +805,15 @@ async fn render_recent_surface_context(
 
 #[allow(clippy::too_many_arguments)]
 fn freshness_retry_context(
-    old_work_item_id: Uuid,
+    source_work_item_id: Uuid,
+    previous_work_item_id: Uuid,
     held_output_id: Uuid,
     channel_name: Option<&str>,
     thread_root_id: Option<Uuid>,
     stale: &StaleOutput,
     held_body: &str,
     recent_context: &str,
-    original_context: &str,
+    source_context: &str,
 ) -> String {
     let target = surface_target(channel_name, thread_root_id);
     let mut lines = vec![
@@ -761,7 +821,8 @@ fn freshness_retry_context(
         "Lantor held your previous visible output because newer complete messages arrived on the same target after your prompt context was rendered.".to_owned(),
         "Do not repost the held draft blindly. Use the recent thread context below and produce a new response only if it is still appropriate; otherwise reply silently.".to_owned(),
         format!("Default reply target for normal assistant text: {target}"),
-        format!("old_work_item_id: {old_work_item_id}"),
+        format!("source_work_item_id: {source_work_item_id}"),
+        format!("previous_work_item_id: {previous_work_item_id}"),
         format!("held_output_id: {held_output_id}"),
         format!("seen_seq: {}", stale.seen_seq),
         format!("latest_seq: {}", stale.latest_seq),
@@ -777,11 +838,11 @@ fn freshness_retry_context(
             recent_context.trim().to_owned(),
         ]);
     }
-    if !original_context.trim().is_empty() {
+    if !source_context.trim().is_empty() {
         lines.extend([
             String::new(),
-            "Original work-item context excerpt:".to_owned(),
-            compact_chars_middle(original_context, FRESHNESS_RETRY_ORIGINAL_CONTEXT_LIMIT),
+            "Source work-item context excerpt (generation 0):".to_owned(),
+            compact_chars_middle(source_context, FRESHNESS_RETRY_ORIGINAL_CONTEXT_LIMIT),
         ]);
     }
     lines.join("\n")
@@ -1157,7 +1218,7 @@ mod tests {
 
             let retry = sqlx::query(
                 r#"
-                select source_kind, status, context, context_max_seq, freshness_generation
+                select title, source_kind, status, context, context_max_seq, freshness_generation
                 from agent_work_items
                 where id = $1
                 "#,
@@ -1169,10 +1230,13 @@ mod tests {
             assert_eq!(retry.get::<String, _>("source_kind"), "freshness_retry");
             assert_eq!(retry.get::<String, _>("status"), "queued");
             assert_eq!(retry.get::<i64, _>("freshness_generation"), 1);
+            assert_eq!(retry.get::<String, _>("title"), "Refresh held reply: count");
             let retry_context: String = retry.get("context");
             assert!(retry_context.contains("Freshness retry for held agent output."));
             assert!(retry_context.contains("Held draft:"));
             assert!(retry_context.contains("hold-other-agent"));
+            assert!(retry_context.contains(&format!("source_work_item_id: {work_item_id}")));
+            assert!(retry_context.contains("original context"));
             assert!(retry.get::<i64, _>("context_max_seq") >= held_row.get::<i64, _>("latest_seq"));
 
             let retry_run_id: Uuid = sqlx::query_scalar(
@@ -1224,14 +1288,36 @@ mod tests {
             .map_err(|err| err.to_string())?;
             let gen2_retry_work_item_id = gen2_retry_work_item_id
                 .expect("stale retry below the generation cap should queue another retry");
-            let gen2_generation: i64 = sqlx::query_scalar(
-                "select freshness_generation from agent_work_items where id = $1",
+            let gen2_retry = sqlx::query(
+                r#"
+                select title, context, freshness_generation
+                from agent_work_items
+                where id = $1
+                "#,
             )
             .bind(gen2_retry_work_item_id)
             .fetch_one(&pool)
             .await
             .map_err(|err| err.to_string())?;
-            assert_eq!(gen2_generation, 2);
+            assert_eq!(gen2_retry.get::<i64, _>("freshness_generation"), 2);
+            assert_eq!(
+                gen2_retry.get::<String, _>("title"),
+                "Refresh held reply: count"
+            );
+            let gen2_context: String = gen2_retry.get("context");
+            assert_eq!(
+                gen2_context
+                    .matches("Freshness retry for held agent output.")
+                    .count(),
+                1
+            );
+            assert!(gen2_context.contains(&format!("source_work_item_id: {work_item_id}")));
+            assert!(gen2_context.contains(&format!("previous_work_item_id: {retry_work_item_id}")));
+            assert!(gen2_context.contains("original context"));
+            assert!(gen2_context.contains("hold-other-agent: 2"));
+            assert!(!gen2_context.contains("hold-other-agent: 1"));
+            assert!(!gen2_context.contains("Held draft:\n1"));
+            assert!(!gen2_context.contains("Refresh held reply: Refresh held reply"));
             let retry_count_after_gen2: i64 = sqlx::query_scalar(
                 r#"
                 select count(*)
