@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::agent_inbox_wake::agent_accepts_new_work;
@@ -709,7 +709,29 @@ pub(crate) async fn handle_agent_event(
             if !matches!(status, "todo" | "in_progress" | "in_review" | "done") {
                 return Err(format!("unsupported task status: {status}"));
             }
-            let affected = sqlx::query(
+            let task_row = sqlx::query(
+                r#"
+                select t.assignee_agent_id, m.sender_agent_id as creator_agent_id
+                from tasks t
+                join messages m on m.id = t.message_id
+                where t.number = $1
+                "#,
+            )
+            .bind(task_number)
+            .fetch_optional(pool)
+            .await
+            .map_err(to_string)?;
+            let Some(task_row) = task_row else {
+                return Err(format!("task #{task_number} does not exist"));
+            };
+            let assignee_agent_id: Option<Uuid> = task_row.get("assignee_agent_id");
+            let creator_agent_id: Option<Uuid> = task_row.get("creator_agent_id");
+            if assignee_agent_id != Some(agent_id) && creator_agent_id != Some(agent_id) {
+                return Err(format!(
+                    "task #{task_number} status can only be changed by its assignee or creator; claim it first"
+                ));
+            }
+            sqlx::query(
                 r#"
                 update tasks
                 set status = $2, version = version + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
@@ -720,11 +742,7 @@ pub(crate) async fn handle_agent_event(
             .bind(status)
             .execute(pool)
             .await
-            .map_err(to_string)?
-            .rows_affected();
-            if affected == 0 {
-                return Err(format!("task #{task_number} does not exist"));
-            }
+            .map_err(to_string)?;
             record_agent_activity(
                 pool,
                 Some(agent_id),
