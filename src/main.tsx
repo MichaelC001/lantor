@@ -875,6 +875,7 @@ function App() {
   const pendingChannelRestoreRef = useRef<Set<string>>(new Set());
   const refreshTimerRef = useRef<number | null>(null);
   const refreshInFlightRef = useRef(false);
+  const refreshPromiseRef = useRef<Promise<void> | null>(null);
   const refreshQueuedRef = useRef(false);
   const refreshInvalidationRef = useRef(0);
   const messageDeltaBufferRef = useRef<Map<string, { append: string; deliveryState: Message["delivery_state"] }>>(new Map());
@@ -1173,24 +1174,36 @@ function App() {
     }
   }
 
-  function refreshWithError(fallback: string) {
+  // Single-flight refresh shared by SSE fallbacks and mutations. If a refresh
+  // is already running, mark a follow-up as queued and return the in-flight
+  // promise instead of starting a concurrent full bootstrap.
+  function refreshExclusive(fallback = `Failed to refresh ${APP_DISPLAY_NAME} state`): Promise<void> {
     if (refreshInFlightRef.current) {
       refreshQueuedRef.current = true;
-      return;
+      return refreshPromiseRef.current ?? Promise.resolve();
     }
     refreshInFlightRef.current = true;
-    refresh()
-      .catch((err) => {
-        setAppError(errorMessage(err, fallback));
-        console.error(err);
-      })
-      .finally(() => {
+    const inFlight = (async () => {
+      try {
+        await refresh();
+      } finally {
         refreshInFlightRef.current = false;
+        refreshPromiseRef.current = null;
         if (refreshQueuedRef.current) {
           refreshQueuedRef.current = false;
           requestRefresh(fallback);
         }
-      });
+      }
+    })();
+    refreshPromiseRef.current = inFlight;
+    return inFlight;
+  }
+
+  function refreshWithError(fallback: string) {
+    refreshExclusive(fallback).catch((err) => {
+      setAppError(errorMessage(err, fallback));
+      console.error(err);
+    });
   }
 
   function requestRefresh(fallback = `Failed to refresh ${APP_DISPLAY_NAME} state`) {
@@ -1813,7 +1826,13 @@ function App() {
   async function mutate<T = unknown>(command: string, args: Record<string, unknown> = {}): Promise<T> {
     try {
       const result = await apiInvoke<T>(command, args);
-      await refresh();
+      // Wait out any refresh that was already running (it may predate this
+      // mutation), then run one through the shared single-flight guard so the
+      // caller still observes post-mutation state without concurrent bootstraps.
+      if (refreshInFlightRef.current && refreshPromiseRef.current) {
+        await refreshPromiseRef.current.catch(() => {});
+      }
+      await refreshExclusive(`${command} refresh failed`);
       return result;
     } catch (err) {
       const message = errorMessage(err, `${command} failed`);
