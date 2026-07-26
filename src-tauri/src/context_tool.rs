@@ -46,6 +46,15 @@ fn has_arg(args: &[String], name: &str) -> bool {
     args.iter().any(|arg| arg == name)
 }
 
+/// Escape SQL LIKE metacharacters so user queries match them literally.
+/// Queries using the result must add `escape '\'`.
+fn escape_like_pattern(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 fn parse_context_tool_limit(args: &[String], default: i64, max: i64) -> CommandResult<i64> {
     let Some(raw) = arg_value(args, "--limit") else {
         return Ok(default);
@@ -442,7 +451,7 @@ pub(crate) async fn agent_context_message_search(
         Some(target) => Some(resolve_agent_context_target(pool, &target, None).await?),
         None => None,
     };
-    let pattern = format!("%{query}%");
+    let pattern = format!("%{}%", escape_like_pattern(query));
 
     let rows = if let Some(target) = target {
         sqlx::query(&format!(
@@ -456,7 +465,7 @@ pub(crate) async fn agent_context_message_search(
             join channels c on c.id = m.channel_id
             left join tasks t on t.message_id = m.id
             where m.channel_id = $1
-              and lower(m.body) like lower($2)
+              and lower(m.body) like lower($2) escape '\'
             order by m.created_at desc
             limit $3
             "#,
@@ -479,7 +488,7 @@ pub(crate) async fn agent_context_message_search(
             from messages m
             join channels c on c.id = m.channel_id
             left join tasks t on t.message_id = m.id
-            where lower(m.body) like lower($1)
+            where lower(m.body) like lower($1) escape '\'
             order by m.created_at desc
             limit $2
             "#,
