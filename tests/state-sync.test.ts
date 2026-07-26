@@ -7,6 +7,7 @@ import {
   applyOptimisticMutation,
   applySnapshot,
   parseBackendEventPayload,
+  reconcileHydratedMessageDelta,
   reconcileThreadHydration,
   type SnapshotApplyOptions,
 } from "../src/state-sync";
@@ -374,6 +375,94 @@ test("a delta for an unknown message requests authoritative refresh", () => {
 
   assert.equal(result.data?.messages.length, 0);
   assert.equal(result.needsRefresh, true);
+});
+
+test("a cursor-replayed delta already covered by the snapshot is idempotent", () => {
+  const room = channel("room");
+  const complete = message("complete", room.id, {
+    body: "hello",
+    delivery_state: "complete",
+  });
+  const result = applyBackendEvent(
+    bootstrap({ channels: [room], messages: [complete] }),
+    {
+      type: "message_delta",
+      message_id: complete.id,
+      append: "lo",
+      body_length: 5,
+      delivery_state: "streaming",
+    },
+  );
+
+  assert.equal(result.data?.messages[0].body, "hello");
+  assert.equal(result.data?.messages[0].delivery_state, "complete");
+  assert.equal(result.needsRefresh, false);
+});
+
+test("a cursor-replayed delta with a mismatched snapshot requests reconciliation", () => {
+  const room = channel("room");
+  const partial = message("partial", room.id, {
+    body: "hell",
+    delivery_state: "streaming",
+  });
+  const result = applyBackendEvent(
+    bootstrap({ channels: [room], messages: [partial] }),
+    {
+      type: "message_delta",
+      message_id: partial.id,
+      append: "lo",
+      body_length: 5,
+      delivery_state: "streaming",
+    },
+  );
+
+  assert.equal(result.data?.messages[0].body, "hell");
+  assert.equal(result.needsRefresh, true);
+});
+
+test("hydrated message deltas append only from an exact baseline", () => {
+  assert.equal(
+    reconcileHydratedMessageDelta("hel", {
+      append: "lo",
+      bodyLength: 5,
+      deliveryState: "streaming",
+    }),
+    "append",
+  );
+  assert.equal(
+    reconcileHydratedMessageDelta("hello", {
+      append: "lo",
+      bodyLength: 5,
+      deliveryState: "streaming",
+    }),
+    "covered",
+  );
+  assert.equal(
+    reconcileHydratedMessageDelta("hell", {
+      append: "lo",
+      bodyLength: 5,
+      deliveryState: "streaming",
+    }),
+    "retry",
+  );
+});
+
+test("hydrated message delta lengths use Unicode code points and tolerate legacy events", () => {
+  assert.equal(
+    reconcileHydratedMessageDelta("🙂", {
+      append: "好",
+      bodyLength: 2,
+      deliveryState: "streaming",
+    }),
+    "append",
+  );
+  assert.equal(
+    reconcileHydratedMessageDelta("authoritative", {
+      append: "stale",
+      deliveryState: "streaming",
+    }),
+    "covered",
+  );
 });
 
 test("backend batches are parsed and flattened without coupling parsing to React", () => {

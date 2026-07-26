@@ -41,6 +41,21 @@ pub(crate) async fn load_channel_messages(
 }
 
 #[tauri::command]
+pub(crate) async fn load_channel_previews(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<Message>> {
+    application::load_channel_previews(&state.pool).await
+}
+
+#[tauri::command]
+pub(crate) async fn load_message(
+    message_id: Uuid,
+    state: State<'_, AppState>,
+) -> CommandResult<Message> {
+    application::load_message(&state.pool, MessageIdRequest { message_id }).await
+}
+
+#[tauri::command]
 pub(crate) async fn load_older_channel_messages(
     channel_id: Uuid,
     before_seq: i64,

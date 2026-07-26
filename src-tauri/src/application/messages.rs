@@ -5,9 +5,12 @@ use uuid::Uuid;
 use crate::{
     app::CommandResult,
     message_store::{
-        delete_message_in_pool, load_older_channel_messages_without_artifact_content,
+        delete_message_in_pool, load_channel_preview_messages_without_artifact_content,
+        load_message_without_artifact_content,
+        load_older_channel_messages_without_artifact_content,
         load_recent_channel_message_page_without_artifact_content, send_owner_message_in_pool,
-        set_message_saved_in_pool, update_message_in_pool, WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
+        set_message_saved_in_pool, update_message_in_pool,
+        CHANNEL_PREVIEW_ROOT_MESSAGES_PER_CHANNEL, WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
     },
     models::{AttachmentUpload, ChannelMessagePage, Message},
 };
@@ -81,6 +84,21 @@ pub(crate) async fn load_channel_messages(
         WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
     )
     .await
+}
+
+pub(crate) async fn load_channel_previews(pool: &SqlitePool) -> CommandResult<Vec<Message>> {
+    load_channel_preview_messages_without_artifact_content(
+        pool,
+        CHANNEL_PREVIEW_ROOT_MESSAGES_PER_CHANNEL,
+    )
+    .await
+}
+
+pub(crate) async fn load_message(
+    pool: &SqlitePool,
+    request: MessageIdRequest,
+) -> CommandResult<Message> {
+    load_message_without_artifact_content(pool, request.message_id).await
 }
 
 pub(crate) async fn load_older_channel_messages(

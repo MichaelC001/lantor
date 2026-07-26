@@ -71,6 +71,14 @@ export type ApiContract = {
     args: { channelId: string };
     result: ChannelMessagePage;
   };
+  load_channel_previews: {
+    args: undefined;
+    result: Message[];
+  };
+  load_message: {
+    args: { messageId: string };
+    result: Message;
+  };
   create_channel: {
     args: {
       name: string;
@@ -223,6 +231,8 @@ const API_COMMAND_NAMES = {
   send_message: true,
   load_older_channel_messages: true,
   load_channel_messages: true,
+  load_channel_previews: true,
+  load_message: true,
   create_channel: true,
   update_channel: true,
   delete_channel: true,

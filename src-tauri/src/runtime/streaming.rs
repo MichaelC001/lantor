@@ -146,6 +146,7 @@ async fn append_streaming_agent_message_inner(
                 reason: "stream_delta",
                 message_id,
                 append: &append_delta,
+                body_length: body_len.max(0) as usize + append_delta.chars().count(),
                 delivery_state,
             },
         )

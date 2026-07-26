@@ -22,6 +22,8 @@ use crate::{
 };
 
 pub(crate) const WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL: i64 = 80;
+pub(crate) const CHANNEL_PREVIEW_ROOT_MESSAGES_PER_CHANNEL: i64 = 3;
+const CHANNEL_PREVIEW_REPLIES_PER_THREAD: i64 = 12;
 const MAX_OLDER_CHANNEL_ROOT_MESSAGES_PER_PAGE: i64 = 100;
 
 pub(crate) async fn load_messages(pool: &SqlitePool) -> CommandResult<Vec<Message>> {
@@ -51,6 +53,118 @@ pub(crate) async fn load_recent_messages_per_channel_without_artifact_content(
         false,
     )
     .await
+}
+
+pub(crate) async fn load_channel_preview_messages_without_artifact_content(
+    pool: &SqlitePool,
+    roots_per_channel: i64,
+) -> CommandResult<Vec<Message>> {
+    let roots_per_channel = roots_per_channel.clamp(1, 5);
+    let rows = sqlx::query(
+        r#"
+        with root_message_activity as (
+            select
+                coalesce(thread_root_id, id) as id,
+                channel_id,
+                max(seq) as latest_message_seq
+            from messages
+            group by channel_id, coalesce(thread_root_id, id)
+        ),
+        ranked_root_messages as (
+            select
+                id,
+                row_number() over (
+                    partition by channel_id
+                    order by latest_message_seq desc
+                ) as root_rank
+            from root_message_activity
+        ),
+        base_context_message_ids as (
+            select id
+            from ranked_root_messages
+            where root_rank <= $1
+            union
+            select source_message_id
+            from agent_work_items
+            where status in ('queued', 'running', 'cancelling')
+              and source_message_id is not null
+            union
+            select thread_root_id
+            from agent_work_items
+            where status in ('queued', 'running', 'cancelling')
+              and thread_root_id is not null
+            union
+            select id
+            from messages
+            where delivery_state = 'streaming'
+            union
+            select thread_root_id
+            from messages
+            where delivery_state = 'streaming'
+              and thread_root_id is not null
+        ),
+        selected_thread_root_ids as (
+            select context_message.id
+            from messages context_message
+            join base_context_message_ids selected on selected.id = context_message.id
+            where context_message.thread_root_id is null
+            union
+            select context_message.thread_root_id
+            from messages context_message
+            join base_context_message_ids selected on selected.id = context_message.id
+            where context_message.thread_root_id is not null
+        ),
+        ranked_thread_replies as (
+            select
+                message.id,
+                row_number() over (
+                    partition by message.thread_root_id
+                    order by message.seq desc
+                ) as reply_rank
+            from messages message
+            join selected_thread_root_ids selected on selected.id = message.thread_root_id
+        ),
+        selected_message_ids as (
+            select id
+            from selected_thread_root_ids
+            union
+            select id
+            from ranked_thread_replies
+            where reply_rank <= $2
+            union
+            select id
+            from base_context_message_ids
+        )
+        select
+            m.id,
+            m.seq,
+            m.channel_id,
+            m.thread_root_id,
+            m.sender_agent_id,
+            m.sender_name,
+            m.sender_role,
+            m.body,
+            m.is_task,
+            m.thread_followed,
+            m.delivery_state,
+            m.stream_key,
+            t.number as task_number,
+            t.status as task_status,
+            m.created_at,
+            m.updated_at
+        from messages m
+        left join tasks t on t.message_id = m.id
+        where m.id in (select id from selected_message_ids)
+        order by m.seq asc
+        "#,
+    )
+    .bind(roots_per_channel)
+    .bind(CHANNEL_PREVIEW_REPLIES_PER_THREAD)
+    .fetch_all(pool)
+    .await
+    .map_err(to_string)?;
+
+    messages_from_rows(pool, rows, false).await
 }
 
 pub(crate) async fn load_recent_channel_message_page_without_artifact_content(
@@ -504,7 +618,11 @@ pub(crate) async fn load_saved_messages(pool: &SqlitePool) -> CommandResult<Vec<
         .collect())
 }
 
-pub(crate) async fn load_message(pool: &SqlitePool, message_id: Uuid) -> CommandResult<Message> {
+async fn load_message_with_artifact_content(
+    pool: &SqlitePool,
+    message_id: Uuid,
+    include_artifact_content: bool,
+) -> CommandResult<Message> {
     let row = sqlx::query(
         r#"
         select
@@ -536,8 +654,24 @@ pub(crate) async fn load_message(pool: &SqlitePool, message_id: Uuid) -> Command
 
     let mut message = message_from_row(&row);
     attach_message_attachments(pool, std::slice::from_mut(&mut message)).await?;
-    attach_message_artifacts(pool, std::slice::from_mut(&mut message), true).await?;
+    attach_message_artifacts(
+        pool,
+        std::slice::from_mut(&mut message),
+        include_artifact_content,
+    )
+    .await?;
     Ok(message)
+}
+
+pub(crate) async fn load_message(pool: &SqlitePool, message_id: Uuid) -> CommandResult<Message> {
+    load_message_with_artifact_content(pool, message_id, true).await
+}
+
+pub(crate) async fn load_message_without_artifact_content(
+    pool: &SqlitePool,
+    message_id: Uuid,
+) -> CommandResult<Message> {
+    load_message_with_artifact_content(pool, message_id, false).await
 }
 
 pub(crate) async fn load_message_patch_in_tx(
@@ -1350,10 +1484,13 @@ async fn attach_message_artifacts(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{drop_test_schema, insert_test_channel, test_pool};
+    use crate::test_support::{
+        drop_test_schema, insert_test_agent, insert_test_channel, test_pool,
+    };
 
     use super::{
-        channel_message_history_from_messages, delete_message_in_pool, load_messages,
+        channel_message_history_from_messages, delete_message_in_pool,
+        load_channel_preview_messages_without_artifact_content, load_messages,
         load_older_channel_messages_without_artifact_content,
         load_recent_channel_message_page_without_artifact_content,
         load_recent_channel_messages_without_artifact_content,
@@ -1491,6 +1628,232 @@ mod tests {
                 .messages
                 .iter()
                 .any(|message| message.body == "requested reply"));
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_preview_keeps_active_and_streaming_threads_beyond_the_recent_limit() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let active_channel_id = insert_test_channel(&pool, "preview-active").await?;
+            let streaming_channel_id = insert_test_channel(&pool, "preview-streaming").await?;
+            let agent_id = insert_test_agent(&pool, "preview-agent").await?;
+
+            let active_root_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Dylan', 'owner', 'active old root', false)
+                returning id
+                "#,
+            )
+            .bind(active_channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into messages (
+                    channel_id, thread_root_id, sender_agent_id, sender_name,
+                    sender_role, body, is_task
+                )
+                values ($1, $2, $3, 'preview-agent', 'agent', 'active old reply', false)
+                "#,
+            )
+            .bind(active_channel_id)
+            .bind(active_root_id)
+            .bind(agent_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into agent_work_items (
+                    agent_id, channel_id, source_message_id, title, status
+                )
+                values ($1, $2, $3, 'active preview work', 'running')
+                "#,
+            )
+            .bind(agent_id)
+            .bind(active_channel_id)
+            .bind(active_root_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let streaming_root_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Dylan', 'owner', 'streaming old root', false)
+                returning id
+                "#,
+            )
+            .bind(streaming_channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into messages (
+                    channel_id, thread_root_id, sender_agent_id, sender_name,
+                    sender_role, body, is_task, delivery_state, stream_key
+                )
+                values (
+                    $1, $2, $3, 'preview-agent', 'agent', 'streaming old reply',
+                    false, 'streaming', 'preview-stream'
+                )
+                "#,
+            )
+            .bind(streaming_channel_id)
+            .bind(streaming_root_id)
+            .bind(agent_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            for (channel_id, prefix) in [
+                (active_channel_id, "active recent"),
+                (streaming_channel_id, "streaming recent"),
+            ] {
+                for index in 1..=2 {
+                    sqlx::query(
+                        r#"
+                        insert into messages (
+                            channel_id, sender_name, sender_role, body, is_task
+                        )
+                        values ($1, 'Dylan', 'owner', $2, false)
+                        "#,
+                    )
+                    .bind(channel_id)
+                    .bind(format!("{prefix} {index}"))
+                    .execute(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                }
+            }
+
+            let preview = load_channel_preview_messages_without_artifact_content(&pool, 1).await?;
+            let bodies = preview
+                .iter()
+                .map(|message| message.body.as_str())
+                .collect::<std::collections::HashSet<_>>();
+
+            assert!(bodies.contains("active old root"));
+            assert!(bodies.contains("active old reply"));
+            assert!(bodies.contains("streaming old root"));
+            assert!(bodies.contains("streaming old reply"));
+            assert!(bodies.contains("active recent 2"));
+            assert!(bodies.contains("streaming recent 2"));
+            assert!(!bodies.contains("active recent 1"));
+            assert!(!bodies.contains("streaming recent 1"));
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_preview_ranks_threads_by_latest_reply() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let channel_id = insert_test_channel(&pool, "preview-latest-reply").await?;
+            let old_root_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Dylan', 'owner', 'old active root', false)
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Dylan', 'owner', 'newer inactive root', false)
+                "#,
+            )
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into messages (
+                    channel_id, thread_root_id, sender_name, sender_role, body, is_task
+                )
+                values ($1, $2, 'preview-agent', 'agent', 'latest completed reply', false)
+                "#,
+            )
+            .bind(channel_id)
+            .bind(old_root_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let preview = load_channel_preview_messages_without_artifact_content(&pool, 1).await?;
+            let bodies = preview
+                .iter()
+                .map(|message| message.body.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(bodies, vec!["old active root", "latest completed reply"]);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_preview_bounds_recent_replies_per_thread() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let channel_id = insert_test_channel(&pool, "preview-bounded-replies").await?;
+            let root_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (channel_id, sender_name, sender_role, body, is_task)
+                values ($1, 'Dylan', 'owner', 'bounded root', false)
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            for index in 1..=15 {
+                sqlx::query(
+                    r#"
+                    insert into messages (
+                        channel_id, thread_root_id, sender_name, sender_role, body, is_task
+                    )
+                    values ($1, $2, 'preview-agent', 'agent', $3, false)
+                    "#,
+                )
+                .bind(channel_id)
+                .bind(root_id)
+                .bind(format!("reply {index}"))
+                .execute(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            }
+
+            let preview = load_channel_preview_messages_without_artifact_content(&pool, 1).await?;
+            assert_eq!(preview.len(), 13);
+            assert!(preview.iter().any(|message| message.body == "bounded root"));
+            assert!(preview.iter().any(|message| message.body == "reply 4"));
+            assert!(preview.iter().any(|message| message.body == "reply 15"));
+            assert!(!preview.iter().any(|message| message.body == "reply 3"));
             Ok(())
         }
         .await;

@@ -2,20 +2,41 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use sqlx::{sqlite::SqliteRow, Executor, Row, Sqlite, SqlitePool, Transaction};
-use tauri::Emitter;
+use tauri::{Emitter, State};
 use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::agent_inbox_wake::sync_inbox_for_work_item;
-use crate::app::{to_string, CommandResult};
+use crate::app::{to_string, AppState, CommandResult};
 use crate::message_store::load_message_patch_in_tx;
 use crate::models::{
     AgentActivity, AgentRunPatch, AgentWorkItemPatch, Artifact, ChannelMember, Message,
 };
 
 const UI_REFRESH_EVENT: &str = "lantor://refresh";
+
+#[derive(Debug, Serialize)]
+pub(crate) struct UiEventDelivery {
+    cursor: i64,
+    event: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UiEventDeliveryBatch {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    events: Vec<UiEventDelivery>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UiEventReplay {
+    cursor: i64,
+    replay_gap: bool,
+    events: Vec<UiEventDelivery>,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -31,6 +52,7 @@ pub(crate) enum UiEvent<'a> {
         reason: &'a str,
         message_id: Uuid,
         append: &'a str,
+        body_length: usize,
         delivery_state: &'a str,
     },
     MessageDelete {
@@ -323,6 +345,67 @@ pub(crate) async fn notify_supervisor_wake(_pool: &SqlitePool) -> CommandResult<
     Ok(())
 }
 
+async fn load_ui_event_replay_from_cursor(
+    pool: &SqlitePool,
+    requested_cursor: i64,
+) -> CommandResult<UiEventReplay> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
+    let row = sqlx::query(
+        "select coalesce(min(id), 0) as min_id, coalesce(max(id), 0) as max_id from ui_events",
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(to_string)?;
+    let min_id: i64 = row.get("min_id");
+    let max_id: i64 = row.get("max_id");
+    let requested_cursor = requested_cursor.max(0);
+    let replay_gap =
+        (min_id > 0 && requested_cursor < min_id.saturating_sub(1)) || requested_cursor > max_id;
+    if replay_gap {
+        transaction.commit().await.map_err(to_string)?;
+        return Ok(UiEventReplay {
+            cursor: max_id,
+            replay_gap: true,
+            events: Vec::new(),
+        });
+    }
+
+    let rows = sqlx::query(
+        r#"
+        select id, event_json
+        from ui_events
+        where id > $1
+          and id <= $2
+        order by id asc
+        "#,
+    )
+    .bind(requested_cursor)
+    .bind(max_id)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(to_string)?;
+    transaction.commit().await.map_err(to_string)?;
+    Ok(UiEventReplay {
+        cursor: max_id,
+        replay_gap: false,
+        events: rows
+            .into_iter()
+            .map(|row| UiEventDelivery {
+                cursor: row.get("id"),
+                event: row.get("event_json"),
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn replay_ui_events(
+    cursor: i64,
+    state: State<'_, AppState>,
+) -> CommandResult<UiEventReplay> {
+    load_ui_event_replay_from_cursor(&state.pool, cursor).await
+}
+
 pub(crate) fn spawn_ui_refresh_listener(app: tauri::AppHandle, pool: SqlitePool) {
     tauri::async_runtime::spawn(async move {
         let mut last_id: i64 = sqlx::query_scalar("select coalesce(max(id), 0) from ui_events")
@@ -347,20 +430,24 @@ pub(crate) fn spawn_ui_refresh_listener(app: tauri::AppHandle, pool: SqlitePool)
                     sleep(Duration::from_millis(150)).await;
                 }
                 Ok(rows) => {
-                    let mut payloads = Vec::with_capacity(rows.len());
+                    let mut events = Vec::with_capacity(rows.len());
                     for row in rows {
                         last_id = row.get("id");
-                        payloads.push(row.get::<String, _>("event_json"));
+                        events.push(UiEventDelivery {
+                            cursor: last_id,
+                            event: row.get("event_json"),
+                        });
                     }
-                    if payloads.len() == 1 {
-                        if let Some(payload) = payloads.pop() {
+                    match serde_json::to_string(&UiEventDeliveryBatch {
+                        event_type: "ui_event_delivery",
+                        events,
+                    }) {
+                        Ok(payload) => {
                             let _ = app.emit(UI_REFRESH_EVENT, payload);
                         }
-                    } else {
-                        let _ = app.emit(
-                            UI_REFRESH_EVENT,
-                            json!({ "type": "batch", "events": payloads }).to_string(),
-                        );
+                        Err(err) => {
+                            eprintln!("Lantor UI refresh poller failed to serialize events: {err}");
+                        }
                     }
                 }
                 Err(err) => {
@@ -374,11 +461,11 @@ pub(crate) fn spawn_ui_refresh_listener(app: tauri::AppHandle, pool: SqlitePool)
 
 /// Number of most-recent `ui_events` rows to retain on each prune.
 ///
-/// `ui_events` is an append-only UI-refresh notification queue. Desktop and
-/// owner-inbox consumers tail from `max(id)`, while web SSE clients can replay
-/// from their last delivered event id. Retaining several thousand rows gives
-/// reconnecting web clients a large replay window; if a cursor falls behind this
-/// window, the SSE endpoint explicitly requests a snapshot refresh. `id` is
+/// `ui_events` is an append-only UI-refresh notification queue. The desktop
+/// poller and owner-inbox consumers tail it, while desktop and web clients can
+/// replay from their last delivered event id. Retaining several thousand rows
+/// gives reconnecting clients a large replay window; if a cursor falls behind
+/// this window, the transport explicitly requests a snapshot refresh. `id` is
 /// `autoincrement` (monotonic, never reused), so pruning by id cannot duplicate a
 /// consumer cursor.
 const UI_EVENTS_RETAIN_ROWS: i64 = 5_000;
@@ -611,7 +698,7 @@ mod tests {
 
     use super::{
         enqueue_ui_agent_run_changed_in_tx, enqueue_ui_event, enqueue_ui_event_in_tx,
-        enqueue_ui_work_item_changed_in_tx, UiEvent,
+        enqueue_ui_work_item_changed_in_tx, load_ui_event_replay_from_cursor, UiEvent,
     };
 
     #[tokio::test]
@@ -681,6 +768,52 @@ mod tests {
                     "reason": "committed",
                 }),
             );
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn desktop_ui_event_replay_uses_cursor_and_detects_pruned_gaps() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let mut event_ids = Vec::new();
+            for reason in ["one", "two", "three"] {
+                let event_id: i64 = sqlx::query_scalar(
+                    "insert into ui_events (event_json) values ($1) returning id",
+                )
+                .bind(format!(r#"{{"type":"refresh","reason":"{reason}"}}"#))
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+                event_ids.push(event_id);
+            }
+
+            let replay = load_ui_event_replay_from_cursor(&pool, event_ids[0]).await?;
+            assert!(!replay.replay_gap);
+            assert_eq!(replay.cursor, event_ids[2]);
+            assert_eq!(
+                replay
+                    .events
+                    .iter()
+                    .map(|event| event.cursor)
+                    .collect::<Vec<_>>(),
+                event_ids[1..],
+            );
+
+            sqlx::query("delete from ui_events where id < $1")
+                .bind(event_ids[2])
+                .execute(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            let gap = load_ui_event_replay_from_cursor(&pool, event_ids[0]).await?;
+            assert!(gap.replay_gap);
+            assert_eq!(gap.cursor, event_ids[2]);
+            assert!(gap.events.is_empty());
             Ok(())
         }
         .await;

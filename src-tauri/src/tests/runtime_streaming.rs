@@ -10,7 +10,7 @@ use crate::message_store::load_messages;
 use crate::runtime::process::{load_runtime_thread_id, upsert_runtime_thread_id};
 use crate::test_support::{drop_test_schema, insert_test_agent, insert_test_channel, test_pool};
 use chrono::{Duration as ChronoDuration, Utc};
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -31,6 +31,22 @@ async fn streaming_agent_messages_append_and_finish() {
             append_streaming_agent_message(&pool, agent_id, channel_id, None, stream_key, "lo")
                 .await?;
         assert_eq!(message_id, same_message_id);
+        let delta_event: String = sqlx::query_scalar(
+            r#"
+            select event_json
+            from ui_events
+            where json_extract(event_json, '$.type') = 'message_delta'
+            order by id desc
+            limit 1
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        let delta_event =
+            serde_json::from_str::<Value>(&delta_event).map_err(|err| err.to_string())?;
+        assert_eq!(delta_event["append"], "lo");
+        assert_eq!(delta_event["body_length"], 5);
         finish_streaming_agent_message(&pool, stream_key, "complete").await?;
 
         let messages = load_messages(&pool).await?;

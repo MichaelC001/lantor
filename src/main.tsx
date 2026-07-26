@@ -81,9 +81,11 @@ import {
   applySnapshot,
   mergeMessages,
   parseBackendEventPayload,
+  reconcileHydratedMessageDelta,
   reconcileHydration,
   reconcileThreadHydration,
   resolveActiveChannelId,
+  type MessageDelta,
   type UiBackendEvent,
 } from "./state-sync";
 import "@fontsource-variable/space-grotesk";
@@ -183,6 +185,7 @@ const MOBILE_BREAKPOINT = 760;
 const UI_REFRESH_DEBOUNCE_MS = 80;
 const UI_RECONCILE_INTERVAL_MS = 60_000;
 const EPHEMERAL_FLUSH_FALLBACK_MS = 80;
+const CHANNEL_PREVIEW_HYDRATION_DELAY_MS = 200;
 const MIN_BOOT_SPLASH_MS = 600;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const OLDER_CHANNEL_MESSAGES_PAGE_SIZE = 40;
@@ -711,11 +714,9 @@ function buildAgentPerformance(activities: AgentActivity[], runs: AgentRun[]): A
 function App() {
   const [bootStartedAt] = useState(() => performance.now());
   const [bootReady, setBootReady] = useState(false);
-  const [backendEventStartCursor, setBackendEventStartCursor] = useState<number | null>(
-    () => isTauriRuntime() ? 0 : null,
-  );
+  const [backendEventStartCursor, setBackendEventStartCursor] = useState<number | null>(null);
   const startupSplashCompletedRef = useRef(false);
-  const uiEventCursorRef = useRef<number | null>(isTauriRuntime() ? 0 : null);
+  const uiEventCursorRef = useRef<number | null>(null);
   const [data, setData] = useState<Bootstrap | null>(null);
   const setEphemeralData = useCallback((update: (current: Bootstrap | null) => Bootstrap | null) => {
     startTransition(() => {
@@ -849,6 +850,16 @@ function App() {
   const [loadingOlderChannelIds, setLoadingOlderChannelIds] = useState<Set<string>>(() => new Set());
   const [exhaustedOlderChannelIds, setExhaustedOlderChannelIds] = useState<Set<string>>(() => new Set());
   const knownMessageIdsRef = useRef<Set<string> | null>(null);
+  const hydratedMessageIdsRef = useRef<Set<string>>(new Set());
+  const hydratedMessageBodiesRef = useRef<Map<string, string>>(new Map());
+  // Preview hydration is tracked separately and deliberately never marks
+  // `initializedOlderChannelIdsRef`: selecting a channel must still fetch its
+  // normal 80-root page before restoring a remembered thread.
+  const previewHydratedChannelIdsRef = useRef<Set<string>>(new Set());
+  const channelPreviewHydrationStartedRef = useRef(false);
+  const pendingMessageHydrationIdsRef = useRef<Set<string>>(new Set());
+  const messageHydrationAttemptsRef = useRef<Map<string, number>>(new Map());
+  const messageHydrationEpochRef = useRef<Map<string, number>>(new Map());
   const loadedHistoricalMessageIdsRef = useRef<Set<string>>(new Set());
   const paginatedChannelIdsRef = useRef<Set<string>>(new Set());
   const initializedOlderChannelIdsRef = useRef<Set<string>>(new Set());
@@ -861,7 +872,11 @@ function App() {
   const refreshPromiseRef = useRef<Promise<void> | null>(null);
   const refreshQueuedRef = useRef(false);
   const refreshInvalidationRef = useRef(0);
-  const messageDeltaBufferRef = useRef<Map<string, { append: string; deliveryState: Message["delivery_state"] }>>(new Map());
+  const messageDeltaBufferRef = useRef<Map<string, {
+    append: string;
+    bodyLength?: number;
+    deliveryState: Message["delivery_state"];
+  }>>(new Map());
   const optimisticMessagesRef = useRef<Map<string, Message>>(new Map());
   // Channels created locally but not yet reflected by an authoritative bootstrap.
   // Merged back in `refresh()` so an in-flight bootstrap can't drop the new
@@ -967,6 +982,9 @@ function App() {
     for (const channelId of Array.from(initializedOlderChannelIdsRef.current)) {
       if (!availableChannelIds.has(channelId)) initializedOlderChannelIdsRef.current.delete(channelId);
     }
+    for (const channelId of Array.from(previewHydratedChannelIdsRef.current)) {
+      if (!availableChannelIds.has(channelId)) previewHydratedChannelIdsRef.current.delete(channelId);
+    }
     for (const channelId of Array.from(paginatedChannelIdsRef.current)) {
       if (!availableChannelIds.has(channelId)) paginatedChannelIdsRef.current.delete(channelId);
     }
@@ -1031,8 +1049,7 @@ function App() {
       ? await apiInvokeMeasured("bootstrap", bootstrapArgs)
       : { payload: await apiInvoke("bootstrap", bootstrapArgs), measurement: null };
     if (
-      !isTauriRuntime()
-      && uiEventCursorRef.current === null
+      uiEventCursorRef.current === null
       && Number.isSafeInteger(payload.ui_event_cursor)
       && payload.ui_event_cursor >= 0
     ) {
@@ -1081,6 +1098,10 @@ function App() {
       optimisticRemovedChannelsRef.current.delete(channelId);
     }
     const refreshed = prepared.data;
+    for (const message of refreshed.messages) {
+      hydratedMessageIdsRef.current.add(message.id);
+      hydratedMessageBodiesRef.current.set(message.id, message.body);
+    }
     initializeChannelMessageHistory(refreshed);
     if (perf) {
       perf.counts = {
@@ -1192,6 +1213,8 @@ function App() {
         setExhaustedOlderChannelIds((current) => new Set(current).add(channelId));
       }
       for (const message of page.messages) {
+        hydratedMessageIdsRef.current.add(message.id);
+        hydratedMessageBodiesRef.current.set(message.id, message.body);
         knownMessageIdsRef.current?.add(message.id);
       }
       if (page.messages.length > 0) {
@@ -1246,6 +1269,8 @@ function App() {
       paginatedChannelIdsRef.current.add(channelId);
       for (const message of page.messages) {
         loadedHistoricalMessageIdsRef.current.add(message.id);
+        hydratedMessageIdsRef.current.add(message.id);
+        hydratedMessageBodiesRef.current.set(message.id, message.body);
         knownMessageIdsRef.current?.add(message.id);
       }
       if (page.messages.length > 0) {
@@ -1295,9 +1320,18 @@ function App() {
     });
   }
 
-  function applyMessageUpsert(message: Message) {
+  function applyMessageUpsert(message: Message, preserveBufferedDeltas = false) {
     const perf = shouldEnablePerfTelemetry() ? createPerfDraft("message-upsert") : null;
-    messageDeltaBufferRef.current.delete(message.id);
+    if (!preserveBufferedDeltas) {
+      messageDeltaBufferRef.current.delete(message.id);
+      messageHydrationAttemptsRef.current.delete(message.id);
+      messageHydrationEpochRef.current.set(
+        message.id,
+        (messageHydrationEpochRef.current.get(message.id) ?? 0) + 1,
+      );
+    }
+    hydratedMessageIdsRef.current.add(message.id);
+    hydratedMessageBodiesRef.current.set(message.id, message.body);
     invalidatePendingRefreshResult();
     const applyStartedAt = performance.now();
     applyBackendStateEvent(
@@ -1328,17 +1362,114 @@ function App() {
     setData(update);
   }
 
+  function scheduleMessageDeltaFlush(delayMs = 50) {
+    if (messageDeltaFlushTimerRef.current !== null) return;
+    messageDeltaFlushTimerRef.current = window.setTimeout(() => {
+      flushMessageDeltas();
+    }, delayMs);
+  }
+
+  async function hydrateMessageForDelta(messageId: string) {
+    if (pendingMessageHydrationIdsRef.current.has(messageId)) return;
+    pendingMessageHydrationIdsRef.current.add(messageId);
+    const attempt = (messageHydrationAttemptsRef.current.get(messageId) ?? 0) + 1;
+    messageHydrationAttemptsRef.current.set(messageId, attempt);
+    const hydrationEpoch = (messageHydrationEpochRef.current.get(messageId) ?? 0) + 1;
+    messageHydrationEpochRef.current.set(messageId, hydrationEpoch);
+    let shouldRetry = false;
+
+    try {
+      const message = await apiInvoke("load_message", { messageId });
+      if (messageHydrationEpochRef.current.get(messageId) === hydrationEpoch) {
+        const buffered = messageDeltaBufferRef.current.get(messageId);
+        let preserveBufferedDeltas = false;
+
+        if (buffered) {
+          const reconciliation = reconcileHydratedMessageDelta(message.body, buffered);
+          if (reconciliation === "covered") {
+            messageDeltaBufferRef.current.delete(messageId);
+            messageHydrationAttemptsRef.current.delete(messageId);
+          } else if (reconciliation === "append") {
+            preserveBufferedDeltas = true;
+            messageHydrationAttemptsRef.current.delete(messageId);
+          } else if (attempt < 3) {
+            preserveBufferedDeltas = true;
+            shouldRetry = true;
+          } else {
+            messageDeltaBufferRef.current.delete(messageId);
+            messageHydrationAttemptsRef.current.delete(messageId);
+            console.error("Failed to reconcile message delta with hydrated baseline", {
+              messageId,
+              baselineLength: Array.from(message.body).length,
+              targetLength: buffered.bodyLength,
+              appendLength: Array.from(buffered.append).length,
+            });
+          }
+        } else {
+          messageHydrationAttemptsRef.current.delete(messageId);
+        }
+
+        applyMessageUpsert(message, preserveBufferedDeltas);
+      }
+    } catch (err) {
+      if (messageHydrationEpochRef.current.get(messageId) === hydrationEpoch) {
+        messageDeltaBufferRef.current.delete(messageId);
+        messageHydrationAttemptsRef.current.delete(messageId);
+        requestRefresh("Failed to hydrate streaming message");
+        console.error(err);
+      }
+    } finally {
+      pendingMessageHydrationIdsRef.current.delete(messageId);
+    }
+
+    if (shouldRetry) {
+      window.setTimeout(() => {
+        void hydrateMessageForDelta(messageId);
+      }, 50);
+    } else if (messageDeltaBufferRef.current.has(messageId)) {
+      scheduleMessageDeltaFlush(0);
+    }
+  }
+
   function flushMessageDeltas() {
     if (messageDeltaFlushTimerRef.current !== null) {
       window.clearTimeout(messageDeltaFlushTimerRef.current);
       messageDeltaFlushTimerRef.current = null;
     }
     if (messageDeltaBufferRef.current.size === 0) return;
+    const ready = new Map<string, MessageDelta>();
+    const waiting = new Map<string, MessageDelta>();
+    for (const [messageId, delta] of messageDeltaBufferRef.current) {
+      const baselineBody = hydratedMessageBodiesRef.current.get(messageId);
+      const canApply =
+        hydratedMessageIdsRef.current.has(messageId)
+        && baselineBody !== undefined
+        && !pendingMessageHydrationIdsRef.current.has(messageId)
+        && !messageHydrationAttemptsRef.current.has(messageId);
+      if (canApply && delta.bodyLength === undefined) {
+        ready.set(messageId, delta);
+        hydratedMessageBodiesRef.current.set(messageId, `${baselineBody}${delta.append}`);
+      } else if (canApply) {
+        const reconciliation = reconcileHydratedMessageDelta(baselineBody, delta);
+        if (reconciliation === "covered") continue;
+        if (reconciliation === "append") {
+          ready.set(messageId, delta);
+          hydratedMessageBodiesRef.current.set(messageId, `${baselineBody}${delta.append}`);
+          continue;
+        }
+        waiting.set(messageId, delta);
+        void hydrateMessageForDelta(messageId);
+      } else {
+        waiting.set(messageId, delta);
+        void hydrateMessageForDelta(messageId);
+      }
+    }
+    messageDeltaBufferRef.current = waiting;
+    if (ready.size === 0) return;
+
     invalidatePendingRefreshResult();
-    const deltas = messageDeltaBufferRef.current;
-    messageDeltaBufferRef.current = new Map();
     setEphemeralData((current) => {
-      const result = applyMessageDeltas(current, deltas);
+      const result = applyMessageDeltas(current, ready);
       if (result.needsRefresh) {
         requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message delta`);
       }
@@ -1346,20 +1477,32 @@ function App() {
     });
   }
 
-  function queueMessageDelta(messageId: string, append: string, deliveryState: Message["delivery_state"]) {
+  function queueMessageDelta(
+    messageId: string,
+    append: string,
+    deliveryState: Message["delivery_state"],
+    bodyLength?: number,
+  ) {
     const existing = messageDeltaBufferRef.current.get(messageId);
     messageDeltaBufferRef.current.set(messageId, {
       append: `${existing?.append ?? ""}${append}`,
+      bodyLength: Number.isSafeInteger(bodyLength) && (bodyLength ?? -1) >= 0
+        ? bodyLength
+        : undefined,
       deliveryState,
     });
-    if (messageDeltaFlushTimerRef.current !== null) return;
-    messageDeltaFlushTimerRef.current = window.setTimeout(() => {
-      flushMessageDeltas();
-    }, 50);
+    scheduleMessageDeltaFlush();
   }
 
   function applyMessageDelete(messageId: string) {
     messageDeltaBufferRef.current.delete(messageId);
+    hydratedMessageIdsRef.current.delete(messageId);
+    hydratedMessageBodiesRef.current.delete(messageId);
+    messageHydrationAttemptsRef.current.delete(messageId);
+    messageHydrationEpochRef.current.set(
+      messageId,
+      (messageHydrationEpochRef.current.get(messageId) ?? 0) + 1,
+    );
     invalidatePendingRefreshResult();
     applyBackendStateEvent(
       { type: "message_delete", message_id: messageId },
@@ -1474,6 +1617,7 @@ function App() {
             event.message_id,
             event.append,
             event.delivery_state,
+            event.body_length,
           );
           continue;
         }
@@ -1572,6 +1716,75 @@ function App() {
       console.error("Failed to complete startup splash", err);
     });
   }, [appError, bootReady, data]);
+
+  useEffect(() => {
+    hydratedMessageIdsRef.current = new Set(
+      data?.messages.map((message) => message.id) ?? [],
+    );
+    hydratedMessageBodiesRef.current = new Map(
+      data?.messages.map((message) => [message.id, message.body]) ?? [],
+    );
+  }, [data?.messages]);
+
+  useEffect(() => {
+    if (!bootReady || !data || channelPreviewHydrationStartedRef.current) return;
+    const bootstrapData = data;
+    channelPreviewHydrationStartedRef.current = true;
+    let disposed = false;
+    let retryTimer: number | null = null;
+
+    async function hydrateChannelPreviews(attempt: number) {
+      try {
+        const previewMessages = await apiInvoke("load_channel_previews");
+        if (disposed) return;
+
+        const known = knownMessageIdsRef.current ?? new Set(
+          bootstrapData.messages
+            .filter((message) => !isProgressOnlyMessage(message))
+            .map((message) => message.id),
+        );
+        for (const message of previewMessages) {
+          if (!isProgressOnlyMessage(message)) known.add(message.id);
+        }
+        knownMessageIdsRef.current = known;
+
+        setData((current) => {
+          if (!current) return current;
+          const channelIds = new Set(current.channels.map((channel) => channel.id));
+          for (const channelId of channelIds) {
+            previewHydratedChannelIdsRef.current.add(channelId);
+          }
+          const availablePreviewMessages = previewMessages.filter((message) =>
+            channelIds.has(message.channel_id)
+          );
+          // Preview rows are historical context. Let any live/local message
+          // already in state win when the same id changed during the request.
+          return {
+            ...current,
+            messages: mergeMessages(availablePreviewMessages, current.messages),
+          };
+        });
+      } catch (err) {
+        if (disposed) return;
+        if (attempt < 3) {
+          retryTimer = window.setTimeout(() => {
+            void hydrateChannelPreviews(attempt + 1);
+          }, attempt * 250);
+          return;
+        }
+        console.error("Failed to hydrate channel previews", err);
+      }
+    }
+
+    const timer = window.setTimeout(() => {
+      void hydrateChannelPreviews(1);
+    }, CHANNEL_PREVIEW_HYDRATION_DELAY_MS);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  }, [bootReady, data?.channels]);
 
   useEffect(() => {
     if (!data || showOwnerProfileModal) return;

@@ -67,8 +67,8 @@ use commands::{
         update_thread_followed,
     },
     messages::{
-        delete_message, load_channel_messages, load_older_channel_messages, send_message,
-        set_message_saved, update_message,
+        delete_message, load_channel_messages, load_channel_previews, load_message,
+        load_older_channel_messages, send_message, set_message_saved, update_message,
     },
     tasks::{update_task_status, update_task_title},
 };
@@ -86,7 +86,7 @@ use runtime::supervisor::run_supervisor;
 use system_commands::{
     check_runtime, complete_startup_splash, download_attachment, open_external_url,
 };
-use ui_notifications::{spawn_ui_events_pruner, spawn_ui_refresh_listener};
+use ui_notifications::{replay_ui_events, spawn_ui_events_pruner, spawn_ui_refresh_listener};
 
 const WINDOW_STATE_FILE: &str = "window-state.json";
 const MIN_RESTORED_WINDOW_WIDTH: f64 = 1180.0;
@@ -302,7 +302,10 @@ pub fn run() {
             download_attachment,
             open_external_url,
             retry_agent_work,
+            replay_ui_events,
             load_channel_messages,
+            load_channel_previews,
+            load_message,
             load_older_channel_messages,
             send_message,
             set_message_saved,

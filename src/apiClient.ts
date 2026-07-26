@@ -147,12 +147,127 @@ type BackendEventSubscriptionOptions = {
   onReconnect?: () => void;
 };
 
+type DesktopUiEventDelivery = {
+  cursor: number;
+  event: string;
+};
+
+type DesktopUiEventReplay = {
+  cursor: number;
+  replayGap: boolean;
+  events: DesktopUiEventDelivery[];
+};
+
+function parseDesktopUiEventDeliveries(
+  payload: unknown,
+): DesktopUiEventDelivery[] | null {
+  let parsed = payload;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return null;
+    }
+  }
+  if (
+    !parsed
+    || typeof parsed !== "object"
+    || (parsed as { type?: unknown }).type !== "ui_event_delivery"
+    || !Array.isArray((parsed as { events?: unknown }).events)
+  ) {
+    return null;
+  }
+
+  const deliveries: DesktopUiEventDelivery[] = [];
+  for (const item of (parsed as { events: unknown[] }).events) {
+    if (
+      !item
+      || typeof item !== "object"
+      || !Number.isSafeInteger((item as { cursor?: unknown }).cursor)
+      || ((item as { cursor: number }).cursor < 0)
+      || typeof (item as { event?: unknown }).event !== "string"
+    ) {
+      return null;
+    }
+    deliveries.push(item as DesktopUiEventDelivery);
+  }
+  return deliveries;
+}
+
 export async function subscribeBackendEvents(
   handler: (payload: string) => void,
   options: BackendEventSubscriptionOptions = {},
 ): Promise<UnlistenFn> {
   if (isTauriRuntime()) {
-    return tauriListen<string>(UI_REFRESH_EVENT, (event) => handler(event.payload));
+    const requestedCursor = options.cursor;
+    const startingCursor =
+      typeof requestedCursor === "number"
+      && Number.isSafeInteger(requestedCursor)
+      && requestedCursor >= 0
+        ? requestedCursor
+        : 0;
+    let lastCursor = startingCursor;
+    let replayComplete = false;
+    const pendingDeliveries = new Map<number, string>();
+    const legacyPayloads: string[] = [];
+
+    function deliver({ cursor, event }: DesktopUiEventDelivery) {
+      if (cursor <= lastCursor) return;
+      lastCursor = cursor;
+      options.onCursor?.(cursor);
+      handler(event);
+    }
+
+    const unlisten = await tauriListen<unknown>(UI_REFRESH_EVENT, (event) => {
+      const deliveries = parseDesktopUiEventDeliveries(event.payload);
+      if (!deliveries) {
+        if (replayComplete && typeof event.payload === "string") {
+          handler(event.payload);
+        } else if (typeof event.payload === "string") {
+          legacyPayloads.push(event.payload);
+        }
+        return;
+      }
+      if (!replayComplete) {
+        for (const delivery of deliveries) {
+          if (delivery.cursor > lastCursor) {
+            pendingDeliveries.set(delivery.cursor, delivery.event);
+          }
+        }
+        return;
+      }
+      for (const delivery of deliveries) deliver(delivery);
+    });
+
+    try {
+      const replay = await tauriInvoke<DesktopUiEventReplay>("replay_ui_events", {
+        cursor: startingCursor,
+      });
+      if (replay.replayGap) {
+        handler(JSON.stringify({
+          type: "refresh",
+          reason: "event_replay_gap",
+        }));
+      } else {
+        for (const delivery of replay.events) deliver(delivery);
+      }
+      if (Number.isSafeInteger(replay.cursor) && replay.cursor >= lastCursor) {
+        lastCursor = replay.cursor;
+        options.onCursor?.(lastCursor);
+      }
+      replayComplete = true;
+      for (const [cursor, event] of Array.from(pendingDeliveries.entries())
+        .sort(([left], [right]) => left - right)) {
+        deliver({ cursor, event });
+      }
+      // Compatibility for one hot-reload cycle against an older backend
+      // emitter. The current cursor-aware backend never takes this path.
+      for (const payload of legacyPayloads) handler(payload);
+      return unlisten;
+    } catch (err) {
+      unlisten();
+      throw err;
+    }
   }
 
   const cursor = Number.isSafeInteger(options.cursor) && (options.cursor ?? -1) >= 0

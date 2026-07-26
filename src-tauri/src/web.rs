@@ -45,7 +45,7 @@ use crate::application::{
     inbox::{self as inbox_commands, InboxItemsRequest, MarkChannelReadRequest},
     messages::{
         self as message_commands, LoadChannelMessagesRequest, LoadOlderChannelMessagesRequest,
-        SendMessageRequest, SetMessageSavedRequest,
+        MessageIdRequest, SendMessageRequest, SetMessageSavedRequest,
     },
     tasks::{self as task_commands, UpdateTaskStatusRequest, UpdateTaskTitleRequest},
     AgentIdRequest,
@@ -195,6 +195,14 @@ fn web_router(state: Arc<WebState>, dist_dir: PathBuf) -> Router {
         .route(
             "/api/load_channel_messages",
             post(api_load_channel_messages).layer(CompressionLayer::new()),
+        )
+        .route(
+            "/api/load_channel_previews",
+            post(api_load_channel_previews).layer(CompressionLayer::new()),
+        )
+        .route(
+            "/api/load_message",
+            post(api_load_message).layer(CompressionLayer::new()),
         )
         .route("/api/create_channel", post(api_create_channel))
         .route("/api/update_channel", post(api_update_channel))
@@ -351,6 +359,25 @@ async fn api_load_channel_messages(
     Json(request): Json<LoadChannelMessagesRequest>,
 ) -> Result<impl IntoResponse, Response> {
     message_commands::load_channel_messages(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_load_channel_previews(
+    State(state): State<Arc<WebState>>,
+) -> Result<impl IntoResponse, Response> {
+    message_commands::load_channel_previews(&state.pool)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_load_message(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<MessageIdRequest>,
+) -> Result<impl IntoResponse, Response> {
+    message_commands::load_message(&state.pool, request)
         .await
         .map(Json)
         .map_err(api_error)

@@ -21,6 +21,7 @@ export type UiBackendEvent =
       reason?: string;
       message_id: string;
       append: string;
+      body_length?: number;
       delivery_state: Message["delivery_state"];
     }
   | { type: "message_delete"; reason?: string; message_id: string }
@@ -46,8 +47,38 @@ export type UiBackendEvent =
 
 export type MessageDelta = {
   append: string;
+  bodyLength?: number;
   deliveryState: Message["delivery_state"];
 };
+
+export type HydratedMessageDeltaReconciliation =
+  | "append"
+  | "covered"
+  | "retry";
+
+export function reconcileHydratedMessageDelta(
+  baselineBody: string,
+  delta: MessageDelta,
+): HydratedMessageDeltaReconciliation {
+  const targetLength = delta.bodyLength;
+  if (
+    targetLength === undefined
+    || !Number.isSafeInteger(targetLength)
+    || targetLength < 0
+  ) {
+    // Retained events written before body_length was added cannot be
+    // positioned safely. The freshly loaded row is authoritative.
+    return "covered";
+  }
+
+  const baselineLength = Array.from(baselineBody).length;
+  if (baselineLength >= targetLength) return "covered";
+
+  const appendLength = Array.from(delta.append).length;
+  return baselineLength === Math.max(0, targetLength - appendLength)
+    ? "append"
+    : "retry";
+}
 
 export type SavedToggleOverride = {
   saved: boolean;
@@ -494,6 +525,14 @@ export function applyMessageDeltas(
     const delta = deltas.get(message.id);
     if (!delta) return message;
     seen.add(message.id);
+    if (delta.bodyLength !== undefined) {
+      const reconciliation = reconcileHydratedMessageDelta(message.body, delta);
+      if (reconciliation === "covered") return message;
+      if (reconciliation === "retry") {
+        missing = true;
+        return message;
+      }
+    }
     changed = true;
     return {
       ...message,
@@ -546,6 +585,7 @@ export function applyBackendEvent(
           event.message_id,
           {
             append: event.append,
+            bodyLength: event.body_length,
             deliveryState: event.delivery_state,
           },
         ],
