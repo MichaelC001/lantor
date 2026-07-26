@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use sqlx::{Row, SqlitePool};
+use sqlx::{sqlite::SqliteRow, Row, Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::app::{to_string, CommandResult};
@@ -204,8 +204,8 @@ async fn load_agent_activities_with_limit(
         .collect())
 }
 
-pub(crate) async fn load_agent_activity(
-    pool: &SqlitePool,
+pub(crate) async fn load_agent_activity_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
     activity_id: Uuid,
 ) -> CommandResult<AgentActivity> {
     let row = sqlx::query(
@@ -228,11 +228,15 @@ pub(crate) async fn load_agent_activity(
         "#,
     )
     .bind(activity_id)
-    .fetch_one(pool)
+    .fetch_one(&mut **transaction)
     .await
     .map_err(to_string)?;
 
-    Ok(AgentActivity {
+    Ok(agent_activity_from_row(&row))
+}
+
+fn agent_activity_from_row(row: &SqliteRow) -> AgentActivity {
+    AgentActivity {
         id: row.get("id"),
         agent_id: row.get("agent_id"),
         agent_handle: row.get("agent_handle"),
@@ -245,7 +249,7 @@ pub(crate) async fn load_agent_activity(
         detail: row.get("detail"),
         metadata: parse_json_value(row.get("metadata")),
         created_at: row.get("created_at"),
-    })
+    }
 }
 
 fn parse_json_value(raw: String) -> Value {

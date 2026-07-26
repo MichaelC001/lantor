@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
+use sqlx::{sqlite::SqliteRow, Row, Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::agent_profile::DEFAULT_OWNER_DISPLAY_NAME;
@@ -12,9 +12,7 @@ use crate::agent_work_dispatch::dispatch_unassigned_task_availability;
 use crate::attachments::{
     remove_attachment_files, write_attachment_file, PendingAttachmentWrites, ATTACHMENT_SIZE_LIMIT,
 };
-use crate::ui_notifications::{
-    enqueue_ui_event_in_tx, notify_ui_message_upsert, notify_ui_refresh, UiEvent,
-};
+use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
 use crate::{
     app::{to_string, CommandResult},
     models::{
@@ -436,32 +434,33 @@ async fn messages_from_rows(
     rows: Vec<SqliteRow>,
     include_artifact_content: bool,
 ) -> CommandResult<Vec<Message>> {
-    let mut messages: Vec<Message> = rows
-        .into_iter()
-        .map(|row| Message {
-            id: row.get("id"),
-            seq: row.get("seq"),
-            channel_id: row.get("channel_id"),
-            thread_root_id: row.get("thread_root_id"),
-            sender_agent_id: row.get("sender_agent_id"),
-            sender_name: row.get("sender_name"),
-            sender_role: row.get("sender_role"),
-            body: row.get("body"),
-            is_task: row.get("is_task"),
-            thread_followed: row.get("thread_followed"),
-            delivery_state: row.get("delivery_state"),
-            stream_key: row.get("stream_key"),
-            task_number: row.get("task_number"),
-            task_status: row.get("task_status"),
-            attachments: Vec::new(),
-            artifacts: Vec::new(),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        })
-        .collect();
+    let mut messages: Vec<Message> = rows.iter().map(message_from_row).collect();
     attach_message_attachments(pool, &mut messages).await?;
     attach_message_artifacts(pool, &mut messages, include_artifact_content).await?;
     Ok(messages)
+}
+
+fn message_from_row(row: &SqliteRow) -> Message {
+    Message {
+        id: row.get("id"),
+        seq: row.get("seq"),
+        channel_id: row.get("channel_id"),
+        thread_root_id: row.get("thread_root_id"),
+        sender_agent_id: row.get("sender_agent_id"),
+        sender_name: row.get("sender_name"),
+        sender_role: row.get("sender_role"),
+        body: row.get("body"),
+        is_task: row.get("is_task"),
+        thread_followed: row.get("thread_followed"),
+        delivery_state: row.get("delivery_state"),
+        stream_key: row.get("stream_key"),
+        task_number: row.get("task_number"),
+        task_status: row.get("task_status"),
+        attachments: Vec::new(),
+        artifacts: Vec::new(),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
 }
 
 pub(crate) async fn load_saved_messages(pool: &SqlitePool) -> CommandResult<Vec<SavedMessage>> {
@@ -535,28 +534,69 @@ pub(crate) async fn load_message(pool: &SqlitePool, message_id: Uuid) -> Command
     .await
     .map_err(to_string)?;
 
-    let mut message = Message {
-        id: row.get("id"),
-        seq: row.get("seq"),
-        channel_id: row.get("channel_id"),
-        thread_root_id: row.get("thread_root_id"),
-        sender_agent_id: row.get("sender_agent_id"),
-        sender_name: row.get("sender_name"),
-        sender_role: row.get("sender_role"),
-        body: row.get("body"),
-        is_task: row.get("is_task"),
-        thread_followed: row.get("thread_followed"),
-        delivery_state: row.get("delivery_state"),
-        stream_key: row.get("stream_key"),
-        task_number: row.get("task_number"),
-        task_status: row.get("task_status"),
-        attachments: Vec::new(),
-        artifacts: Vec::new(),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    };
+    let mut message = message_from_row(&row);
     attach_message_attachments(pool, std::slice::from_mut(&mut message)).await?;
     attach_message_artifacts(pool, std::slice::from_mut(&mut message), true).await?;
+    Ok(message)
+}
+
+pub(crate) async fn load_message_patch_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    message_id: Uuid,
+) -> CommandResult<Message> {
+    let row = sqlx::query(
+        r#"
+        select
+            m.id,
+            m.seq,
+            m.channel_id,
+            m.thread_root_id,
+            m.sender_agent_id,
+            m.sender_name,
+            m.sender_role,
+            m.body,
+            m.is_task,
+            m.thread_followed,
+            m.delivery_state,
+            m.stream_key,
+            t.number as task_number,
+            t.status as task_status,
+            m.created_at,
+            m.updated_at
+        from messages m
+        left join tasks t on t.message_id = m.id
+        where m.id = $1
+        "#,
+    )
+    .bind(message_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(to_string)?;
+    let mut message = message_from_row(&row);
+    let attachment_rows = sqlx::query(
+        r#"
+        select id, message_id, original_name, mime_type, size_bytes, storage_path, created_at
+        from message_attachments
+        where message_id = $1
+        order by created_at asc
+        "#,
+    )
+    .bind(message_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(to_string)?;
+    message.attachments = attachment_rows
+        .into_iter()
+        .map(|row| MessageAttachment {
+            id: row.get("id"),
+            message_id: row.get("message_id"),
+            original_name: row.get("original_name"),
+            mime_type: row.get("mime_type"),
+            size_bytes: row.get("size_bytes"),
+            storage_path: row.get("storage_path"),
+            created_at: row.get("created_at"),
+        })
+        .collect();
     Ok(message)
 }
 
@@ -686,6 +726,16 @@ pub(crate) async fn insert_agent_message_with_options(
         .map_err(to_string)?;
     }
 
+    let message = load_message_patch_in_tx(&mut tx, msg_id).await?;
+    enqueue_ui_event_in_tx(
+        &mut tx,
+        &UiEvent::MessageUpsert {
+            reason: "message",
+            message: &message,
+        },
+    )
+    .await?;
+    enqueue_ui_event_in_tx(&mut tx, &UiEvent::Refresh { reason: "message" }).await?;
     tx.commit().await.map_err(to_string)?;
     let conversation_thread_root_id = thread_root_id.unwrap_or(msg_id);
     upsert_agent_thread_subscription(
@@ -704,10 +754,6 @@ pub(crate) async fn insert_agent_message_with_options(
     if !as_task && dispatch_mentions {
         queue_agent_message_mentions(pool, msg_id).await?;
     }
-    if let Ok(message) = load_message(pool, msg_id).await {
-        let _ = notify_ui_message_upsert(pool, &message, "message").await;
-    }
-    let _ = notify_ui_refresh(pool, "message").await;
     Ok(msg_id)
 }
 
@@ -784,6 +830,7 @@ pub(crate) async fn send_owner_message_in_pool(
         );
     }
 
+    enqueue_ui_event_in_tx(&mut tx, &UiEvent::Refresh { reason: "message" }).await?;
     tx.commit().await.map_err(to_string)?;
     pending_attachment_writes.commit();
     queue_mentions_as_work_items(
@@ -800,8 +847,6 @@ pub(crate) async fn send_owner_message_in_pool(
         dispatch_unassigned_task_availability(pool, task_id).await?;
     }
     let message = load_message(pool, msg_id).await?;
-    let _ = notify_ui_message_upsert(pool, &message, "message").await;
-    let _ = notify_ui_refresh(pool, "message").await;
     Ok(message)
 }
 
@@ -1046,6 +1091,15 @@ pub(crate) async fn insert_agent_attachment_message(
     if pending_attachment_writes.is_empty() {
         return Err("attachment_create produced no attachments".to_owned());
     }
+    let message = load_message_patch_in_tx(&mut tx, msg_id).await?;
+    enqueue_ui_event_in_tx(
+        &mut tx,
+        &UiEvent::MessageUpsert {
+            reason: "attachment_created",
+            message: &message,
+        },
+    )
+    .await?;
     tx.commit().await.map_err(to_string)?;
     pending_attachment_writes.commit();
 
@@ -1060,11 +1114,6 @@ pub(crate) async fn insert_agent_attachment_message(
     )
     .await?;
     queue_agent_message_mentions(pool, msg_id).await?;
-    if let Ok(message) = load_message(pool, msg_id).await {
-        let _ = notify_ui_message_upsert(pool, &message, "attachment_created").await;
-    } else {
-        let _ = notify_ui_refresh(pool, "attachment_created").await;
-    }
     Ok(msg_id)
 }
 
@@ -1203,6 +1252,38 @@ pub(crate) async fn load_artifact(pool: &SqlitePool, artifact_id: Uuid) -> Comma
     )
     .bind(artifact_id)
     .fetch_one(pool)
+    .await
+    .map_err(to_string)?;
+    Ok(artifact_from_row(&row))
+}
+
+pub(crate) async fn load_artifact_in_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    artifact_id: Uuid,
+) -> CommandResult<Artifact> {
+    let row = sqlx::query(
+        r#"
+        select
+            ar.id,
+            ar.message_id,
+            ar.channel_id,
+            ar.thread_root_id,
+            ar.creator_agent_id,
+            a.handle as creator_agent_handle,
+            ar.kind,
+            ar.title,
+            ar.summary,
+            ar.content,
+            ar.metadata,
+            ar.created_at,
+            ar.updated_at
+        from artifacts ar
+        left join agents a on a.id = ar.creator_agent_id
+        where ar.id = $1
+        "#,
+    )
+    .bind(artifact_id)
+    .fetch_one(&mut **transaction)
     .await
     .map_err(to_string)?;
     Ok(artifact_from_row(&row))

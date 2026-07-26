@@ -2,9 +2,9 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use crate::activity_store::load_agent_activity;
+use crate::activity_store::load_agent_activity_in_tx;
 use crate::app::{to_string, CommandResult};
-use crate::ui_notifications::{notify_ui_activity_upsert, notify_ui_refresh};
+use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
 
 fn activity_phase(kind: &str) -> &'static str {
     match kind {
@@ -168,6 +168,7 @@ pub(crate) async fn record_agent_activity(
     let summary = title;
     let metadata = parse_activity_metadata(detail);
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let activity_id: Uuid = sqlx::query_scalar(
         r#"
         insert into agent_activities (
@@ -196,15 +197,19 @@ pub(crate) async fn record_agent_activity(
     .bind(summary)
     .bind(detail)
     .bind(metadata.to_string())
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
-    if let Ok(activity) = load_agent_activity(pool, activity_id).await {
-        let _ = notify_ui_activity_upsert(pool, &activity, "activity").await;
-    } else {
-        let _ = notify_ui_refresh(pool, "activity").await;
-    }
-
+    let activity = load_agent_activity_in_tx(&mut transaction, activity_id).await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::ActivityUpsert {
+            reason: "activity",
+            activity: &activity,
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 

@@ -3,11 +3,9 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::app::{to_string, CommandResult};
-use crate::message_store::{insert_agent_message, load_artifact, load_message};
+use crate::message_store::{insert_agent_message, load_artifact_in_tx};
 use crate::text::compact_chars_middle;
-use crate::ui_notifications::{
-    notify_ui_artifact_upsert, notify_ui_message_upsert, notify_ui_refresh,
-};
+use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
 
 pub(crate) fn normalize_artifact_kind(kind: &str) -> CommandResult<String> {
     let normalized = kind.trim().to_lowercase().replace('_', "-");
@@ -56,6 +54,7 @@ pub(crate) async fn create_agent_artifact(
     };
     let message_id =
         insert_agent_message(pool, agent_id, channel_id, thread_root_id, &body, false).await?;
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let artifact_id: Uuid = sqlx::query_scalar(
         r#"
         insert into artifacts (
@@ -75,16 +74,18 @@ pub(crate) async fn create_agent_artifact(
     .bind(&summary)
     .bind(content)
     .bind(metadata.unwrap_or_else(|| json!({})))
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
-    if let Ok(artifact) = load_artifact(pool, artifact_id).await {
-        let _ = notify_ui_artifact_upsert(pool, &artifact, "artifact_created").await;
-    }
-    if let Ok(message) = load_message(pool, message_id).await {
-        let _ = notify_ui_message_upsert(pool, &message, "artifact_created").await;
-    } else {
-        let _ = notify_ui_refresh(pool, "artifact_created").await;
-    }
+    let artifact = load_artifact_in_tx(&mut transaction, artifact_id).await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::ArtifactUpsert {
+            reason: "artifact_created",
+            artifact: (&artifact).into(),
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok((artifact_id, message_id))
 }

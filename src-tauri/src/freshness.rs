@@ -5,7 +5,10 @@ use uuid::Uuid;
 use crate::agent_inbox_wake::enqueue_agent_work_if_available;
 use crate::app::{to_string, CommandResult};
 use crate::events::activity::record_agent_activity;
-use crate::ui_notifications::{notify_ui_refresh, notify_ui_work_item_changed};
+use crate::message_store::load_message_patch_in_tx;
+use crate::ui_notifications::{
+    enqueue_ui_event_in_tx, notify_ui_refresh, notify_ui_work_item_changed, UiEvent,
+};
 
 const FRESHNESS_RETRY_CONTEXT_LIMIT: i64 = 16;
 const FRESHNESS_RETRY_BODY_LIMIT: usize = 900;
@@ -254,6 +257,7 @@ pub(crate) async fn try_complete_streaming_message_if_fresh(
     let Some(scope) = load_work_item_freshness_scope(pool, agent_id, work_item_id).await? else {
         return Ok(None);
     };
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let completed = if let Some(thread_root_id) = scope.thread_root_id {
         sqlx::query_scalar(
             r#"
@@ -279,7 +283,7 @@ pub(crate) async fn try_complete_streaming_message_if_fresh(
         .bind(thread_root_id)
         .bind(scope.seen_seq)
         .bind(agent_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(to_string)?
     } else {
@@ -306,11 +310,23 @@ pub(crate) async fn try_complete_streaming_message_if_fresh(
         .bind(stream_key)
         .bind(scope.seen_seq)
         .bind(agent_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(to_string)?
     };
 
+    if let Some(message_id) = completed {
+        let message = load_message_patch_in_tx(&mut transaction, message_id).await?;
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::MessageUpsert {
+                reason: "stream_finish",
+                message: &message,
+            },
+        )
+        .await?;
+    }
+    transaction.commit().await.map_err(to_string)?;
     Ok(completed)
 }
 

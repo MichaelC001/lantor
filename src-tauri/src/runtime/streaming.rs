@@ -16,11 +16,8 @@ use crate::freshness::{
     hold_work_item_output_if_stale, stale_output_for_work_item,
     try_complete_streaming_message_if_fresh,
 };
-use crate::message_store::load_message;
-use crate::ui_notifications::{
-    notify_ui_message_delete, notify_ui_message_delta, notify_ui_message_upsert, notify_ui_refresh,
-    notify_ui_work_item_changed,
-};
+use crate::message_store::load_message_patch_in_tx;
+use crate::ui_notifications::{enqueue_ui_event_in_tx, notify_ui_work_item_changed, UiEvent};
 
 pub(crate) const STREAMING_MESSAGE_BODY_LIMIT: usize = 200_000;
 pub(crate) const STREAMING_TRUNCATION_MARKER: &str = "\n\n[stream truncated by Lantor]";
@@ -133,21 +130,25 @@ async fn append_streaming_agent_message_inner(
         } else {
             "streaming"
         };
+        let mut transaction = pool.begin().await.map_err(to_string)?;
         sqlx::query("update messages set body = body || $2, delivery_state = $3 where id = $1")
             .bind(message_id)
             .bind(&append_delta)
             .bind(delivery_state)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await
             .map_err(to_string)?;
-        let _ = notify_ui_message_delta(
-            pool,
-            message_id,
-            &append_delta,
-            delivery_state,
-            "stream_delta",
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::MessageDelta {
+                reason: "stream_delta",
+                message_id,
+                append: &append_delta,
+                delivery_state,
+            },
         )
-        .await;
+        .await?;
+        transaction.commit().await.map_err(to_string)?;
         if let Some((control_agent_id, run_id, _)) =
             load_streaming_control_context(pool, stream_key).await?
         {
@@ -188,6 +189,7 @@ async fn append_streaming_agent_message_inner(
         "streaming"
     };
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let message_id: Uuid = sqlx::query_scalar(
         r#"
         insert into messages (
@@ -213,15 +215,20 @@ async fn append_streaming_agent_message_inner(
     .bind(initial_body)
     .bind(delivery_state)
     .bind(stream_key)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
 
-    if let Ok(message) = load_message(pool, message_id).await {
-        let _ = notify_ui_message_upsert(pool, &message, "stream_start").await;
-    } else {
-        let _ = notify_ui_refresh(pool, "stream_start").await;
-    }
+    let message = load_message_patch_in_tx(&mut transaction, message_id).await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::MessageUpsert {
+            reason: "stream_start",
+            message: &message,
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     if let Some((control_agent_id, run_id, _)) =
         load_streaming_control_context(pool, stream_key).await?
     {
@@ -266,6 +273,7 @@ pub(crate) async fn ensure_streaming_agent_message(
         .map_err(to_string)?;
     let sender_name: String = sender.get("display_name");
     let sender_role: String = sender.get("role");
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let message_id: Uuid = sqlx::query_scalar(
         r#"
         insert into messages (
@@ -289,15 +297,20 @@ pub(crate) async fn ensure_streaming_agent_message(
     .bind(sender_name)
     .bind(sender_role)
     .bind(stream_key)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
 
-    if let Ok(message) = load_message(pool, message_id).await {
-        let _ = notify_ui_message_upsert(pool, &message, "stream_placeholder").await;
-    } else {
-        let _ = notify_ui_refresh(pool, "stream_placeholder").await;
-    }
+    let message = load_message_patch_in_tx(&mut transaction, message_id).await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::MessageUpsert {
+            reason: "stream_placeholder",
+            message: &message,
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(message_id)
 }
 
@@ -313,6 +326,7 @@ pub(crate) async fn adopt_streaming_agent_message_key(
         return Ok(None);
     }
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let message_id: Option<Uuid> = sqlx::query_scalar(
         r#"
         update messages
@@ -326,17 +340,22 @@ pub(crate) async fn adopt_streaming_agent_message_key(
     )
     .bind(pending_stream_key)
     .bind(stream_key)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await
     .map_err(to_string)?;
 
     if let Some(message_id) = message_id {
-        if let Ok(message) = load_message(pool, message_id).await {
-            let _ = notify_ui_message_upsert(pool, &message, "stream_key_adopted").await;
-        } else {
-            let _ = notify_ui_refresh(pool, "stream_key_adopted").await;
-        }
+        let message = load_message_patch_in_tx(&mut transaction, message_id).await?;
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::MessageUpsert {
+                reason: "stream_key_adopted",
+                message: &message,
+            },
+        )
+        .await?;
     }
+    transaction.commit().await.map_err(to_string)?;
     Ok(message_id)
 }
 
@@ -358,12 +377,18 @@ async fn delete_streaming_agent_message(
     message_id: Uuid,
     reason: &str,
 ) -> CommandResult<()> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query("delete from messages where id = $1")
         .bind(message_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-    let _ = notify_ui_message_delete(pool, message_id, reason).await;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::MessageDelete { reason, message_id },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(())
 }
 
@@ -478,11 +503,6 @@ async fn finish_streaming_agent_message_inner(
                 try_complete_streaming_message_if_fresh(pool, agent_id, work_item_id, stream_key)
                     .await?
             {
-                if let Ok(message) = load_message(pool, message_id).await {
-                    let _ = notify_ui_message_upsert(pool, &message, "stream_finish").await;
-                } else {
-                    let _ = notify_ui_refresh(pool, "stream_finish").await;
-                }
                 if dispatch_mentions {
                     queue_agent_message_mentions(pool, message_id).await?;
                 }
@@ -525,6 +545,7 @@ async fn finish_streaming_agent_message_inner(
         }
     }
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let affected = sqlx::query(
         r#"
         update messages
@@ -535,26 +556,35 @@ async fn finish_streaming_agent_message_inner(
     )
     .bind(stream_key)
     .bind(delivery_state)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(to_string)?
     .rows_affected();
+    let mut completed_message_id = None;
     if affected > 0 {
         let message_id: Option<Uuid> =
             sqlx::query_scalar("select id from messages where stream_key = $1")
                 .bind(stream_key)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *transaction)
                 .await
                 .map_err(to_string)?;
         if let Some(message_id) = message_id {
-            if let Ok(message) = load_message(pool, message_id).await {
-                let _ = notify_ui_message_upsert(pool, &message, "stream_finish").await;
-            } else {
-                let _ = notify_ui_refresh(pool, "stream_finish").await;
-            }
-            if delivery_state == "complete" && dispatch_mentions {
-                queue_agent_message_mentions(pool, message_id).await?;
-            }
+            let message = load_message_patch_in_tx(&mut transaction, message_id).await?;
+            enqueue_ui_event_in_tx(
+                &mut transaction,
+                &UiEvent::MessageUpsert {
+                    reason: "stream_finish",
+                    message: &message,
+                },
+            )
+            .await?;
+            completed_message_id = Some(message_id);
+        }
+    }
+    transaction.commit().await.map_err(to_string)?;
+    if delivery_state == "complete" && dispatch_mentions {
+        if let Some(message_id) = completed_message_id {
+            queue_agent_message_mentions(pool, message_id).await?;
         }
     }
     Ok(())
@@ -748,17 +778,23 @@ async fn consume_complete_streaming_agent_control_lines(
         return Ok(true);
     }
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query("update messages set body = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') where id = $1")
         .bind(message_id)
         .bind(&visible_body)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-    if let Ok(message) = load_message(pool, message_id).await {
-        let _ = notify_ui_message_upsert(pool, &message, "stream_event_consumed").await;
-    } else {
-        let _ = notify_ui_refresh(pool, "stream_event_consumed").await;
-    }
+    let message = load_message_patch_in_tx(&mut transaction, message_id).await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::MessageUpsert {
+            reason: "stream_event_consumed",
+            message: &message,
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(true)
 }
 
@@ -803,17 +839,23 @@ pub(crate) async fn consume_streaming_agent_control_lines(
         return Ok(true);
     }
 
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query("update messages set body = $2 where id = $1")
         .bind(message_id)
         .bind(&visible_body)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
-    if let Ok(message) = load_message(pool, message_id).await {
-        let _ = notify_ui_message_upsert(pool, &message, "stream_event_consumed").await;
-    } else {
-        let _ = notify_ui_refresh(pool, "stream_event_consumed").await;
-    }
+    let message = load_message_patch_in_tx(&mut transaction, message_id).await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::MessageUpsert {
+            reason: "stream_event_consumed",
+            message: &message,
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(false)
 }
 

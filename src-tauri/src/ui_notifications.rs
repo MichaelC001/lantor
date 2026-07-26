@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::agent_inbox_wake::sync_inbox_for_work_item;
 use crate::app::{to_string, CommandResult};
-use crate::message_store::load_message;
+use crate::message_store::load_message_patch_in_tx;
 use crate::models::{
     AgentActivity, AgentRunPatch, AgentWorkItemPatch, Artifact, ChannelMember, Message,
 };
@@ -130,49 +130,6 @@ pub(crate) async fn notify_ui_refresh(pool: &SqlitePool, reason: &str) -> Comman
     enqueue_ui_event(pool, &UiEvent::Refresh { reason }).await
 }
 
-pub(crate) async fn notify_ui_message_upsert(
-    pool: &SqlitePool,
-    message: &Message,
-    reason: &str,
-) -> CommandResult<()> {
-    enqueue_ui_event(pool, &UiEvent::MessageUpsert { reason, message }).await
-}
-
-pub(crate) async fn notify_ui_message_delta(
-    pool: &SqlitePool,
-    message_id: Uuid,
-    append: &str,
-    delivery_state: &str,
-    reason: &str,
-) -> CommandResult<()> {
-    enqueue_ui_event(
-        pool,
-        &UiEvent::MessageDelta {
-            reason,
-            message_id,
-            append,
-            delivery_state,
-        },
-    )
-    .await
-}
-
-pub(crate) async fn notify_ui_message_delete(
-    pool: &SqlitePool,
-    message_id: Uuid,
-    reason: &str,
-) -> CommandResult<()> {
-    enqueue_ui_event(pool, &UiEvent::MessageDelete { reason, message_id }).await
-}
-
-pub(crate) async fn notify_ui_activity_upsert(
-    pool: &SqlitePool,
-    activity: &AgentActivity,
-    reason: &str,
-) -> CommandResult<()> {
-    enqueue_ui_event(pool, &UiEvent::ActivityUpsert { reason, activity }).await
-}
-
 pub(crate) async fn notify_ui_agent_run_upsert(
     pool: &SqlitePool,
     run: &AgentRunPatch,
@@ -187,21 +144,6 @@ pub(crate) async fn notify_ui_work_item_upsert(
     reason: &str,
 ) -> CommandResult<()> {
     enqueue_ui_event(pool, &UiEvent::WorkItemUpsert { reason, work_item }).await
-}
-
-pub(crate) async fn notify_ui_artifact_upsert(
-    pool: &SqlitePool,
-    artifact: &Artifact,
-    reason: &str,
-) -> CommandResult<()> {
-    enqueue_ui_event(
-        pool,
-        &UiEvent::ArtifactUpsert {
-            reason,
-            artifact: artifact.into(),
-        },
-    )
-    .await
 }
 
 pub(crate) async fn notify_ui_agent_run_changed(pool: &SqlitePool, run_id: Uuid, reason: &str) {
@@ -236,6 +178,7 @@ pub(crate) async fn insert_system_message(
     if body.is_empty() {
         return Err("system message body is empty".to_owned());
     }
+    let mut transaction = pool.begin().await.map_err(to_string)?;
     let message_id: Uuid = sqlx::query_scalar(
         r#"
         insert into messages (channel_id, thread_root_id, sender_name, sender_role, body, is_task)
@@ -246,15 +189,19 @@ pub(crate) async fn insert_system_message(
     .bind(channel_id)
     .bind(thread_root_id)
     .bind(body)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
-
-    if let Ok(message) = load_message(pool, message_id).await {
-        let _ = notify_ui_message_upsert(pool, &message, "system_message").await;
-    } else {
-        let _ = notify_ui_refresh(pool, "system_message").await;
-    }
+    let message = load_message_patch_in_tx(&mut transaction, message_id).await?;
+    enqueue_ui_event_in_tx(
+        &mut transaction,
+        &UiEvent::MessageUpsert {
+            reason: "system_message",
+            message: &message,
+        },
+    )
+    .await?;
+    transaction.commit().await.map_err(to_string)?;
     Ok(message_id)
 }
 
@@ -613,7 +560,7 @@ mod tests {
     use crate::models::Artifact;
     use crate::test_support::{drop_test_schema, test_pool};
 
-    use super::{enqueue_ui_event_in_tx, notify_ui_artifact_upsert, UiEvent};
+    use super::{enqueue_ui_event, enqueue_ui_event_in_tx, UiEvent};
 
     #[tokio::test]
     async fn ui_event_outbox_commits_and_rolls_back_with_business_writes() {
@@ -711,7 +658,13 @@ mod tests {
                 updated_at: Utc::now(),
             };
 
-            notify_ui_artifact_upsert(&pool, &artifact, "test")
+            enqueue_ui_event(
+                &pool,
+                &UiEvent::ArtifactUpsert {
+                    reason: "test",
+                    artifact: (&artifact).into(),
+                },
+            )
                 .await
                 .map_err(|err| err.to_string())?;
             let event_json: String =
