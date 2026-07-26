@@ -17,8 +17,9 @@ use crate::freshness::advance_agent_target_watermark_for_work_item;
 use crate::prompts::{build_claude_streaming_prompt, claude_system_prompt};
 use crate::runtime::{
     process::{
-        classify_agent_output_activity, configure_agent_context_tool_env,
-        configure_agent_identity_env, terminate_process_group, upsert_runtime_thread_id,
+        classify_agent_output_activity, cleanup_failed_warm_start,
+        configure_agent_context_tool_env, configure_agent_identity_env, terminate_process_group,
+        upsert_runtime_thread_id,
     },
     streaming::{
         append_streaming_agent_message, ensure_streaming_agent_message, streaming_message_exists,
@@ -457,27 +458,48 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
 
     let stream_key = claude_stream_key(run_id);
     if let Some(channel_id) = channel_id {
-        ensure_streaming_agent_message(pool, agent_id, channel_id, thread_root_id, &stream_key)
-            .await?;
+        if let Err(err) =
+            ensure_streaming_agent_message(pool, agent_id, channel_id, thread_root_id, &stream_key)
+                .await
+        {
+            cleanup_failed_warm_start(pool, "claude", agent_id, run_id, work_item_id, &err, false)
+                .await?;
+            return Err(err);
+        }
     }
-    {
+    const CLAUDE_BUSY_BEFORE_TURN_START: &str = "Claude warm runtime became busy before turn start";
+    let occupy_result = {
         let mut state = runtime.state.lock().await;
         if !state.alive {
-            return Err("Claude warm runtime exited before turn start".to_owned());
+            Err("Claude warm runtime exited before turn start".to_owned())
+        } else if state.active.is_some() {
+            Err(CLAUDE_BUSY_BEFORE_TURN_START.to_owned())
+        } else {
+            state.last_activity = Instant::now();
+            state.active = Some(ClaudeActiveTurn {
+                run_id,
+                started_at: Instant::now(),
+                first_delta_at: None,
+                work_item_id,
+                channel_id,
+                thread_root_id,
+                stream_key,
+            });
+            Ok(())
         }
-        if state.active.is_some() {
-            return Err("Claude warm runtime became busy before turn start".to_owned());
-        }
-        state.last_activity = Instant::now();
-        state.active = Some(ClaudeActiveTurn {
+    };
+    if let Err(err) = occupy_result {
+        cleanup_failed_warm_start(
+            pool,
+            "claude",
+            agent_id,
             run_id,
-            started_at: Instant::now(),
-            first_delta_at: None,
             work_item_id,
-            channel_id,
-            thread_root_id,
-            stream_key,
-        });
+            &err,
+            err == CLAUDE_BUSY_BEFORE_TURN_START,
+        )
+        .await?;
+        return Err(err);
     }
 
     let write_result = {

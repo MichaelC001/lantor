@@ -19,7 +19,9 @@ use crate::events::control::{
 };
 use crate::freshness::advance_agent_target_watermark_for_work_item;
 use crate::runtime::streaming::mark_run_work_item_silent;
-use crate::ui_notifications::{notify_ui_agent_run_changed, notify_ui_work_item_changed};
+use crate::ui_notifications::{
+    notify_supervisor_wake, notify_ui_agent_run_changed, notify_ui_work_item_changed,
+};
 use crate::{
     app::{to_string, CommandResult},
     db::db_url,
@@ -773,5 +775,103 @@ pub(crate) async fn terminate_process_group(pid: i32) -> CommandResult<()> {
         return Err(format!("failed to terminate process group {pid}: {status}"));
     }
 
+    Ok(())
+}
+
+/// Shared cleanup for warm streaming runtimes (codex/claude) when a turn fails
+/// after its run/work item rows were created but before the turn actually
+/// started. Without this the run stays `running` and the agent looks busy
+/// until the next app restart.
+pub(crate) async fn cleanup_failed_warm_start(
+    pool: &SqlitePool,
+    runtime_label: &str,
+    agent_id: Uuid,
+    run_id: Uuid,
+    work_item_id: Option<Uuid>,
+    error: &str,
+    requeue_work_item: bool,
+) -> CommandResult<()> {
+    let error_log = format!("{runtime_label} warm turn failed before start: {error}\n");
+    sqlx::query(
+        r#"
+        update agent_runs
+        set status = 'failed',
+            exit_code = null,
+            log = substr(log || $2, -20000),
+            stopped_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+        where id = $1
+        "#,
+    )
+    .bind(run_id)
+    .bind(&error_log)
+    .execute(pool)
+    .await
+    .map_err(to_string)?;
+    notify_ui_agent_run_changed(pool, run_id, "run_failed").await;
+
+    sqlx::query("update agents set status = $2 where id = $1")
+        .bind(agent_id)
+        .bind(if requeue_work_item {
+            "running"
+        } else {
+            "error"
+        })
+        .execute(pool)
+        .await
+        .map_err(to_string)?;
+
+    if let Some(work_item_id) = work_item_id {
+        if requeue_work_item {
+            sqlx::query(
+                r#"
+                update agent_work_items
+                set status = 'queued',
+                    run_id = null,
+                    completed_at = null,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                where id = $1
+                "#,
+            )
+            .bind(work_item_id)
+            .execute(pool)
+            .await
+            .map_err(to_string)?;
+            notify_ui_work_item_changed(pool, work_item_id, "work_item_queued").await;
+            let _ = notify_supervisor_wake(pool).await;
+        } else {
+            sqlx::query(
+                r#"
+                update agent_work_items
+                set status = 'failed',
+                    completed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                where id = $1
+                "#,
+            )
+            .bind(work_item_id)
+            .execute(pool)
+            .await
+            .map_err(to_string)?;
+            notify_ui_work_item_changed(pool, work_item_id, "work_item_failed").await;
+        }
+    }
+
+    record_agent_activity(
+        pool,
+        Some(agent_id),
+        Some(run_id),
+        if requeue_work_item {
+            "dispatch"
+        } else {
+            "run_error"
+        },
+        if requeue_work_item {
+            "Request requeued"
+        } else {
+            "Run failed to start"
+        },
+        error.to_owned(),
+    )
+    .await?;
     Ok(())
 }
