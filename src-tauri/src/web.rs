@@ -268,25 +268,25 @@ struct OwnerProfileRequest {
     description: String,
 }
 
-pub(crate) const DEFAULT_LANTOR_WEB_BIND: &str = "0.0.0.0:8787";
+pub(crate) const DEFAULT_LANTOR_WEB_BIND: &str = "127.0.0.1:8787";
+
+fn resolve_web_bind_value(configured: Option<&str>) -> Option<String> {
+    let trimmed = configured.unwrap_or_default().trim();
+    if trimmed.is_empty() {
+        return Some(DEFAULT_LANTOR_WEB_BIND.to_owned());
+    }
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "off" | "none" | "disabled" | "false" | "0"
+    ) {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
 
 pub(crate) fn resolve_web_bind() -> Option<String> {
-    match env::var("LANTOR_WEB_BIND") {
-        Ok(value) => {
-            let trimmed = value.trim().to_owned();
-            if trimmed.is_empty() {
-                return Some(DEFAULT_LANTOR_WEB_BIND.to_owned());
-            }
-            if matches!(
-                trimmed.to_ascii_lowercase().as_str(),
-                "off" | "none" | "disabled" | "false" | "0"
-            ) {
-                return None;
-            }
-            Some(trimmed)
-        }
-        Err(_) => Some(DEFAULT_LANTOR_WEB_BIND.to_owned()),
-    }
+    let configured = env::var("LANTOR_WEB_BIND").ok();
+    resolve_web_bind_value(configured.as_deref())
 }
 
 pub(crate) fn spawn_web_server_if_configured(pool: SqlitePool, db_url: String) {
@@ -1021,8 +1021,28 @@ fn api_error(message: String) -> Response {
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
-    use super::{event_stream_start, requested_event_cursor, EventsQuery};
+    use super::{
+        event_stream_start, requested_event_cursor, resolve_web_bind_value, EventsQuery,
+        DEFAULT_LANTOR_WEB_BIND,
+    };
     use crate::test_support::{drop_test_schema, test_pool};
+
+    #[test]
+    fn web_bind_defaults_to_loopback_and_honors_overrides() {
+        assert_eq!(
+            resolve_web_bind_value(None).as_deref(),
+            Some(DEFAULT_LANTOR_WEB_BIND)
+        );
+        assert_eq!(
+            resolve_web_bind_value(Some("  ")).as_deref(),
+            Some(DEFAULT_LANTOR_WEB_BIND)
+        );
+        assert_eq!(
+            resolve_web_bind_value(Some("0.0.0.0:9000")).as_deref(),
+            Some("0.0.0.0:9000")
+        );
+        assert_eq!(resolve_web_bind_value(Some("off")), None);
+    }
 
     #[test]
     fn last_event_id_header_takes_precedence_over_query_cursor() {

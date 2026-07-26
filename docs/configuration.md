@@ -9,13 +9,13 @@ also appear in [`.env.example`](../.env.example).
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `LANTOR_DATABASE_URL` | `sqlite://~/Library/Application Support/Lantor/lantor.sqlite` | SQLite database URL used by both the desktop process and the web server. `DATABASE_URL` is honored as a fallback only when it is also a `sqlite:` URL. |
-| `LANTOR_WEB_BIND` | `0.0.0.0:8787` | Address the embedded web/SSE server binds to. Set to `127.0.0.1:8787` to stay loopback-only, or `off` / `none` to disable the browser UI entirely. |
+| `LANTOR_WEB_BIND` | `127.0.0.1:8787` | Address the embedded web/SSE server binds to. Set to `off` / `none` to disable the browser UI; use a non-loopback address only on a trusted network. |
 
 ## Web UI
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LANTOR_WEB_PUBLIC_URL` | derived from `LANTOR_WEB_BIND` | Public base URL Lantor uses when generating links that point at itself. Set this when the bind address is not directly reachable (for example behind a reverse proxy or when using a Tailscale MagicDNS name). |
+| `LANTOR_WEB_PUBLIC_URL` | derived from `LANTOR_WEB_BIND` | Public base URL Lantor uses when generating links that point at itself. Set this to the HTTPS URL when using Tailscale Serve or an authenticated Cloudflare Tunnel. |
 | `LANTOR_WEB_DIST` | auto-detected `dist/` next to the repo or current working directory | Override the static web bundle directory served by the desktop process. Useful when running a packaged build from a custom location. |
 
 ## Attachments
@@ -32,8 +32,9 @@ also appear in [`.env.example`](../.env.example).
 
 ## Notes
 
-- Lantor does not perform its own browser auth. Only expose the web UI on
-  trusted private networks (loopback or Tailscale). See
+- Lantor does not perform its own browser auth. Keep the backend on loopback
+  and use Tailscale Serve or a Cloudflare Tunnel protected by Cloudflare
+  Access for remote use. See
   [Tailscale web access](web-access.md) for the recommended setup.
 - Schema migrations run automatically the first time the desktop process
   connects to a fresh database — there is no separate migration step.

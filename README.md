@@ -64,9 +64,8 @@ npm run web:dev
 
 This builds the web bundle, starts the same local SQLite database, supervisor,
 reminder worker, event pruning, and web server, then serves Lantor at
-`http://127.0.0.1:8787/` by default. Set `LANTOR_WEB_BIND` to choose another
-bind address, for example `LANTOR_WEB_BIND=127.0.0.1:8787 npm run web:dev` for
-loopback-only access.
+`http://127.0.0.1:8787/` by default. Set `LANTOR_WEB_BIND` only when you need
+another bind address, or set it to `off` to disable browser access.
 
 For frontend hot reload in browser-only development, run two terminals:
 
@@ -203,22 +202,29 @@ over [Tailscale](https://tailscale.com/).
 
 1. Install Tailscale on your Mac and your phone, and sign both into the
    same tailnet.
-2. Keep Lantor running on your Mac. The web UI is enabled by default on
-   `0.0.0.0:8787`.
-3. From your phone's browser, open:
+2. Keep Lantor running on your Mac. The web UI listens only on
+   `127.0.0.1:8787` by default.
+3. On the Mac, expose that loopback service only to your tailnet:
+
+   ```bash
+   tailscale serve --bg http://127.0.0.1:8787
+   ```
+
+4. From your phone's browser, open the HTTPS URL printed by Tailscale, such
+   as:
 
    ```text
-   http://<mac-tailscale-name>:8787/
+   https://<mac-name>.<tailnet-name>.ts.net/
    ```
 
 The browser UI shares the same desktop process and SQLite state, so
 channels, agents, tasks, reminders, artifacts, and attachments all stay in
 sync.
 
-Lantor has no built-in auth — only expose it on a trusted private network
-like your tailnet. To lock the web UI down to loopback or turn it off, set
-`LANTOR_WEB_BIND=127.0.0.1:8787` or `LANTOR_WEB_BIND=off`. See
-[`docs/web-access.md`](docs/web-access.md) for details.
+Lantor has no built-in auth. Keep the backend on loopback and use Tailscale
+Serve for private remote access. A Cloudflare Tunnel can also proxy
+`http://127.0.0.1:8787`, but its hostname must be protected by Cloudflare
+Access. See [`docs/web-access.md`](docs/web-access.md) for details.
 
 ## Configuration
 
@@ -227,7 +233,7 @@ Defaults work out of the box. The two settings most users care about:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `LANTOR_DATABASE_URL` | `sqlite://~/Library/Application Support/Lantor/lantor.sqlite` | SQLite database URL. |
-| `LANTOR_WEB_BIND` | `0.0.0.0:8787` | Web UI bind. Use `127.0.0.1:8787` for loopback only, or `off` to disable. |
+| `LANTOR_WEB_BIND` | `127.0.0.1:8787` | Loopback-only Web UI bind. Set `off` to disable; use a non-loopback address only on a trusted network. |
 
 Advanced options — attachment paths, web public URL, web bundle override,
 warm Codex rotation — are in [`docs/configuration.md`](docs/configuration.md)
