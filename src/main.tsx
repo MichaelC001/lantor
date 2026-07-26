@@ -72,6 +72,19 @@ import {
   shouldEnablePerfTelemetry,
   waitForPerfCommit,
 } from "./perf";
+import {
+  applyBackendEvent,
+  applyBackendEvents,
+  applyMessageDeltas,
+  applyOptimisticMutation,
+  applySnapshot,
+  mergeMessages,
+  parseBackendEventPayload,
+  reconcileHydration,
+  reconcileThreadHydration,
+  resolveActiveChannelId,
+  type UiBackendEvent,
+} from "./state-sync";
 import "@fontsource-variable/space-grotesk";
 import "@fontsource/space-mono/400.css";
 import "@fontsource/space-mono/700.css";
@@ -171,7 +184,6 @@ const UI_RECONCILE_INTERVAL_MS = 60_000;
 const EPHEMERAL_FLUSH_FALLBACK_MS = 80;
 const MIN_BOOT_SPLASH_MS = 600;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
-const ACTIVITY_HISTORY_LIMIT_PER_AGENT = 80;
 const OLDER_CHANNEL_MESSAGES_PAGE_SIZE = 40;
 // Issue #82: run states that must bypass the ephemeral coalescing buffer
 // so terminal transitions land immediately. "stopped" is included to
@@ -236,19 +248,6 @@ const UI_TYPE_SCALE: Record<ChatTextSize, Record<string, string>> = {
   },
 };
 
-type UiBackendEvent =
-  | { type: "refresh"; reason?: string }
-  | { type: "batch"; events: string[] }
-  | { type: "message_upsert"; reason?: string; message: Message }
-  | { type: "message_delta"; reason?: string; message_id: string; append: string; delivery_state: Message["delivery_state"] }
-  | { type: "message_delete"; reason?: string; message_id: string }
-  | { type: "activity_upsert"; reason?: string; activity: AgentActivity }
-  | { type: "agent_run_upsert"; reason?: string; run: Omit<AgentRun, "log"> & { log?: string } }
-  | { type: "work_item_upsert"; reason?: string; work_item: Omit<AgentWorkItem, "context"> & { context?: string } }
-  | { type: "artifact_upsert"; reason?: string; artifact: Artifact }
-  | { type: "channel_member_upsert"; reason?: string; member: ChannelMember }
-  | { type: "channel_member_remove"; reason?: string; channel_id: string; agent_id: string };
-
 type ConfirmRequest = {
   title: string;
   body: string;
@@ -282,10 +281,6 @@ function phaseForActivity(kind: string) {
   return ACTIVITY_PHASE_LABELS[kind] ?? "Active";
 }
 
-function activityOwnerKey(activity: AgentActivity) {
-  return activity.agent_id ?? `handle:${activity.agent_handle || "unknown"}`;
-}
-
 function timestampSortValue(value: string) {
   const parsed = new Date(value).getTime();
   return Number.isFinite(parsed) ? parsed : 0;
@@ -294,19 +289,6 @@ function timestampSortValue(value: string) {
 function compareActivityFeedItems(left: ActivityFeedItem, right: ActivityFeedItem) {
   if (left.unread !== right.unread) return left.unread ? -1 : 1;
   return timestampSortValue(right.timestamp) - timestampSortValue(left.timestamp);
-}
-
-function limitActivitiesPerAgent(activities: AgentActivity[]) {
-  const counts = new Map<string, number>();
-  return [...activities]
-    .sort((left, right) => timestampSortValue(right.created_at) - timestampSortValue(left.created_at))
-    .filter((activity) => {
-      const key = activityOwnerKey(activity);
-      const count = counts.get(key) ?? 0;
-      if (count >= ACTIVITY_HISTORY_LIMIT_PER_AGENT) return false;
-      counts.set(key, count + 1);
-      return true;
-    });
 }
 
 function isTextInput(target: EventTarget | null) {
@@ -976,33 +958,6 @@ function App() {
     setRuntimeChecks(Object.fromEntries(entries));
   }
 
-  function sortedMessages(messages: Message[]) {
-    return [...messages].sort((left, right) => {
-      const leftSeq = Number.isSafeInteger(left.seq) && left.seq > 0 ? left.seq : Number.MAX_SAFE_INTEGER;
-      const rightSeq = Number.isSafeInteger(right.seq) && right.seq > 0 ? right.seq : Number.MAX_SAFE_INTEGER;
-      if (leftSeq !== rightSeq) return leftSeq - rightSeq;
-      return new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
-    });
-  }
-
-  function mergedSortedMessages(current: Message[], incoming: Message[]) {
-    if (incoming.length === 0) return current;
-    const messagesById = new Map(current.map((message) => [message.id, message]));
-    for (const message of incoming) {
-      messagesById.set(message.id, message);
-    }
-    return sortedMessages(Array.from(messagesById.values()));
-  }
-
-  function normalizeBootstrap(next: Bootstrap): Bootstrap {
-    return {
-      ...next,
-      messages: sortedMessages(next.messages),
-      channel_message_history: next.channel_message_history ?? [],
-      agent_activities: limitActivitiesPerAgent(next.agent_activities),
-    };
-  }
-
   function initializeChannelMessageHistory(next: Bootstrap) {
     const availableChannelIds = new Set(next.channels.map((channel) => channel.id));
     for (const channelId of Array.from(olderChannelBeforeSeqRef.current.keys())) {
@@ -1101,10 +1056,30 @@ function App() {
       perf.phases.parseMs = measurement.parseMs;
     }
     const applyStartedAt = performance.now();
-    const next = normalizeBootstrap(payload);
-    const refreshed = withPendingSavedToggles(
-      includeOptimistic ? withOptimisticChannels(withOptimisticMessages(next)) : next,
-    );
+    const hydration = {
+      snapshotInvalidated: refreshInvalidation !== refreshInvalidationRef.current,
+      loadedHistoricalMessageIds: loadedHistoricalMessageIdsRef.current,
+      paginatedChannelIds: paginatedChannelIdsRef.current,
+      initializedChannelIds: initializedOlderChannelIdsRef.current,
+    };
+    const optimistic = {
+      messages: optimisticMessagesRef.current,
+      channels: optimisticChannelsRef.current,
+      removedChannelIds: optimisticRemovedChannelsRef.current,
+      savedToggles: pendingSavedToggleOverridesRef.current,
+    };
+    const prepared = applySnapshot(null, payload, {
+      includeOptimistic,
+      optimistic,
+      hydration,
+    });
+    for (const channelId of prepared.acknowledgedOptimisticChannelIds) {
+      optimisticChannelsRef.current.delete(channelId);
+    }
+    for (const channelId of prepared.acknowledgedRemovedChannelIds) {
+      optimisticRemovedChannelsRef.current.delete(channelId);
+    }
+    const refreshed = prepared.data;
     initializeChannelMessageHistory(refreshed);
     if (perf) {
       perf.counts = {
@@ -1117,54 +1092,25 @@ function App() {
       };
     }
     setData((current) => {
-      if (!current) return refreshed;
-      const refreshedMessageIds = new Set(refreshed.messages.map((message) => message.id));
-      const refreshedChannelIds = new Set(refreshed.channels.map((channel) => channel.id));
-      let currentOnlyMessages = current.messages.filter((message) => !refreshedMessageIds.has(message.id));
-      if (refreshInvalidation === refreshInvalidationRef.current) {
-        currentOnlyMessages = currentOnlyMessages.filter((message) => (
-          refreshedChannelIds.has(message.channel_id)
-          && (loadedHistoricalMessageIdsRef.current.has(message.id)
-            || paginatedChannelIdsRef.current.has(message.channel_id)
-            || initializedOlderChannelIdsRef.current.has(message.channel_id))
-        ));
-        for (const message of currentOnlyMessages) {
-          loadedHistoricalMessageIdsRef.current.add(message.id);
-        }
-      } else {
-        currentOnlyMessages = currentOnlyMessages.filter((message) => refreshedChannelIds.has(message.channel_id));
-      }
-      // A bootstrap snapshot can be over a second stale. Where it still shows a
-      // message as `streaming`, targeted deltas/upserts applied since then are
-      // ahead of it: keep the local copy so live text does not briefly roll
-      // back and re-grow (visible as flicker while agents stream).
-      let preservedStreaming = false;
-      const snapshotMessages = refreshed.messages.map((message) => {
-        if (message.delivery_state !== "streaming") return message;
-        const local = current.messages.find((item) => item.id === message.id);
-        if (!local) return message;
-        if (local.delivery_state !== "streaming" || local.body.length > message.body.length) {
-          preservedStreaming = true;
-          return local;
-        }
-        return message;
+      const reconciled = reconcileHydration(current, refreshed, {
+        ...hydration,
+        snapshotInvalidated:
+          refreshInvalidation !== refreshInvalidationRef.current,
       });
-      if (currentOnlyMessages.length === 0 && !preservedStreaming) return refreshed;
-      return {
-        ...refreshed,
-        messages: sortedMessages([...snapshotMessages, ...currentOnlyMessages]),
-      };
+      for (const messageId of reconciled.retainedHistoricalMessageIds) {
+        loadedHistoricalMessageIdsRef.current.add(messageId);
+      }
+      return reconciled.data;
     });
     setActiveChannelId((prev) => {
       // Use the merged list so a still-optimistic channel keeps the active
       // selection instead of falling back to channels[0] when a stale bootstrap
       // that predates its creation lands.
-      const channels = refreshed.channels;
-      if (preferredActiveChannelId && channels.some((item) => item.id === preferredActiveChannelId)) {
-        return preferredActiveChannelId;
-      }
-      if (channels.some((item) => item.id === prev)) return prev;
-      return channels[0]?.id || "";
+      return resolveActiveChannelId(
+        refreshed.channels,
+        prev,
+        preferredActiveChannelId,
+      );
     });
     const applyEndedAt = performance.now();
     if (perf) {
@@ -1250,7 +1196,7 @@ function App() {
       if (page.messages.length > 0) {
         setData((current) => {
           if (!current || !current.channels.some((channel) => channel.id === channelId)) return current;
-          return { ...current, messages: mergedSortedMessages(current.messages, page.messages) };
+          return { ...current, messages: mergeMessages(current.messages, page.messages) };
         });
       }
     } catch (err) {
@@ -1304,7 +1250,7 @@ function App() {
       if (page.messages.length > 0) {
         setData((current) => {
           if (!current || !current.channels.some((channel) => channel.id === channelId)) return current;
-          return { ...current, messages: mergedSortedMessages(current.messages, page.messages) };
+          return { ...current, messages: mergeMessages(current.messages, page.messages) };
         });
       }
     } catch (err) {
@@ -1353,17 +1299,10 @@ function App() {
     messageDeltaBufferRef.current.delete(message.id);
     invalidatePendingRefreshResult();
     const applyStartedAt = performance.now();
-    setData((current) => {
-      if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message update`);
-        return current;
-      }
-      const existingIndex = current.messages.findIndex((item) => item.id === message.id);
-      const messages = existingIndex >= 0
-        ? current.messages.map((item) => item.id === message.id ? message : item)
-        : [...current.messages, message];
-      return { ...current, messages: sortedMessages(messages) };
-    });
+    applyBackendStateEvent(
+      { type: "message_upsert", message },
+      `Failed to refresh ${APP_DISPLAY_NAME} state after message update`,
+    );
     const applyEndedAt = performance.now();
     if (perf) {
       perf.counts.updatedMessages = 1;
@@ -1372,81 +1311,20 @@ function App() {
     }
   }
 
-  function withOptimisticChannels(next: Bootstrap): Bootstrap {
-    if (optimisticChannelsRef.current.size === 0 && optimisticRemovedChannelsRef.current.size === 0) {
-      return next;
-    }
-    let refreshed = next;
-    let channels = refreshed.channels;
-    // Drop channels we deleted locally but that a stale in-flight bootstrap
-    // still carries. Once bootstrap itself no longer lists the id, the pending
-    // removal has been reconciled and self-evicts.
-    if (optimisticRemovedChannelsRef.current.size > 0) {
-      const stillPresent = new Set(channels.map((channel) => channel.id));
-      for (const id of optimisticRemovedChannelsRef.current) {
-        if (!stillPresent.has(id)) optimisticRemovedChannelsRef.current.delete(id);
+  function applyBackendStateEvent(
+    event: UiBackendEvent,
+    refreshFallback: string,
+  ) {
+    const update = (current: Bootstrap | null) => {
+      const result = applyBackendEvent(current, event);
+      for (const messageId of result.deletedMessageIds) {
+        loadedHistoricalMessageIdsRef.current.delete(messageId);
+        knownMessageIdsRef.current?.delete(messageId);
       }
-      if (optimisticRemovedChannelsRef.current.size > 0) {
-        refreshed = bootstrapWithoutChannels(refreshed, optimisticRemovedChannelsRef.current);
-        channels = refreshed.channels;
-      }
-    }
-    if (optimisticChannelsRef.current.size > 0) {
-      const existingIds = new Set(channels.map((channel) => channel.id));
-      const pending: Channel[] = [];
-      for (const [id, channel] of optimisticChannelsRef.current) {
-        // Authoritative bootstrap now knows this channel — stop shadowing it.
-        if (existingIds.has(id)) optimisticChannelsRef.current.delete(id);
-        else pending.push(channel);
-      }
-      if (pending.length > 0) channels = [...channels, ...pending];
-    }
-    if (channels === refreshed.channels) return refreshed;
-    return { ...refreshed, channels };
-  }
-
-  function bootstrapWithoutChannels(next: Bootstrap, channelIds: ReadonlySet<string>): Bootstrap {
-    return {
-      ...next,
-      channels: next.channels.filter((item) => !channelIds.has(item.id)),
-      thread_activities: next.thread_activities.filter((item) => !channelIds.has(item.channel_id)),
-      channel_members: next.channel_members.filter((item) => !channelIds.has(item.channel_id)),
-      messages: next.messages.filter((item) => !channelIds.has(item.channel_id)),
-      channel_message_history: next.channel_message_history.filter((item) => !channelIds.has(item.channel_id)),
-      saved_messages: next.saved_messages.filter((item) => !channelIds.has(item.channel_id)),
-      artifacts: next.artifacts.filter((item) => !channelIds.has(item.channel_id)),
-      tasks: next.tasks.filter((item) => !channelIds.has(item.channel_id)),
-      reminders: next.reminders.filter((item) => !item.channel_id || !channelIds.has(item.channel_id)),
-      agent_schedules: next.agent_schedules.filter((item) => !channelIds.has(item.channel_id)),
-      agent_work_items: next.agent_work_items.filter((item) => !item.channel_id || !channelIds.has(item.channel_id)),
+      if (result.needsRefresh) requestRefresh(refreshFallback);
+      return result.data;
     };
-  }
-
-  function withOptimisticMessages(next: Bootstrap): Bootstrap {
-    if (optimisticMessagesRef.current.size === 0) return next;
-    const existingIds = new Set(next.messages.map((message) => message.id));
-    const optimisticMessages = Array.from(optimisticMessagesRef.current.values())
-      .filter((message) => !existingIds.has(message.id));
-    if (optimisticMessages.length === 0) return next;
-    return { ...next, messages: sortedMessages([...next.messages, ...optimisticMessages]) };
-  }
-
-  function savedMessagesWithState(savedMessages: SavedMessage[], messageId: string, saved: boolean, savedEntry?: SavedMessage) {
-    const withoutMessage = savedMessages.filter((item) => item.message_id !== messageId);
-    if (!saved) return withoutMessage.length === savedMessages.length ? savedMessages : withoutMessage;
-    const existing = savedMessages.find((item) => item.message_id === messageId) ?? null;
-    if (!savedEntry && existing) return savedMessages;
-    if (!savedEntry) return savedMessages;
-    return [savedEntry, ...withoutMessage];
-  }
-
-  function withPendingSavedToggles(next: Bootstrap): Bootstrap {
-    if (pendingSavedToggleOverridesRef.current.size === 0) return next;
-    let savedMessages = next.saved_messages;
-    for (const [messageId, override] of pendingSavedToggleOverridesRef.current) {
-      savedMessages = savedMessagesWithState(savedMessages, messageId, override.saved, override.entry);
-    }
-    return savedMessages === next.saved_messages ? next : { ...next, saved_messages: savedMessages };
+    setData(update);
   }
 
   function flushMessageDeltas() {
@@ -1459,29 +1337,11 @@ function App() {
     const deltas = messageDeltaBufferRef.current;
     messageDeltaBufferRef.current = new Map();
     setEphemeralData((current) => {
-      if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message delta`);
-        return current;
-      }
-      let missing = false;
-      let changed = false;
-      const messages = current.messages.map((item) => {
-        const delta = deltas.get(item.id);
-        if (!delta) return item;
-        changed = true;
-        return { ...item, body: `${item.body}${delta.append}`, delivery_state: delta.deliveryState };
-      });
-      for (const messageId of deltas.keys()) {
-        if (!current.messages.some((item) => item.id === messageId)) {
-          missing = true;
-          break;
-        }
-      }
-      if (missing) {
+      const result = applyMessageDeltas(current, deltas);
+      if (result.needsRefresh) {
         requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message delta`);
       }
-      if (!changed) return current;
-      return { ...current, messages };
+      return result.data;
     });
   }
 
@@ -1500,58 +1360,10 @@ function App() {
   function applyMessageDelete(messageId: string) {
     messageDeltaBufferRef.current.delete(messageId);
     invalidatePendingRefreshResult();
-    setData((current) => {
-      if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after message deletion`);
-        return current;
-      }
-      const deletedMessageIds = current.messages
-        .filter((message) => message.id === messageId || message.thread_root_id === messageId)
-        .map((message) => message.id);
-      for (const deletedMessageId of deletedMessageIds) {
-        loadedHistoricalMessageIdsRef.current.delete(deletedMessageId);
-        knownMessageIdsRef.current?.delete(deletedMessageId);
-      }
-      return {
-        ...current,
-        messages: current.messages.filter((message) => (
-          message.id !== messageId && message.thread_root_id !== messageId
-        )),
-      };
-    });
-  }
-
-  function applyActivityUpsert(activity: AgentActivity) {
-    setEphemeralData((current) => {
-      if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after activity update`);
-        return current;
-      }
-      const existingIndex = current.agent_activities.findIndex((item) => item.id === activity.id);
-      const agent_activities = existingIndex >= 0
-        ? current.agent_activities.map((item) => item.id === activity.id ? activity : item)
-        : [activity, ...current.agent_activities];
-      return { ...current, agent_activities: limitActivitiesPerAgent(agent_activities) };
-    });
-  }
-
-  function applyAgentRunUpsert(patch: Omit<AgentRun, "log"> & { log?: string }) {
-    setData((current) => {
-      if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after run update`);
-        return current;
-      }
-      const existing = current.agent_runs.find((item) => item.id === patch.id);
-      const run: AgentRun = {
-        ...patch,
-        log: patch.log ?? existing?.log ?? "",
-      };
-      const agent_runs = existing
-        ? current.agent_runs.map((item) => item.id === patch.id ? { ...item, ...run } : item)
-        : [run, ...current.agent_runs];
-      agent_runs.sort((left, right) => new Date(right.started_at).getTime() - new Date(left.started_at).getTime());
-      return { ...current, agent_runs: agent_runs.slice(0, 30) };
-    });
+    applyBackendStateEvent(
+      { type: "message_delete", message_id: messageId },
+      `Failed to refresh ${APP_DISPLAY_NAME} state after message deletion`,
+    );
   }
 
   function cancelEphemeralFlushTimers() {
@@ -1578,35 +1390,21 @@ function App() {
     ephemeralRunBufferRef.current = new Map();
     const applyStartedAt = performance.now();
     setEphemeralData((current) => {
-      if (!current) {
+      const events: UiBackendEvent[] = [
+        ...activities.map((activity) => ({
+          type: "activity_upsert" as const,
+          activity,
+        })),
+        ...runs.map((run) => ({
+          type: "agent_run_upsert" as const,
+          run,
+        })),
+      ];
+      const result = applyBackendEvents(current, events);
+      if (result.needsRefresh) {
         requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after buffered updates`);
-        return current;
       }
-      let nextActivities = current.agent_activities;
-      if (activities.length > 0) {
-        const byId = new Map(nextActivities.map((item) => [item.id, item] as const));
-        for (const activity of activities) byId.set(activity.id, activity);
-        nextActivities = limitActivitiesPerAgent(Array.from(byId.values()));
-      }
-      let nextRuns = current.agent_runs;
-      if (runs.length > 0) {
-        const byId = new Map(nextRuns.map((item) => [item.id, item] as const));
-        for (const patch of runs) {
-          const existing = byId.get(patch.id);
-          const run: AgentRun = {
-            ...patch,
-            log: patch.log ?? existing?.log ?? "",
-          };
-          byId.set(patch.id, existing ? { ...existing, ...run } : run);
-        }
-        nextRuns = Array.from(byId.values())
-          .sort((left, right) => new Date(right.started_at).getTime() - new Date(left.started_at).getTime())
-          .slice(0, 30);
-      }
-      if (nextActivities === current.agent_activities && nextRuns === current.agent_runs) {
-        return current;
-      }
-      return { ...current, agent_activities: nextActivities, agent_runs: nextRuns };
+      return result.data;
     });
     const applyEndedAt = performance.now();
     if (perf) {
@@ -1645,93 +1443,6 @@ function App() {
     ephemeralRunBufferRef.current.delete(runId);
   }
 
-  function applyWorkItemUpsert(patch: Omit<AgentWorkItem, "context"> & { context?: string }) {
-    setData((current) => {
-      if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after agent request update`);
-        return current;
-      }
-      const existing = current.agent_work_items.find((item) => item.id === patch.id);
-      const workItem: AgentWorkItem = {
-        ...patch,
-        context: patch.context ?? existing?.context ?? "",
-        source_kind: patch.source_kind ?? existing?.source_kind ?? "manual",
-      };
-      const agent_work_items = existing
-        ? current.agent_work_items.map((item) => item.id === patch.id ? { ...item, ...workItem } : item)
-        : [workItem, ...current.agent_work_items];
-      agent_work_items.sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
-      return { ...current, agent_work_items: agent_work_items.slice(0, 80) };
-    });
-  }
-
-  function applyArtifactUpsert(artifact: Artifact) {
-    if (!artifact || typeof artifact.id !== "string" || typeof artifact.message_id !== "string") {
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`);
-      return;
-    }
-    setData((current) => {
-      if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`);
-        return current;
-      }
-      const currentArtifacts = Array.isArray(current.artifacts) ? current.artifacts : [];
-      const existingIndex = currentArtifacts.findIndex((item) => item.id === artifact.id);
-      const artifacts = existingIndex >= 0
-        ? currentArtifacts.map((item) => item.id === artifact.id ? artifact : item)
-        : [...currentArtifacts, artifact];
-      const messages = current.messages.map((message) => {
-        if (message.id !== artifact.message_id) return message;
-        const currentMessageArtifacts = Array.isArray(message.artifacts) ? message.artifacts : [];
-        const existingArtifactIndex = currentMessageArtifacts.findIndex((item) => item.id === artifact.id);
-        const messageArtifacts = existingArtifactIndex >= 0
-          ? currentMessageArtifacts.map((item) => item.id === artifact.id ? artifact : item)
-          : [...currentMessageArtifacts, artifact];
-        return { ...message, artifacts: messageArtifacts };
-      });
-      return { ...current, artifacts, messages };
-    });
-  }
-
-  function applyChannelMemberUpsert(member: ChannelMember) {
-    if (
-      !member
-      || typeof member.channel_id !== "string"
-      || typeof member.agent_id !== "string"
-    ) {
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after membership update`);
-      return;
-    }
-    setData((current) => {
-      if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after membership update`);
-        return current;
-      }
-      const filtered = current.channel_members.filter(
-        (entry) => !(entry.channel_id === member.channel_id && entry.agent_id === member.agent_id),
-      );
-      return { ...current, channel_members: [...filtered, member] };
-    });
-  }
-
-  function applyChannelMemberRemove(channelId: string, agentId: string) {
-    if (typeof channelId !== "string" || typeof agentId !== "string") {
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after membership update`);
-      return;
-    }
-    setData((current) => {
-      if (!current) {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after membership update`);
-        return current;
-      }
-      const filtered = current.channel_members.filter(
-        (entry) => !(entry.channel_id === channelId && entry.agent_id === agentId),
-      );
-      if (filtered.length === current.channel_members.length) return current;
-      return { ...current, channel_members: filtered };
-    });
-  }
-
   async function openArtifact(artifact: Artifact) {
     try {
       const fullArtifact = await apiInvoke<Artifact>("artifact_read", { artifactId: artifact.id });
@@ -1746,76 +1457,65 @@ function App() {
 
   function handleBackendEvent(payload: unknown) {
     try {
-      if (typeof payload !== "string") {
-        requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`);
-        return;
-      }
-      const parsed = JSON.parse(payload) as UiBackendEvent;
-      if (parsed.type === "batch") {
-        for (const eventPayload of parsed.events) {
-          handleBackendEvent(eventPayload);
+      for (const event of parseBackendEventPayload(payload)) {
+        if (event.type === "message_upsert") {
+          // Semantic message events (final body, owner/system messages, errors)
+          // bypass the ephemeral buffer; they are decisive and inexpensive.
+          // Streaming placeholder rewrites are batched on the backend through
+          // the existing message_delta path, not here, so re-batching them
+          // would race with deltas on the same message id.
+          applyMessageUpsert(event.message);
+          continue;
         }
-        return;
-      }
-      if (parsed.type === "message_upsert") {
-        // Semantic message events (final body, owner/system messages, errors)
-        // bypass the ephemeral buffer; they are decisive and inexpensive.
-        // Streaming placeholder rewrites are batched on the backend through
-        // the existing message_delta path, not here, so re-batching them
-        // would race with deltas on the same message id.
-        applyMessageUpsert(parsed.message);
-        return;
-      }
-      if (parsed.type === "message_delta") {
-        // Already coalesced by the dedicated message-delta buffer (50 ms).
-        queueMessageDelta(parsed.message_id, parsed.append, parsed.delivery_state);
-        return;
-      }
-      if (parsed.type === "message_delete") {
-        applyMessageDelete(parsed.message_id);
-        return;
-      }
-      if (parsed.type === "activity_upsert") {
-        // Activities are inherently transient progress signals. Coalesce
-        // by activity.id (latest wins) and flush once per animation frame.
-        bufferActivityEphemeral(parsed.activity);
-        return;
-      }
-      if (parsed.type === "agent_run_upsert") {
-        // Run terminal transitions MUST land immediately so the UI shows
-        // completion / failure without waiting for the buffer. Drop any
-        // stale pending ephemeral for the same run id first to avoid the
-        // buffered partial overwriting the terminal state.
-        if (RUN_TERMINAL_STATUSES.has(parsed.run.status)) {
-          dropPendingRunEphemeral(parsed.run.id);
-          applyAgentRunUpsert(parsed.run);
-        } else {
-          bufferRunEphemeral(parsed.run);
+        if (event.type === "message_delta") {
+          // Already coalesced by the dedicated message-delta buffer (50 ms).
+          queueMessageDelta(
+            event.message_id,
+            event.append,
+            event.delivery_state,
+          );
+          continue;
         }
-        return;
+        if (event.type === "message_delete") {
+          applyMessageDelete(event.message_id);
+          continue;
+        }
+        if (event.type === "activity_upsert") {
+          // Activities are inherently transient progress signals. Coalesce
+          // by activity.id (latest wins) and flush once per animation frame.
+          bufferActivityEphemeral(event.activity);
+          continue;
+        }
+        if (event.type === "agent_run_upsert") {
+          // Run terminal transitions MUST land immediately so the UI shows
+          // completion / failure without waiting for the buffer. Drop any
+          // stale pending ephemeral for the same run id first to avoid the
+          // buffered partial overwriting the terminal state.
+          if (RUN_TERMINAL_STATUSES.has(event.run.status)) {
+            dropPendingRunEphemeral(event.run.id);
+            applyBackendStateEvent(
+              event,
+              `Failed to refresh ${APP_DISPLAY_NAME} state after run update`,
+            );
+          } else {
+            bufferRunEphemeral(event.run);
+          }
+          continue;
+        }
+
+        let fallback = `Failed to refresh ${APP_DISPLAY_NAME} state after backend update`;
+        if (event.type === "work_item_upsert") {
+          fallback = `Failed to refresh ${APP_DISPLAY_NAME} state after agent request update`;
+        } else if (event.type === "artifact_upsert") {
+          fallback = `Failed to refresh ${APP_DISPLAY_NAME} state after artifact update`;
+        } else if (
+          event.type === "channel_member_upsert" ||
+          event.type === "channel_member_remove"
+        ) {
+          fallback = `Failed to refresh ${APP_DISPLAY_NAME} state after membership update`;
+        }
+        applyBackendStateEvent(event, fallback);
       }
-      if (parsed.type === "work_item_upsert") {
-        // Work-item / task state transitions are semantic; bypass buffer.
-        applyWorkItemUpsert(parsed.work_item);
-        return;
-      }
-      if (parsed.type === "artifact_upsert") {
-        // Artifact upserts are semantic; bypass buffer.
-        applyArtifactUpsert(parsed.artifact);
-        return;
-      }
-      if (parsed.type === "channel_member_upsert") {
-        // Targeted membership patch. Avoids a full bootstrap refresh on
-        // every Add/Remove tap so mobile feels snappy and other UI
-        // surfaces (e.g. agent detail drawer) see the change immediately.
-        applyChannelMemberUpsert(parsed.member);
-        return;
-      }
-      if (parsed.type === "channel_member_remove") {
-        applyChannelMemberRemove(parsed.channel_id, parsed.agent_id);
-        return;
-      }
-      requestRefresh(`Failed to refresh ${APP_DISPLAY_NAME} state after backend update`);
     } catch (err) {
       setAppError(errorMessage(err, `Failed to apply ${APP_DISPLAY_NAME} backend update`));
       console.error(`Failed to apply ${APP_DISPLAY_NAME} backend update`, err, payload);
@@ -2516,13 +2216,20 @@ function App() {
     if (
       !activeChannelId
       || !pendingChannelRestoreRef.current.has(activeChannelId)
-      || !initializedOlderChannelIdsRef.current.has(activeChannelId)
-      || loadingOlderChannelIdsRef.current.has(activeChannelId)
     ) {
       return;
     }
+    const hydration = threadHydrationForChannel(
+      activeChannelId,
+      initializedOlderChannelIdsRef.current.has(activeChannelId)
+        && !loadingOlderChannelIdsRef.current.has(activeChannelId),
+    );
+    if (hydration.status === "pending") return;
     pendingChannelRestoreRef.current.delete(activeChannelId);
-    restoreRememberedThreadForChannel(activeChannelId);
+    openThread(hydration.threadId, activeChannelId);
+    if (!isMobileViewport()) {
+      setShowThread(Boolean(hydration.threadId));
+    }
   }, [activeChannelId, data?.messages, loadingOlderChannelIds]);
 
   const activeRoot = activeThreadId ? rootMessages.find((m) => m.id === activeThreadId) ?? null : null;
@@ -3180,10 +2887,12 @@ function App() {
       // A `bootstrap` dispatched before create committed must not overwrite the
       // optimistic insert with a stale channel list when it lands.
       invalidatePendingRefreshResult();
-      setData((current) => {
-        if (!current || current.channels.some((item) => item.id === channelId)) return current;
-        return { ...current, channels: [...current.channels, optimisticChannel] };
-      });
+      setData((current) =>
+        applyOptimisticMutation(current, {
+          type: "channel_add",
+          channel: optimisticChannel,
+        }),
+      );
     }
     if (shouldReturnToMobileHome) {
       returnToMobileHome();
@@ -3259,7 +2968,10 @@ function App() {
             loadedHistoricalMessageIdsRef.current.delete(message.id);
             knownMessageIdsRef.current?.delete(message.id);
           }
-          return bootstrapWithoutChannels(current, optimisticRemovedChannelsRef.current);
+          return applyOptimisticMutation(current, {
+            type: "channel_remove",
+            channelIds: optimisticRemovedChannelsRef.current,
+          });
         });
         setShowChannelSettingsModal(false);
         forgetChannelThread(channelToDelete.id);
@@ -3291,28 +3003,22 @@ function App() {
     updateReplyComposerDraft(activeThreadId, (current) => ({ ...current, text: value }));
   }
 
-  function defaultThreadForChannel(channelId: string) {
-    const repliedRootIds = new Set(
-      visibleMessages
-        .filter((message) => message.channel_id === channelId && message.thread_root_id)
-        .map((message) => message.thread_root_id),
-    );
-    return visibleMessages.find((m) => m.channel_id === channelId && !m.thread_root_id && repliedRootIds.has(m.id))?.id ?? null;
-  }
-
-  function rootThreadBelongsToChannel(channelId: string, threadId: string) {
-    return visibleMessages.some((message) => message.channel_id === channelId && !message.thread_root_id && message.id === threadId);
+  function threadHydrationForChannel(channelId: string, hydrated = true) {
+    return reconcileThreadHydration({
+      messages: visibleMessages,
+      channelId,
+      hydrated,
+      hasRememberedThread: Object.prototype.hasOwnProperty.call(
+        channelThreadMemory,
+        channelId,
+      ),
+      rememberedThreadId: channelThreadMemory[channelId] ?? null,
+    });
   }
 
   function rememberedThreadForChannel(channelId: string) {
-    if (!Object.prototype.hasOwnProperty.call(channelThreadMemory, channelId)) {
-      return defaultThreadForChannel(channelId);
-    }
-    const rememberedThreadId = channelThreadMemory[channelId];
-    if (!rememberedThreadId) return null;
-    return rootThreadBelongsToChannel(channelId, rememberedThreadId)
-      ? rememberedThreadId
-      : defaultThreadForChannel(channelId);
+    const hydration = threadHydrationForChannel(channelId);
+    return hydration.status === "ready" ? hydration.threadId : null;
   }
 
   function rememberChannelThread(channelId: string | null | undefined, threadId: string | null) {
@@ -3690,10 +3396,12 @@ function App() {
     optimisticMessagesRef.current.set(id, optimisticMessage);
     knownMessageIdsRef.current?.add(id);
     invalidatePendingRefreshResult();
-    setData((current) => current ? {
-      ...current,
-      messages: [...current.messages, optimisticMessage],
-    } : current);
+    setData((current) =>
+      applyOptimisticMutation(current, {
+        type: "message_add",
+        message: optimisticMessage,
+      }),
+    );
     return id;
   }
 
@@ -3702,10 +3410,12 @@ function App() {
     releaseOptimisticAttachmentUrls(messageId);
     knownMessageIdsRef.current?.delete(messageId);
     invalidatePendingRefreshResult();
-    setData((current) => current ? {
-      ...current,
-      messages: current.messages.filter((message) => message.id !== messageId),
-    } : current);
+    setData((current) =>
+      applyOptimisticMutation(current, {
+        type: "message_remove",
+        messageId,
+      }),
+    );
   }
 
   function settleOptimisticMessage(messageId: string, persistedMessage: Message) {
@@ -3714,13 +3424,13 @@ function App() {
     knownMessageIdsRef.current?.delete(messageId);
     knownMessageIdsRef.current?.add(persistedMessage.id);
     invalidatePendingRefreshResult();
-    setData((current) => {
-      if (!current) return current;
-      const messages = current.messages
-        .filter((message) => message.id !== messageId && message.id !== persistedMessage.id)
-        .concat(persistedMessage);
-      return { ...current, messages: sortedMessages(messages) };
-    });
+    setData((current) =>
+      applyOptimisticMutation(current, {
+        type: "message_replace",
+        optimisticMessageId: messageId,
+        persistedMessage,
+      }),
+    );
   }
 
   function appendDraftAttachments(files: FileList | File[], target: "root" | "reply") {
@@ -3759,12 +3469,12 @@ function App() {
     // pinned to the old `isMember` value until the backend round-trip and
     // refresh complete, and on mobile that lag reads as "tap didn't hit".
     setData((current) => {
-      if (!current) return current;
-      const without = current.channel_members.filter(
-        (entry) => !(entry.channel_id === channelId && entry.agent_id === agentId),
-      );
       if (!member) {
-        return { ...current, channel_members: without };
+        return applyOptimisticMutation(current, {
+          type: "channel_member_set",
+          channelId,
+          agentId,
+        });
       }
       if (!agent) return current;
       const optimistic: ChannelMember = {
@@ -3774,7 +3484,12 @@ function App() {
         agent_display_name: agent.display_name,
         created_at: new Date().toISOString(),
       };
-      return { ...current, channel_members: [...without, optimistic] };
+      return applyOptimisticMutation(current, {
+        type: "channel_member_set",
+        channelId,
+        agentId,
+        member: optimistic,
+      });
     });
     try {
       // Bypass `mutate`'s blocking `await refresh()` — the backend emits a
@@ -4365,9 +4080,12 @@ function App() {
     setData((current) => {
       if (!current) return current;
       priorEntry = current.saved_messages.find((item) => item.message_id === messageId);
-      const next = savedMessagesWithState(current.saved_messages, messageId, saved, optimisticEntry ?? priorEntry);
-      if (next === current.saved_messages) return current;
-      return { ...current, saved_messages: next };
+      return applyOptimisticMutation(current, {
+        type: "saved_message_toggle",
+        messageId,
+        saved,
+        entry: optimisticEntry ?? priorEntry,
+      });
     });
     pendingSavedToggleOverridesRef.current.set(messageId, {
       saved,
@@ -4385,7 +4103,12 @@ function App() {
           // Only roll back if no newer toggle for this message superseded us.
           if (savedToggleSeqRef.current.get(messageId) === seq) {
             setData((current) => current
-              ? { ...current, saved_messages: savedMessagesWithState(current.saved_messages, messageId, Boolean(priorEntry), priorEntry) }
+              ? applyOptimisticMutation(current, {
+                  type: "saved_message_toggle",
+                  messageId,
+                  saved: Boolean(priorEntry),
+                  entry: priorEntry,
+                })
               : current);
             setAppError(errorMessage(err, "set_message_saved failed"));
           }
