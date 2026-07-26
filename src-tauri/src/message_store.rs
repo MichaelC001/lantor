@@ -702,6 +702,9 @@ pub(crate) async fn insert_agent_message_with_options(
     if !as_task && dispatch_mentions {
         queue_agent_message_mentions(pool, msg_id).await?;
     }
+    if let Ok(message) = load_message(pool, msg_id).await {
+        let _ = notify_ui_message_upsert(pool, &message, "message").await;
+    }
     let _ = notify_ui_refresh(pool, "message").await;
     Ok(msg_id)
 }

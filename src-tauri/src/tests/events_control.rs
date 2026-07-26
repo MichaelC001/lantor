@@ -672,6 +672,21 @@ async fn channel_message_create_posts_agent_message_and_dispatches_mentions() {
         );
         assert!(!message.get::<bool, _>("is_task"));
 
+        let message_upsert_count: i64 = sqlx::query_scalar(
+            r#"
+            select count(*)
+            from ui_events
+            where json_extract(event_json, '$.type') = 'message_upsert'
+              and json_extract(event_json, '$.message.id') = $1
+              and json_extract(event_json, '$.message.thread_root_id') is null
+            "#,
+        )
+        .bind(message_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        assert_eq!(message_upsert_count, 1);
+
         let target_is_member: bool = sqlx::query_scalar(
             r#"
             select exists (

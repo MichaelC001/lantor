@@ -740,6 +740,9 @@ function App() {
     });
   }, []);
   const [activeChannelId, setActiveChannelId] = useState<string>(() => getStoredActiveChannelId());
+  // Backend event subscriptions are long-lived; refresh callbacks must read the
+  // latest channel instead of the value captured when the listener was created.
+  const activeChannelIdRef = useRef(activeChannelId);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [channelThreadMemory, setChannelThreadMemory] = useState<ChannelThreadMemory>(() => loadChannelThreadMemory());
   const [activeTab, setActiveTab] = useState<ActiveTab>("chat");
@@ -830,6 +833,10 @@ function App() {
   const draftAttachments = rootComposerDraft.attachments;
   const replyDraft = replyComposerDraft.text;
   const replyAttachments = replyComposerDraft.attachments;
+
+  useEffect(() => {
+    activeChannelIdRef.current = activeChannelId;
+  }, [activeChannelId]);
 
   useEffect(() => {
     if (!focusedMessageId) return;
@@ -1058,7 +1065,7 @@ function App() {
   async function refresh(includeOptimistic = true, preferredActiveChannelId?: string) {
     const perf = shouldEnablePerfTelemetry() ? createPerfDraft("full-refresh") : null;
     const refreshInvalidation = refreshInvalidationRef.current;
-    const bootstrapChannelId = preferredActiveChannelId || activeChannelId;
+    const bootstrapChannelId = preferredActiveChannelId || activeChannelIdRef.current;
     const bootstrapArgs = {
       currentChannelOnly: true,
       ...(bootstrapChannelId ? { channelId: bootstrapChannelId } : {}),
