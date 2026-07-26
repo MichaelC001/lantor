@@ -103,6 +103,20 @@ pub(crate) async fn mark_orphaned_agent_runs(pool: &SqlitePool) -> CommandResult
     .execute(pool)
     .await
     .map_err(to_string)?;
+    // A `cancelling` item can only be completed by a live stop path; after a
+    // restart none exists, so finalize it instead of leaving it stuck forever.
+    sqlx::query(
+        r#"
+        update agent_work_items
+        set status = 'cancelled',
+            completed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+            updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+        where status = 'cancelling'
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(to_string)?;
 
     Ok(())
 }
@@ -439,7 +453,7 @@ async fn process_supervisor_command(
             let Some(run_id) = command.run_id else {
                 return Err("stop_run command missing run_id".to_owned());
             };
-            supervisor_stop_run(pool, codex_registry, run_id).await
+            supervisor_stop_run(pool, codex_registry, run_id, command.work_item_id).await
         }
         other => Err(format!("unknown supervisor command: {other}")),
     }
@@ -675,10 +689,70 @@ async fn supervisor_start_agent(
     .await
 }
 
+/// Finalize a work item whose cancel request can no longer be completed by a
+/// live stop path (run already gone or never got a pid). Without this the item
+/// would stay in `cancelling` forever, blocking retry and task redispatch.
+async fn finalize_unstoppable_work_item(
+    pool: &SqlitePool,
+    work_item_id: Option<Uuid>,
+    run_id: Uuid,
+    reason: &str,
+) -> CommandResult<()> {
+    let Some(work_item_id) = work_item_id else {
+        return Ok(());
+    };
+    let row = sqlx::query("select agent_id, status from agent_work_items where id = $1")
+        .bind(work_item_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(to_string)?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let status: String = row.get("status");
+    if !matches!(status.as_str(), "queued" | "running" | "cancelling") {
+        return Ok(());
+    }
+    let agent_id: Uuid = row.get("agent_id");
+    sqlx::query(
+        r#"
+        update agent_work_items
+        set status = 'cancelled',
+            completed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+            updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+        where id = $1 and status in ('queued', 'running', 'cancelling')
+        "#,
+    )
+    .bind(work_item_id)
+    .execute(pool)
+    .await
+    .map_err(to_string)?;
+    let _ = crate::mark_task_after_work_item_finished(
+        pool,
+        work_item_id,
+        agent_id,
+        run_id,
+        "cancelled",
+    )
+    .await;
+    notify_ui_work_item_changed(pool, work_item_id, "work_item_cancelled").await;
+    record_agent_activity(
+        pool,
+        Some(agent_id),
+        Some(run_id),
+        "dispatch",
+        "Agent request cancelled",
+        format!("{reason}: {work_item_id}"),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn supervisor_stop_run(
     pool: &SqlitePool,
     codex_registry: &WarmCodexRegistry,
     run_id: Uuid,
+    command_work_item_id: Option<Uuid>,
 ) -> CommandResult<()> {
     let row = sqlx::query(
         r#"
@@ -689,16 +763,71 @@ async fn supervisor_stop_run(
         "#,
     )
     .bind(run_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
     .map_err(to_string)?;
 
+    let Some(row) = row else {
+        // The run already finished or never existed; make sure the cancel
+        // request does not leave its work item stuck in `cancelling`.
+        finalize_unstoppable_work_item(pool, command_work_item_id, run_id, "run already stopped")
+            .await?;
+        return Ok(());
+    };
+
     let agent_id: Uuid = row.get("agent_id");
-    let pid: Option<i32> = row.get("pid");
-    let work_item_id: Option<Uuid> = row.get("work_item_id");
+    let mut pid: Option<i32> = row.get("pid");
+    let work_item_id: Option<Uuid> = row
+        .get::<Option<Uuid>, _>("work_item_id")
+        .or(command_work_item_id);
     let runtime: String = row.get("runtime");
+    if pid.is_none() {
+        // A run briefly has no pid while its start path is publishing it.
+        // Give that window a moment before treating the run as unstoppable.
+        sleep(Duration::from_millis(300)).await;
+        pid = sqlx::query_scalar::<_, Option<i32>>(
+            "select pid from agent_runs where id = $1 and stopped_at is null",
+        )
+        .bind(run_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(to_string)?
+        .flatten();
+    }
     let Some(pid) = pid else {
-        return Err("agent run does not have a pid yet".to_owned());
+        // No process to signal: finalize run + work item instead of failing,
+        // so cancel never leaves them stuck.
+        sqlx::query(
+            r#"
+            update agent_runs
+            set status = 'cancelled',
+                stopped_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+            where id = $1 and stopped_at is null
+            "#,
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .map_err(to_string)?;
+        notify_ui_agent_run_changed(pool, run_id, "run_finished").await;
+        sqlx::query(
+            "update agents set status = 'idle' where id = $1 and status in ('queued', 'running', 'stopping')",
+        )
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .map_err(to_string)?;
+        finalize_unstoppable_work_item(pool, work_item_id, run_id, "run had no process").await?;
+        record_agent_activity(
+            pool,
+            Some(agent_id),
+            Some(run_id),
+            "run",
+            "Stop finalized without process",
+            "agent run never published a pid",
+        )
+        .await?;
+        return Ok(());
     };
 
     sqlx::query("update agent_runs set status = 'stopping' where id = $1")
@@ -810,10 +939,48 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        claim_next_supervisor_command, load_channel_agent_roster,
+        claim_next_supervisor_command, load_channel_agent_roster, mark_orphaned_agent_runs,
         recover_supervisor_commands_at_startup,
     };
     use crate::db::{db_connect_with_url, migrate};
+
+    #[tokio::test]
+    async fn startup_sweep_finalizes_work_items_stuck_in_cancelling() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "cancelling-agent").await?;
+            let channel_id = insert_test_channel(&pool, "cancelling").await?;
+            let cancelling_work_item_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_work_items (agent_id, channel_id, title, context, status)
+                values ($1, $2, 'stuck cancel', 'context', 'cancelling')
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            mark_orphaned_agent_runs(&pool).await?;
+
+            let (status, completed): (String, Option<String>) =
+                sqlx::query_as("select status, completed_at from agent_work_items where id = $1")
+                    .bind(cancelling_work_item_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert_eq!(status, "cancelled");
+            assert!(completed.is_some());
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
 
     #[tokio::test]
     async fn startup_recovery_requeues_running_supervisor_commands_and_skips_terminal_work() {

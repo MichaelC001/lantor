@@ -770,7 +770,55 @@ pub(crate) async fn cancel_agent_work_in_pool(
                 let _ = notify_ui_refresh(pool, "supervisor_command").await;
             }
         }
-        "cancelling" => return Ok(()),
+        "cancelling" => {
+            // If the run is already terminal and no stop command is pending,
+            // nothing will ever finalize this item any more: do it now so a
+            // second cancel click recovers a stuck `cancelling` state.
+            let run_live = match run_id {
+                Some(run_id) => {
+                    sqlx::query_scalar::<_, i64>(
+                        "select count(*) from agent_runs where id = $1 and stopped_at is null",
+                    )
+                    .bind(run_id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(to_string)?
+                        > 0
+                }
+                None => false,
+            };
+            let stop_pending = sqlx::query_scalar::<_, i64>(
+                r#"
+                select count(*)
+                from supervisor_commands
+                where command_type = 'stop_run'
+                  and work_item_id = $1
+                  and status in ('pending', 'running')
+                "#,
+            )
+            .bind(work_item_id)
+            .fetch_one(pool)
+            .await
+            .map_err(to_string)?
+                > 0;
+            if run_live || stop_pending {
+                return Ok(());
+            }
+            sqlx::query(
+                r#"
+                update agent_work_items
+                set status = 'cancelled',
+                    completed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                where id = $1 and status = 'cancelling'
+                "#,
+            )
+            .bind(work_item_id)
+            .execute(pool)
+            .await
+            .map_err(to_string)?;
+            notify_ui_work_item_changed(pool, work_item_id, "work_item_cancelled").await;
+        }
         other => return Err(format!("cannot cancel agent request with status {other}")),
     }
 
