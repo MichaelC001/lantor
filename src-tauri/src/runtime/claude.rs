@@ -44,6 +44,9 @@ use protocol::{
 use reaper::claude_warm_idle_reaper;
 use turn::finish_warm_claude_active_turn;
 
+const CLAUDE_DISABLE_AUTO_MEMORY_ENV: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+const CLAUDE_DISABLE_AUTO_MEMORY_VALUE: &str = "1";
+
 #[derive(Clone, Default)]
 pub(crate) struct WarmClaudeRegistry {
     runtimes: Arc<AsyncMutex<HashMap<Uuid, Arc<WarmClaudeRuntime>>>>,
@@ -164,6 +167,10 @@ async fn spawn_warm_claude_runtime(
         .arg("--verbose")
         .arg("--permission-mode")
         .arg("bypassPermissions")
+        .env(
+            CLAUDE_DISABLE_AUTO_MEMORY_ENV,
+            CLAUDE_DISABLE_AUTO_MEMORY_VALUE,
+        )
         .env(CLAUDE_MAX_RETRIES_ENV, DEFAULT_CLAUDE_MAX_RETRIES);
     configure_agent_identity_env(&mut command, agent_id, config.handle);
     configure_agent_context_tool_env(&mut command);
@@ -827,7 +834,21 @@ mod tests {
         drop_test_schema, insert_test_agent, insert_test_channel, test_pool,
     };
 
-    use super::{finish_warm_claude_active_turn, ClaudeActiveTurn, WarmClaudeRuntime};
+    use super::{
+        finish_warm_claude_active_turn, ClaudeActiveTurn, WarmClaudeRuntime,
+        CLAUDE_DISABLE_AUTO_MEMORY_ENV, CLAUDE_DISABLE_AUTO_MEMORY_VALUE,
+    };
+
+    #[test]
+    fn claude_process_disables_provider_auto_memory() {
+        assert_eq!(
+            (
+                CLAUDE_DISABLE_AUTO_MEMORY_ENV,
+                CLAUDE_DISABLE_AUTO_MEMORY_VALUE
+            ),
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+        );
+    }
 
     async fn test_runtime_with_active_turn(
         run_id: Uuid,

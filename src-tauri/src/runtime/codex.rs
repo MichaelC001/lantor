@@ -59,6 +59,8 @@ pub(crate) use reaper::reap_stuck_codex_turn;
 use turn::{finish_codex_steer_request, finish_warm_codex_active_turn};
 
 const CODEX_TURN_START_TIMEOUT: Duration = Duration::from_secs(90);
+const CODEX_APP_SERVER_SHELL_COMMAND: &str =
+    "exec codex app-server --listen stdio:// -c 'notify=[]' -c 'features.memories=false'";
 
 #[derive(Clone, Default)]
 pub(crate) struct WarmCodexRegistry {
@@ -295,9 +297,7 @@ async fn spawn_warm_codex_runtime(
 ) -> CommandResult<Arc<WarmCodexRuntime>> {
     let cwd = effective_codex_cwd(working_directory)?;
     let mut command = Command::new("/bin/zsh");
-    command
-        .arg("-lc")
-        .arg("exec codex app-server --listen stdio:// -c 'notify=[]'");
+    command.arg("-lc").arg(CODEX_APP_SERVER_SHELL_COMMAND);
     apply_agent_environment_variables(&mut command, environment_variables)?;
     configure_agent_identity_env(&mut command, agent_id, handle);
     configure_agent_context_tool_env(&mut command);
@@ -1603,8 +1603,13 @@ mod tests {
     use super::{
         codex_context_rotation_candidate, codex_rotation_marker, finish_warm_codex_active_turn,
         prepend_codex_rotation_marker, track_codex_agent_message_stream, CodexActiveTurn,
-        WarmCodexRuntime, CODEX_TURN_START_TIMEOUT,
+        WarmCodexRuntime, CODEX_APP_SERVER_SHELL_COMMAND, CODEX_TURN_START_TIMEOUT,
     };
+
+    #[test]
+    fn codex_app_server_disables_provider_memories() {
+        assert!(CODEX_APP_SERVER_SHELL_COMMAND.contains("-c 'features.memories=false'"));
+    }
 
     async fn test_runtime_with_active_turn(
         run_id: uuid::Uuid,
