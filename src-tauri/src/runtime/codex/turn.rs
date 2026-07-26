@@ -28,11 +28,20 @@ pub(super) async fn finish_codex_steer_request(
     agent_id: Uuid,
     steer: CodexSteerRequest,
     success: bool,
+    cancelled: bool,
     error: Option<String>,
 ) -> CommandResult<()> {
     let (status, completed_at, run_id) = if success {
         (
             "done",
+            "strftime('%Y-%m-%dT%H:%M:%f+00:00','now')",
+            Some(steer.run_id),
+        )
+    } else if cancelled {
+        // The user stopped this turn; follow-ups merged into it must not
+        // requeue and revive the agent.
+        (
+            "cancelled",
             "strftime('%Y-%m-%dT%H:%M:%f+00:00','now')",
             Some(steer.run_id),
         )
@@ -58,15 +67,30 @@ pub(super) async fn finish_codex_steer_request(
     notify_ui_work_item_changed(pool, steer.work_item_id, "codex_turn_steer_result").await;
     if success {
         advance_agent_target_watermark_for_work_item(pool, agent_id, steer.work_item_id, 0).await?;
+    } else if cancelled {
+        let _ = mark_task_after_work_item_finished(
+            pool,
+            steer.work_item_id,
+            agent_id,
+            steer.run_id,
+            "cancelled",
+        )
+        .await;
     }
 
     record_agent_activity(
         pool,
         Some(agent_id),
         Some(steer.run_id),
-        if success { "dispatch" } else { "run_error" },
+        if success || cancelled {
+            "dispatch"
+        } else {
+            "run_error"
+        },
         if success {
             "Follow-up added"
+        } else if cancelled {
+            "Follow-up cancelled"
         } else {
             "Follow-up queued"
         },
@@ -162,6 +186,7 @@ pub(super) async fn finish_warm_codex_active_turn(
             agent_id,
             steer,
             success && !was_cancelled,
+            was_cancelled,
             if was_cancelled {
                 Some("cancelled".to_owned())
             } else {

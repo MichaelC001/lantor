@@ -1266,9 +1266,10 @@ async fn handle_codex_warm_stdout_line(
             }
             if let Some(steer) = steer {
                 if let Some(error) = codex_request_error(&value) {
-                    finish_codex_steer_request(pool, agent_id, steer, false, Some(error)).await?;
+                    finish_codex_steer_request(pool, agent_id, steer, false, false, Some(error))
+                        .await?;
                 } else {
-                    finish_codex_steer_request(pool, agent_id, steer, true, None).await?;
+                    finish_codex_steer_request(pool, agent_id, steer, true, false, None).await?;
                 }
                 return Ok(());
             }
