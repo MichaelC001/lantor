@@ -20,9 +20,14 @@ pub(super) async fn process_due_reminders(pool: &SqlitePool) -> CommandResult<()
         update reminders
         set status = case when recurrence = 'none' then 'fired' else 'scheduled' end,
             fired_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+            -- Anchor the next occurrence to the original due time instead of
+            -- the processing time, so late processing (sleep, app closed)
+            -- does not permanently drift the schedule. Skips missed periods.
             due_at = case
-                when recurrence = 'daily' then strftime('%Y-%m-%dT%H:%M:%f+00:00','now','+1 day')
-                when recurrence = 'weekly' then strftime('%Y-%m-%dT%H:%M:%f+00:00','now','+7 days')
+                when recurrence = 'daily' then strftime('%Y-%m-%dT%H:%M:%f+00:00', due_at,
+                    '+' || (cast(julianday('now') - julianday(due_at) as integer) + 1) || ' days')
+                when recurrence = 'weekly' then strftime('%Y-%m-%dT%H:%M:%f+00:00', due_at,
+                    '+' || ((cast((julianday('now') - julianday(due_at)) / 7 as integer) + 1) * 7) || ' days')
                 else due_at
             end,
             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
@@ -482,6 +487,54 @@ mod tests {
             .await
             .map_err(|err| err.to_string())?;
             assert_eq!(system_messages, 1);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn recurring_reminder_next_due_stays_anchored_to_original_time() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let channel_id = insert_test_channel(&pool, "reminder-anchor").await?;
+            // Due 3 days ago at a fixed wall-clock time: late processing must
+            // keep the original time-of-day and land strictly in the future.
+            let reminder_id: Uuid = sqlx::query_scalar(
+                r#"
+                insert into reminders (channel_id, title, note, due_at, recurrence, status)
+                values ($1, 'Daily memory pass', '', strftime('%Y-%m-%dT03:00:00.000+00:00','now','-3 days'), 'daily', 'scheduled')
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            process_due_reminders(&pool).await?;
+
+            let (status, due_at): (String, String) = sqlx::query_as(
+                "select status, due_at from reminders where id = $1",
+            )
+            .bind(reminder_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(status, "scheduled");
+            assert!(
+                due_at.contains("T03:00:00"),
+                "next due should keep original time-of-day, got {due_at}"
+            );
+            let now: String =
+                sqlx::query_scalar("select strftime('%Y-%m-%dT%H:%M:%f+00:00','now')")
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert!(due_at > now, "next due {due_at} should be after now {now}");
             Ok(())
         }
         .await;
