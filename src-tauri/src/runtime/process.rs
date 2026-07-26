@@ -763,6 +763,8 @@ pub(crate) fn configure_agent_identity_env(command: &mut Command, agent_id: Uuid
     command.env("LANTOR_AGENT_HANDLE", handle);
 }
 
+const PROCESS_KILL_ESCALATION_DELAY_SECS: u64 = 10;
+
 pub(crate) async fn terminate_process_group(pid: i32) -> CommandResult<()> {
     let status = Command::new("kill")
         .arg("-TERM")
@@ -774,6 +776,29 @@ pub(crate) async fn terminate_process_group(pid: i32) -> CommandResult<()> {
     if !status.success() {
         return Err(format!("failed to terminate process group {pid}: {status}"));
     }
+
+    // A process that ignores SIGTERM would otherwise never stop; escalate to
+    // SIGKILL if the group is still alive after a grace period.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            PROCESS_KILL_ESCALATION_DELAY_SECS,
+        ))
+        .await;
+        let alive = Command::new("kill")
+            .arg("-0")
+            .arg(format!("-{pid}"))
+            .status()
+            .await
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if alive {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(format!("-{pid}"))
+                .status()
+                .await;
+        }
+    });
 
     Ok(())
 }
