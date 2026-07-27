@@ -203,6 +203,8 @@ export type GithubPullRequest = {
   is_draft: boolean;
   state: string;
   updated_at: string;
+  head_sha: string;
+  checks: GithubCheckSummary;
   is_review_requested: boolean;
   is_authored: boolean;
   linked_thread_root_id: string | null;
@@ -211,6 +213,17 @@ export type GithubPullRequest = {
   linked_task_status: string | null;
   linked_assignee_id: string | null;
   linked_assignee_name: string | null;
+  review_anchor_sha: string | null;
+  review_is_stale: boolean;
+  review_commits_ahead: number | null;
+};
+
+export type GithubCheckSummary = {
+  status: "none" | "success" | "pending" | "failure" | string;
+  total: number;
+  pending: number;
+  failed: number;
+  failing_checks: string[];
 };
 
 export type GithubLabel = {
@@ -266,6 +279,15 @@ export type GithubReviewTaskResult = {
   task_number: number;
   head_sha: string;
   created: boolean;
+};
+
+export type GithubRereviewTaskResult = {
+  thread_root_id: string;
+  task_id: string;
+  task_number: number;
+  previous_head_sha: string;
+  head_sha: string;
+  commits_ahead: number | null;
 };
 
 export type GithubIssueTaskResult = {

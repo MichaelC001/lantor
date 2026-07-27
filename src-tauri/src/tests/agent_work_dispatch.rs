@@ -1,4 +1,6 @@
-use super::{dispatch_agent_restart_backlog, try_claim_unassigned_task};
+use super::{
+    dispatch_agent_restart_backlog, dispatch_task_followup_to_agent, try_claim_unassigned_task,
+};
 use crate::agent_inbox_wake::{create_agent_inbox_item, AgentInboxItemInput};
 use crate::events::control::{handle_agent_event, AgentEvent};
 use crate::message_store::send_owner_message_in_pool;
@@ -7,6 +9,98 @@ use crate::ui_notifications::reconcile_work_item_change;
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
+
+#[tokio::test]
+async fn task_followup_dispatch_uses_the_followup_as_fresh_context() {
+    let Some((pool, schema)) = test_pool().await else {
+        return;
+    };
+    let result: Result<(), String> = async {
+        let agent_id = insert_test_agent(&pool, "followup-agent").await?;
+        let channel_id = insert_test_channel(&pool, "task-followup").await?;
+        let thread_root_id: Uuid = sqlx::query_scalar(
+            r#"
+            insert into messages (channel_id, sender_name, sender_role, body, is_task)
+            values ($1, 'Dylan', 'owner', 'Review the original head', true)
+            returning id
+            "#,
+        )
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        let task_id: Uuid = sqlx::query_scalar(
+            r#"
+            insert into tasks (
+                message_id, channel_id, title, status, assignee_agent_id
+            )
+            values ($1, $2, 'Review the original head', 'in_progress', $3)
+            returning id
+            "#,
+        )
+        .bind(thread_root_id)
+        .bind(channel_id)
+        .bind(agent_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        let followup_id: Uuid = sqlx::query_scalar(
+            r#"
+            insert into messages (
+                channel_id, thread_root_id, sender_name, sender_role, body
+            )
+            values ($1, $2, 'Dylan', 'owner', 'Re-review only the new commit')
+            returning id
+            "#,
+        )
+        .bind(channel_id)
+        .bind(thread_root_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+
+        dispatch_task_followup_to_agent(
+            &pool,
+            task_id,
+            agent_id,
+            followup_id,
+            "Re-review the new head",
+            "Re-review only the new commit",
+            "test_followup",
+        )
+        .await?;
+
+        let inbox = sqlx::query(
+            r#"
+            select source_message_id, thread_root_id, task_id, title, body_preview
+            from agent_inbox_items
+            where agent_id = $1 and kind = 'task_assigned'
+            "#,
+        )
+        .bind(agent_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        assert_eq!(
+            inbox.get::<Option<Uuid>, _>("source_message_id"),
+            Some(followup_id)
+        );
+        assert_eq!(
+            inbox.get::<Option<Uuid>, _>("thread_root_id"),
+            Some(thread_root_id)
+        );
+        assert_eq!(inbox.get::<Option<Uuid>, _>("task_id"), Some(task_id));
+        assert_eq!(inbox.get::<String, _>("title"), "Re-review the new head");
+        assert_eq!(
+            inbox.get::<String, _>("body_preview"),
+            "Re-review only the new commit"
+        );
+        Ok(())
+    }
+    .await;
+    drop_test_schema(pool, schema).await;
+    assert!(result.is_ok(), "{:?}", result.err());
+}
 
 #[tokio::test]
 async fn owner_task_without_mentions_auto_assigns_single_channel_agent() {

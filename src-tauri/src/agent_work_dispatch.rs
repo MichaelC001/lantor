@@ -224,6 +224,24 @@ pub(crate) async fn dispatch_task_assignment_to_agent(
     let message_id: Uuid = row.get("message_id");
     let title: String = row.get("title");
     let body: String = row.get("body");
+    dispatch_task_context_to_agent(
+        pool, task_id, agent_id, channel_id, message_id, message_id, &title, &body, reason,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_task_context_to_agent(
+    pool: &SqlitePool,
+    task_id: Uuid,
+    agent_id: Uuid,
+    channel_id: Uuid,
+    thread_root_id: Uuid,
+    source_message_id: Uuid,
+    title: &str,
+    body: &str,
+    reason: &str,
+) -> CommandResult<()> {
     if !agent_accepts_new_work(pool, agent_id).await? {
         return Ok(());
     }
@@ -235,12 +253,12 @@ pub(crate) async fn dispatch_task_assignment_to_agent(
         AgentInboxItemInput {
             agent_id,
             channel_id: Some(channel_id),
-            thread_root_id: Some(message_id),
-            source_message_id: Some(message_id),
+            thread_root_id: Some(thread_root_id),
+            source_message_id: Some(source_message_id),
             task_id: Some(task_id),
             kind: "task_assigned",
             priority: 95,
-            title: &title,
+            title,
             body_preview: body.trim(),
             payload: json!({"source_kind": "task", "reason": reason}),
         },
@@ -250,9 +268,9 @@ pub(crate) async fn dispatch_task_assignment_to_agent(
         pool,
         agent_id,
         channel_id,
-        message_id,
+        thread_root_id,
         "task",
-        Some(message_id),
+        Some(source_message_id),
     )
     .await?;
     let scheduled = ensure_agent_inbox_wake_work_item(pool, agent_id)
@@ -276,11 +294,51 @@ pub(crate) async fn dispatch_task_assignment_to_agent(
             "inbox_item_id": inbox_item_id,
             "task_id": task_id,
             "title": title,
+            "source_message_id": source_message_id,
         })
         .to_string(),
     )
     .await?;
     Ok(())
+}
+
+pub(crate) async fn dispatch_task_followup_to_agent(
+    pool: &SqlitePool,
+    task_id: Uuid,
+    agent_id: Uuid,
+    source_message_id: Uuid,
+    title: &str,
+    body: &str,
+    reason: &str,
+) -> CommandResult<()> {
+    let row = sqlx::query(
+        r#"
+        select t.channel_id, t.message_id
+        from tasks t
+        join messages source
+          on source.id = $2
+         and source.channel_id = t.channel_id
+         and source.thread_root_id = t.message_id
+        where t.id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(source_message_id)
+    .fetch_one(pool)
+    .await
+    .map_err(to_string)?;
+    dispatch_task_context_to_agent(
+        pool,
+        task_id,
+        agent_id,
+        row.get("channel_id"),
+        row.get("message_id"),
+        source_message_id,
+        title,
+        body,
+        reason,
+    )
+    .await
 }
 
 pub(crate) async fn dispatch_agent_restart_backlog(

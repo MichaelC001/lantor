@@ -66,7 +66,7 @@ use commands::{
     github::{
         bind_github_repository, create_github_issue_task, create_github_review_task,
         load_github_issue_detail, load_github_review_queue, refresh_github_issue_queue,
-        refresh_github_review_queue,
+        refresh_github_review_queue, rereview_github_pull_request,
     },
     inbox::{
         dismiss_inbox_items, mark_all_inbox_read, mark_channel_read, mark_inbox_items_read,
@@ -320,6 +320,7 @@ pub fn run() {
             load_older_channel_messages,
             refresh_github_review_queue,
             refresh_github_issue_queue,
+            rereview_github_pull_request,
             send_message,
             set_message_saved,
             set_channel_agent_membership,

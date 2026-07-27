@@ -5076,6 +5076,10 @@ mark {
   border-color: var(--status-success-border);
 }
 
+.github-pull-card.linked.stale {
+  border-color: var(--status-warning-border);
+}
+
 .github-pull-main {
   display: grid;
   min-width: 0;
@@ -5132,6 +5136,11 @@ mark {
   color: var(--status-success);
 }
 
+.github-pull-eyebrow mark.stale {
+  background: var(--status-warning-soft);
+  color: var(--status-warning);
+}
+
 .github-pull-title {
   display: inline-flex;
   width: fit-content;
@@ -5170,11 +5179,44 @@ mark {
   font-size: var(--type-size-meta);
 }
 
+.github-check-summary {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--type-size-meta);
+  line-height: 1.35;
+}
+
+.github-check-summary svg {
+  flex: 0 0 auto;
+}
+
+.github-check-summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.github-check-summary.success {
+  color: var(--status-success);
+}
+
+.github-check-summary.pending {
+  color: var(--status-warning);
+}
+
+.github-check-summary.failure {
+  color: var(--status-danger);
+}
+
 .github-pull-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 12px;
+  gap: 8px;
 }
 
 .github-primary-action {
@@ -5186,6 +5228,28 @@ mark {
 .github-primary-action:hover:not(:disabled) {
   border-color: var(--accent-soft-hover-border);
   background: var(--accent-soft);
+}
+
+.github-rereview-action {
+  border-color: var(--status-warning-border);
+  background: var(--status-warning-soft);
+  color: var(--status-warning);
+}
+
+.github-rereview-action:hover:not(:disabled) {
+  border-color: var(--status-warning);
+  background: var(--status-warning-soft);
+}
+
+.github-thread-action {
+  border-color: var(--line);
+  background: var(--bg-control-flat);
+  color: var(--ink);
+}
+
+.github-thread-action:hover:not(:disabled) {
+  border-color: var(--control-border);
+  background: var(--bg-control-hover);
 }
 
 .github-linked-task {
@@ -12379,7 +12443,9 @@ body.resizing-column * {
   }
 
   .github-pull-actions {
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    justify-content: stretch;
   }
 
   .github-linked-task {

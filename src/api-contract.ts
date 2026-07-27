@@ -8,6 +8,7 @@ import type {
   GithubIssueDetail,
   GithubIssueTaskResult,
   GithubRepositoryBinding,
+  GithubRereviewTaskResult,
   GithubReviewTaskResult,
   LaunchAgentStatus,
   Message,
@@ -139,6 +140,13 @@ export type ApiContract = {
       agentId: string;
     };
     result: GithubReviewTaskResult;
+  };
+  rereview_github_pull_request: {
+    args: {
+      channelId: string;
+      pullNumber: number;
+    };
+    result: GithubRereviewTaskResult;
   };
   create_github_issue_task: {
     args: {
@@ -291,6 +299,7 @@ const API_COMMAND_NAMES = {
   load_github_issue_detail: true,
   bind_github_repository: true,
   create_github_review_task: true,
+  rereview_github_pull_request: true,
   create_github_issue_task: true,
   create_agent: true,
   update_agent: true,

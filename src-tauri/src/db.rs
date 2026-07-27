@@ -233,6 +233,13 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             github_updated_at text not null,
             is_review_requested boolean not null default 1,
             is_authored boolean not null default 0,
+            head_sha text not null default '',
+            checks_status text not null default 'none',
+            checks_total integer not null default 0,
+            checks_pending integer not null default 0,
+            checks_failed integer not null default 0,
+            failing_checks_json text not null default '[]',
+            review_commits_ahead integer,
             cached_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
             primary key (channel_id, repository_id, review_login, pull_number)
         )
@@ -622,6 +629,55 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "github_review_request_cache",
         "is_authored",
         "boolean not null default 0",
+    )
+    .await?;
+    ensure_text_column(
+        pool,
+        "github_review_request_cache",
+        "head_sha",
+        "text not null default ''",
+    )
+    .await?;
+    ensure_text_column(
+        pool,
+        "github_review_request_cache",
+        "checks_status",
+        "text not null default 'none'",
+    )
+    .await?;
+    ensure_integer_column(
+        pool,
+        "github_review_request_cache",
+        "checks_total",
+        "integer not null default 0",
+    )
+    .await?;
+    ensure_integer_column(
+        pool,
+        "github_review_request_cache",
+        "checks_pending",
+        "integer not null default 0",
+    )
+    .await?;
+    ensure_integer_column(
+        pool,
+        "github_review_request_cache",
+        "checks_failed",
+        "integer not null default 0",
+    )
+    .await?;
+    ensure_text_column(
+        pool,
+        "github_review_request_cache",
+        "failing_checks_json",
+        "text not null default '[]'",
+    )
+    .await?;
+    ensure_integer_column(
+        pool,
+        "github_review_request_cache",
+        "review_commits_ahead",
+        "integer",
     )
     .await?;
     ensure_integer_column(pool, "messages", "seq", "integer not null default 0").await?;

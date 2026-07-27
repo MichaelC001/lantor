@@ -45,6 +45,7 @@ use crate::application::{
     github::{
         self as github_commands, BindGithubRepositoryRequest, CreateGithubIssueTaskRequest,
         CreateGithubReviewTaskRequest, GithubChannelRequest, GithubIssueRequest,
+        RereviewGithubPullRequestRequest,
     },
     inbox::{self as inbox_commands, InboxItemsRequest, MarkChannelReadRequest},
     messages::{
@@ -234,6 +235,10 @@ fn web_router(state: Arc<WebState>, dist_dir: PathBuf) -> Router {
         .route(
             "/api/create_github_review_task",
             post(api_create_github_review_task),
+        )
+        .route(
+            "/api/rereview_github_pull_request",
+            post(api_rereview_github_pull_request),
         )
         .route(
             "/api/create_github_issue_task",
@@ -500,6 +505,16 @@ async fn api_create_github_review_task(
     Json(request): Json<CreateGithubReviewTaskRequest>,
 ) -> Result<impl IntoResponse, Response> {
     github_commands::create_github_review_task(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_rereview_github_pull_request(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<RereviewGithubPullRequestRequest>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::rereview_github_pull_request(&state.pool, request)
         .await
         .map(Json)
         .map_err(api_error)

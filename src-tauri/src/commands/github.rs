@@ -6,10 +6,11 @@ use crate::{
     application::github::{
         self as application, BindGithubRepositoryRequest, CreateGithubIssueTaskRequest,
         CreateGithubReviewTaskRequest, GithubChannelRequest, GithubIssueRequest,
+        RereviewGithubPullRequestRequest,
     },
     github::{
         GithubChannelOverview, GithubIssueDetail, GithubIssueTaskResult, GithubRepositoryBinding,
-        GithubReviewTaskResult,
+        GithubRereviewTaskResult, GithubReviewTaskResult,
     },
 };
 
@@ -86,6 +87,22 @@ pub(crate) async fn create_github_review_task(
             channel_id,
             pull_number,
             agent_id,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn rereview_github_pull_request(
+    channel_id: Uuid,
+    pull_number: i64,
+    state: State<'_, AppState>,
+) -> CommandResult<GithubRereviewTaskResult> {
+    application::rereview_github_pull_request(
+        &state.pool,
+        RereviewGithubPullRequestRequest {
+            channel_id,
+            pull_number,
         },
     )
     .await

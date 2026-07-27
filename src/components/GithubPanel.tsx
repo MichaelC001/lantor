@@ -1,6 +1,9 @@
 import {
   Bot,
+  CircleCheck,
   CircleDot,
+  CircleX,
+  Clock3,
   ExternalLink,
   GitPullRequest,
   Github,
@@ -120,6 +123,40 @@ function issueRelation(issue: GithubIssue, login: string) {
   return { authored, assigned, involved: issue.is_related && !authored && !assigned };
 }
 
+function checkSummaryLabel(pullRequest: GithubPullRequest) {
+  const { checks } = pullRequest;
+  if (checks.status === "failure") {
+    const visibleChecks = checks.failing_checks.slice(0, 2);
+    const remaining = checks.failing_checks.length - visibleChecks.length;
+    return ["CI failed", visibleChecks.join(", "), remaining > 0 ? `+${remaining}` : ""]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  if (checks.status === "pending") {
+    return `${checks.pending} ${checks.pending === 1 ? "check" : "checks"} running`;
+  }
+  if (checks.status === "success") {
+    return `${checks.total} ${checks.total === 1 ? "check" : "checks"} passed`;
+  }
+  return "No checks reported";
+}
+
+function staleReviewLabel(pullRequest: GithubPullRequest) {
+  const commits = pullRequest.review_commits_ahead;
+  if (commits && commits > 0) {
+    return `${commits} new ${commits === 1 ? "commit" : "commits"}`;
+  }
+  return "New head";
+}
+
+function rereviewActionLabel(pullRequest: GithubPullRequest) {
+  const commits = pullRequest.review_commits_ahead;
+  if (commits && commits > 0) {
+    return `Re-review ${commits} ${commits === 1 ? "commit" : "commits"}`;
+  }
+  return "Re-review head";
+}
+
 export function GithubPanel({
   channel,
   agents,
@@ -144,6 +181,7 @@ export function GithubPanel({
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [rereviewingPullNumber, setRereviewingPullNumber] = useState<number | null>(null);
   const [pullRequestFilter, setPullRequestFilter] =
     useState<GithubPullRequestFilter>("review_requested");
   const [pullRequestSearch, setPullRequestSearch] = useState("");
@@ -260,6 +298,42 @@ export function GithubPanel({
       setReviewError(errorMessage(createError, "Failed to create the GitHub review task"));
     } finally {
       setReviewBusy(false);
+    }
+  }
+
+  async function rereviewPullRequest(pullRequest: GithubPullRequest) {
+    if (rereviewingPullNumber !== null || !pullRequest.review_is_stale) return;
+    setRereviewingPullNumber(pullRequest.number);
+    setError(null);
+    try {
+      const result = await apiInvoke("rereview_github_pull_request", {
+        channelId: channel.id,
+        pullNumber: pullRequest.number,
+      });
+      setOverview((current) => {
+        if (!current) return current;
+        const next = {
+          ...current,
+          review_requests: current.review_requests.map((item) =>
+            item.number === pullRequest.number
+              ? {
+                  ...item,
+                  review_anchor_sha: result.head_sha,
+                  review_is_stale: false,
+                  review_commits_ahead: null,
+                  linked_task_status: "in_progress",
+                }
+              : item
+          ),
+        };
+        cacheGithubOverview(channel.id, next);
+        return next;
+      });
+      onOpenThread(result.thread_root_id);
+    } catch (rereviewError) {
+      setError(errorMessage(rereviewError, "Failed to schedule the incremental review"));
+    } finally {
+      setRereviewingPullNumber(null);
     }
   }
 
@@ -557,9 +631,17 @@ export function GithubPanel({
                 <div className="github-pull-list">
                   {filteredPullRequests.map((pullRequest) => {
                     const linked = Boolean(pullRequest.linked_thread_root_id);
+                    const rereviewing = rereviewingPullNumber === pullRequest.number;
+                    const checkLabel = checkSummaryLabel(pullRequest);
                     return (
                       <article
-                        className={`github-pull-card ${linked ? "linked" : ""}`}
+                        className={[
+                          "github-pull-card",
+                          linked ? "linked" : "",
+                          pullRequest.review_is_stale ? "stale" : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
                         key={pullRequest.number}
                       >
                         <div className="github-pull-main">
@@ -589,6 +671,18 @@ export function GithubPanel({
                                   : ""}
                               </mark>
                             )}
+                            {pullRequest.review_is_stale && (
+                              <mark
+                                className="stale"
+                                title={
+                                  pullRequest.review_anchor_sha
+                                    ? `Reviewed ${pullRequest.review_anchor_sha.slice(0, 7)}; current head ${pullRequest.head_sha.slice(0, 7)}`
+                                    : undefined
+                                }
+                              >
+                                {staleReviewLabel(pullRequest)}
+                              </mark>
+                            )}
                           </div>
                           <button
                             type="button"
@@ -605,20 +699,64 @@ export function GithubPanel({
                               Updated {formatRelativeTime(pullRequest.updated_at)}
                             </span>
                           </p>
+                          <div
+                            className={`github-check-summary ${pullRequest.checks.status}`}
+                            title={
+                              pullRequest.checks.failing_checks.length > 0
+                                ? pullRequest.checks.failing_checks.join(", ")
+                                : checkLabel
+                            }
+                          >
+                            {pullRequest.checks.status === "failure" ? (
+                              <CircleX size={14} aria-hidden="true" />
+                            ) : pullRequest.checks.status === "pending" ? (
+                              <Clock3 size={14} aria-hidden="true" />
+                            ) : pullRequest.checks.status === "success" ? (
+                              <CircleCheck size={14} aria-hidden="true" />
+                            ) : (
+                              <CircleDot size={14} aria-hidden="true" />
+                            )}
+                            <span>{checkLabel}</span>
+                          </div>
                         </div>
                         <div className="github-pull-actions">
                           {linked ? (
-                            <button
-                              type="button"
-                              className="github-primary-action"
-                              onClick={() => {
-                                if (pullRequest.linked_thread_root_id) {
-                                  onOpenThread(pullRequest.linked_thread_root_id);
+                            <>
+                              {pullRequest.review_is_stale && (
+                                <button
+                                  type="button"
+                                  className="github-primary-action github-rereview-action"
+                                  disabled={rereviewingPullNumber !== null}
+                                  onClick={() => void rereviewPullRequest(pullRequest)}
+                                  aria-label={rereviewActionLabel(pullRequest)}
+                                  title={`${rereviewActionLabel(
+                                    pullRequest,
+                                  )} in the existing review thread`}
+                                >
+                                  {rereviewing ? (
+                                    <LoaderCircle className="spin" size={16} />
+                                  ) : (
+                                    <RefreshCw size={16} />
+                                  )}
+                                  {rereviewing ? "Scheduling…" : "Re-review"}
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className={
+                                  pullRequest.review_is_stale
+                                    ? "github-primary-action github-thread-action"
+                                    : "github-primary-action"
                                 }
-                              }}
-                            >
-                              Open thread
-                            </button>
+                                onClick={() => {
+                                  if (pullRequest.linked_thread_root_id) {
+                                    onOpenThread(pullRequest.linked_thread_root_id);
+                                  }
+                                }}
+                              >
+                                Open thread
+                              </button>
+                            </>
                           ) : (
                             <button
                               type="button"
