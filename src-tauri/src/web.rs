@@ -42,6 +42,10 @@ use crate::application::{
         self as channel_commands, ChannelIdRequest, CreateChannelRequest,
         SetChannelAgentMembershipRequest, UpdateChannelRequest,
     },
+    github::{
+        self as github_commands, BindGithubRepositoryRequest, CreateGithubReviewTaskRequest,
+        GithubChannelRequest,
+    },
     inbox::{self as inbox_commands, InboxItemsRequest, MarkChannelReadRequest},
     messages::{
         self as message_commands, LoadChannelMessagesRequest, LoadOlderChannelMessagesRequest,
@@ -207,6 +211,22 @@ fn web_router(state: Arc<WebState>, dist_dir: PathBuf) -> Router {
         .route("/api/create_channel", post(api_create_channel))
         .route("/api/update_channel", post(api_update_channel))
         .route("/api/delete_channel", post(api_delete_channel))
+        .route(
+            "/api/load_github_review_queue",
+            post(api_load_github_review_queue),
+        )
+        .route(
+            "/api/refresh_github_review_queue",
+            post(api_refresh_github_review_queue),
+        )
+        .route(
+            "/api/bind_github_repository",
+            post(api_bind_github_repository),
+        )
+        .route(
+            "/api/create_github_review_task",
+            post(api_create_github_review_task),
+        )
         .route("/api/create_agent", post(api_create_agent))
         .route("/api/update_agent", post(api_update_agent))
         .route("/api/delete_agent", post(api_delete_agent))
@@ -410,6 +430,46 @@ async fn api_delete_channel(
     channel_commands::delete_channel(&state.pool, request)
         .await
         .map(|_| Json(json!({ "ok": true })))
+        .map_err(api_error)
+}
+
+async fn api_load_github_review_queue(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<GithubChannelRequest>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::load_github_review_queue(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_refresh_github_review_queue(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<GithubChannelRequest>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::refresh_github_review_queue(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_bind_github_repository(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<BindGithubRepositoryRequest>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::bind_github_repository(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_create_github_review_task(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<CreateGithubReviewTaskRequest>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::create_github_review_task(&state.pool, request)
+        .await
+        .map(Json)
         .map_err(api_error)
 }
 

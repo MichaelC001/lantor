@@ -7,15 +7,19 @@ import { AgentAvatar } from "./AgentAvatar";
 type TaskAssigneePickerProps = {
   agents: Agent[];
   assignee: Agent | null;
+  allowUnassigned?: boolean;
+  ariaLabel?: string;
   disabled?: boolean;
   done?: boolean;
   onChange: (agentId: string) => void;
-  taskNumber: number;
+  taskNumber?: number;
 };
 
 export function TaskAssigneePicker({
   agents,
   assignee,
+  allowUnassigned = true,
+  ariaLabel,
   disabled = false,
   done = false,
   onChange,
@@ -30,7 +34,10 @@ export function TaskAssigneePicker({
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     }
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
     }
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);
@@ -53,6 +60,11 @@ export function TaskAssigneePicker({
     : assignee
       ? `@${assignee.handle}`
       : "No agent";
+  const triggerAriaLabel = ariaLabel
+    ?? (taskNumber === undefined ? "Assign agent" : `Assign task #${taskNumber}`);
+  const optionsAriaLabel = taskNumber === undefined || ariaLabel
+    ? `${triggerAriaLabel} options`
+    : `Agent options for task #${taskNumber}`;
   const stopPickerPointer = (event: ReactPointerEvent) => {
     event.stopPropagation();
   };
@@ -62,7 +74,7 @@ export function TaskAssigneePicker({
       <button
         type="button"
         className="task-assignee-trigger"
-        aria-label={`Assign task #${taskNumber}`}
+        aria-label={triggerAriaLabel}
         aria-expanded={open}
         disabled={disabled}
         onClick={() => setOpen((current) => !current)}
@@ -79,23 +91,25 @@ export function TaskAssigneePicker({
         <ChevronDown size={15} className="task-assignee-chevron" aria-hidden="true" />
       </button>
       {open && !disabled && (
-        <div className="task-assignee-menu" role="listbox" aria-label={`Agent options for task #${taskNumber}`}>
-          <button
-            type="button"
-            className="task-assignee-option"
-            role="option"
-            aria-selected={!assignee}
-            onClick={() => choose("")}
-          >
-            <span className="task-unassigned-avatar" aria-hidden="true" />
-            <span className="task-assignee-option-copy">
-              <strong>Unassigned</strong>
-              <span>No agent</span>
-            </span>
-            <span className="task-assignee-check" aria-hidden="true">
-              {!assignee && <Check size={14} />}
-            </span>
-          </button>
+        <div className="task-assignee-menu" role="listbox" aria-label={optionsAriaLabel}>
+          {allowUnassigned && (
+            <button
+              type="button"
+              className="task-assignee-option"
+              role="option"
+              aria-selected={!assignee}
+              onClick={() => choose("")}
+            >
+              <span className="task-unassigned-avatar" aria-hidden="true" />
+              <span className="task-assignee-option-copy">
+                <strong>Unassigned</strong>
+                <span>No agent</span>
+              </span>
+              <span className="task-assignee-check" aria-hidden="true">
+                {!assignee && <Check size={14} />}
+              </span>
+            </button>
+          )}
           {agents.map((agent) => (
             <button
               type="button"

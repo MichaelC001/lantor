@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ChevronRight,
   Flag,
+  Github,
   Hash,
   Bookmark,
   LayoutList,
@@ -28,12 +29,13 @@ import { isCompactFollowupMessage, messageHasVisibleContent, wasEdited } from ".
 import { DESKTOP_MESSAGE_PREVIEW_CHARS, DESKTOP_MESSAGE_PREVIEW_LINES } from "../message-preview";
 import { messageShareLink, messageToMarkdown } from "../message-share";
 import { appendMessageReferenceToken, messageReferenceToken, parseMessageReferences, removeMessageReferenceToken, withoutMessageReferenceTokens, type MessageReferenceKind, type ResolvedMessageReference } from "../message-references";
-import { Agent, AgentActivity, AgentRun, AgentWorkItem, Artifact, Channel, DraftAttachment, Message, OwnerProfile, TASK_STATUSES, Task, ThreadReplySummary } from "../types";
+import { Agent, AgentActivity, AgentRun, AgentWorkItem, Artifact, Channel, DraftAttachment, GithubReviewTaskResult, Message, OwnerProfile, TASK_STATUSES, Task, ThreadReplySummary } from "../types";
 import { agentForMessageSender, deletedAgentForMessageSender, formatClockTime, formatDateDivider, formatTime, isSameCalendarDay, ownerAsAvatarAgent, visibleAgentDescription, visibleChannelDescription } from "../ui-utils";
 import { ActivityProgressDock, activeProgressByAgent } from "./ActivityProgressDock";
 import { AgentAvatar, AgentAvatarWithProfile } from "./AgentAvatar";
 import { ComposerReferenceTextarea } from "./ComposerReferenceTextarea";
 import { DraftAttachmentsPreview } from "./DraftAttachmentsPreview";
+import { GithubPanel } from "./GithubPanel";
 import { MessageActionMenu } from "./MessageActionMenu";
 import { MessageAttachments } from "./MessageAttachments";
 import { MessageArtifacts } from "./MessageArtifacts";
@@ -54,7 +56,7 @@ type ConversationProps = {
   agentRuns: AgentRun[];
   agentWorkItems: AgentWorkItem[];
   channelAgents: Agent[];
-  activeTab: "chat" | "tasks";
+  activeTab: "chat" | "tasks" | "github";
   activeRoot: Message | null;
   rootMessages: Message[];
   messages: Message[];
@@ -65,7 +67,7 @@ type ConversationProps = {
   draft: string;
   draftAttachments: DraftAttachment[];
   taskTitleDrafts: Record<string, string>;
-  setActiveTab: (tab: "chat" | "tasks") => void;
+  setActiveTab: (tab: "chat" | "tasks" | "github") => void;
   setActiveThreadId: (threadId: string | null) => void;
   openMobileSidebar: () => void;
   canNavigateBack: boolean;
@@ -81,6 +83,7 @@ type ConversationProps = {
   claimTask: (task: Task, agentId: string) => void;
   updateTaskStatus: (task: Task, status: string) => void;
   openTask: (task: Task) => void;
+  createGithubReviewTask: (pullNumber: number, agentId: string) => Promise<GithubReviewTaskResult>;
   setDraft: (value: string) => void;
   addDraftAttachments: (files: FileList | File[]) => void;
   removeDraftAttachment: (id: string) => void;
@@ -257,6 +260,7 @@ export function Conversation({
   claimTask,
   updateTaskStatus,
   openTask,
+  createGithubReviewTask,
   setDraft,
   addDraftAttachments,
   removeDraftAttachment,
@@ -680,7 +684,7 @@ export function Conversation({
 
   useEffect(() => {
     if (!isDm) return;
-    if (activeTab === "tasks") setActiveTab("chat");
+    if (activeTab !== "chat") setActiveTab("chat");
   }, [activeTab, isDm, setActiveTab]);
 
   useEffect(() => {
@@ -998,9 +1002,14 @@ export function Conversation({
           <MessageSquare size={16} /> Chat
         </button>
         {!isDm && (
-          <button className={activeTab === "tasks" ? "active" : ""} onClick={() => setActiveTab("tasks")}>
-            <LayoutList size={16} /> Tasks
-          </button>
+          <>
+            <button className={activeTab === "tasks" ? "active" : ""} onClick={() => setActiveTab("tasks")}>
+              <LayoutList size={16} /> Tasks
+            </button>
+            <button className={activeTab === "github" ? "active" : ""} onClick={() => setActiveTab("github")}>
+              <Github size={16} /> GitHub
+            </button>
+          </>
         )}
       </div>
 
@@ -1362,7 +1371,7 @@ export function Conversation({
             />
           )}
         </div>
-      ) : (
+      ) : activeTab === "tasks" ? (
         <div className="task-board">
           <section className="task-board-summary" aria-label="Task summary">
             <div>
@@ -1422,7 +1431,17 @@ export function Conversation({
             </div>
           )}
         </div>
-      )}
+      ) : channel ? (
+        <GithubPanel
+          channel={channel}
+          agents={taskAssigneeOptions}
+          onCreateReviewTask={createGithubReviewTask}
+          onOpenThread={(threadRootId) => {
+            setActiveThreadId(threadRootId);
+            setActiveTab("chat");
+          }}
+        />
+      ) : null}
 
       {activeTab === "chat" && (
         <ConversationComposer

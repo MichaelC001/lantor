@@ -4,6 +4,9 @@ import type {
   Artifact,
   Bootstrap,
   ChannelMessagePage,
+  GithubChannelOverview,
+  GithubRepositoryBinding,
+  GithubReviewTaskResult,
   LaunchAgentStatus,
   Message,
   RuntimeCheck,
@@ -98,6 +101,31 @@ export type ApiContract = {
   delete_channel: {
     args: { channelId: string };
     result: MutationResult;
+  };
+  load_github_review_queue: {
+    args: { channelId: string };
+    result: GithubChannelOverview;
+  };
+  refresh_github_review_queue: {
+    args: { channelId: string };
+    result: GithubChannelOverview;
+  };
+  bind_github_repository: {
+    args: {
+      channelId: string;
+      repository: string;
+      localPath?: string | null;
+      reviewLogin?: string | null;
+    };
+    result: GithubRepositoryBinding;
+  };
+  create_github_review_task: {
+    args: {
+      channelId: string;
+      pullNumber: number;
+      agentId: string;
+    };
+    result: GithubReviewTaskResult;
   };
   create_agent: {
     args: AgentDraftRequest & {
@@ -236,6 +264,10 @@ const API_COMMAND_NAMES = {
   create_channel: true,
   update_channel: true,
   delete_channel: true,
+  load_github_review_queue: true,
+  refresh_github_review_queue: true,
+  bind_github_repository: true,
+  create_github_review_task: true,
   create_agent: true,
   update_agent: true,
   delete_agent: true,

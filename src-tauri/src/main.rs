@@ -20,6 +20,7 @@ mod db;
 mod domain;
 mod events;
 mod freshness;
+mod github;
 mod launch_agent;
 mod lifecycle_commands;
 mod message_store;
@@ -61,6 +62,10 @@ use commands::{
     channels::{
         create_channel, delete_channel, open_dm_with_agent, set_channel_agent_membership,
         update_channel,
+    },
+    github::{
+        bind_github_repository, create_github_review_task, load_github_review_queue,
+        refresh_github_review_queue,
     },
     inbox::{
         dismiss_inbox_items, mark_all_inbox_read, mark_channel_read, mark_inbox_items_read,
@@ -278,6 +283,7 @@ pub fn run() {
             agent_workspace_list,
             agent_workspace_read_file,
             bootstrap,
+            bind_github_repository,
             artifact_read,
             cancel_agent_work,
             cancel_reminder,
@@ -286,6 +292,7 @@ pub fn run() {
             create_agent,
             create_agent_schedule,
             create_channel,
+            create_github_review_task,
             create_reminder,
             claim_task,
             delete_agent,
@@ -306,7 +313,9 @@ pub fn run() {
             load_channel_messages,
             load_channel_previews,
             load_message,
+            load_github_review_queue,
             load_older_channel_messages,
+            refresh_github_review_queue,
             send_message,
             set_message_saved,
             set_channel_agent_membership,

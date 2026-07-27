@@ -205,6 +205,36 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         )
         "#,
         r#"
+        create table if not exists channel_github_repositories (
+            channel_id blob primary key not null references channels(id) on delete cascade,
+            repository_id text not null,
+            name_with_owner text not null,
+            url text not null,
+            local_path text not null default '',
+            account_login text not null,
+            review_login text not null,
+            review_queue_synced_at text,
+            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
+            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
+        )
+        "#,
+        r#"
+        create table if not exists github_review_request_cache (
+            channel_id blob not null references channels(id) on delete cascade,
+            repository_id text not null,
+            review_login text not null,
+            pull_number integer not null,
+            title text not null,
+            url text not null,
+            author_login text not null,
+            is_draft boolean not null,
+            state text not null,
+            github_updated_at text not null,
+            cached_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
+            primary key (channel_id, repository_id, review_login, pull_number)
+        )
+        "#,
+        r#"
         create table if not exists messages (
             id blob primary key not null default (randomblob(16)),
             channel_id blob not null references channels(id) on delete cascade,
@@ -280,6 +310,22 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             version integer not null default 0,
             created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
             updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
+        )
+        "#,
+        r#"
+        create table if not exists github_resource_threads (
+            id blob primary key not null default (randomblob(16)),
+            channel_id blob not null references channels(id) on delete cascade,
+            repository_id text not null,
+            resource_kind text not null,
+            resource_number integer not null,
+            resource_url text not null,
+            thread_root_id blob not null references messages(id) on delete cascade,
+            task_id blob references tasks(id) on delete set null,
+            head_sha text not null default '',
+            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
+            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
+            unique(channel_id, repository_id, resource_kind, resource_number)
         )
         "#,
         r#"
@@ -527,6 +573,13 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "text not null default ''",
     )
     .await?;
+    ensure_text_column(
+        pool,
+        "channel_github_repositories",
+        "review_queue_synced_at",
+        "text",
+    )
+    .await?;
     ensure_integer_column(pool, "messages", "seq", "integer not null default 0").await?;
     ensure_integer_column(
         pool,
@@ -585,6 +638,8 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "create index if not exists saved_messages_created_at_idx on saved_messages(created_at desc)",
         "create index if not exists artifacts_message_id_idx on artifacts(message_id)",
         "create index if not exists artifacts_channel_id_idx on artifacts(channel_id)",
+        "create index if not exists github_resource_threads_thread_idx on github_resource_threads(thread_root_id)",
+        "create index if not exists github_resource_threads_task_idx on github_resource_threads(task_id) where task_id is not null",
         "create index if not exists agent_activities_agent_created_idx on agent_activities(agent_id, agent_handle, created_at desc)",
         r#"
         create index if not exists agent_activities_owner_instant_idx on agent_activities(

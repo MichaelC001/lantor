@@ -167,6 +167,18 @@ fn attachment_root_dir() -> CommandResult<PathBuf> {
         .join("attachments"))
 }
 
+fn attachment_garbage_collection_is_safe(
+    has_database_override: bool,
+    has_attachment_override: bool,
+) -> bool {
+    !has_database_override || has_attachment_override
+}
+
+fn has_database_override() -> bool {
+    env::var_os("LANTOR_DATABASE_URL").is_some()
+        || env::var("DATABASE_URL").is_ok_and(|url| url.trim_start().starts_with("sqlite:"))
+}
+
 fn is_uuid_component(value: Option<&std::ffi::OsStr>) -> bool {
     value
         .and_then(|value| value.to_str())
@@ -364,6 +376,15 @@ async fn garbage_collect_orphan_attachments(
 }
 
 pub(crate) fn spawn_attachment_garbage_collector(pool: SqlitePool) {
+    if !attachment_garbage_collection_is_safe(
+        has_database_override(),
+        env::var_os("LANTOR_ATTACHMENT_DIR").is_some(),
+    ) {
+        eprintln!(
+            "Lantor attachment garbage collector skipped: a custom database requires an explicit LANTOR_ATTACHMENT_DIR"
+        );
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         match garbage_collect_orphan_attachments(&pool).await {
             Ok(report) => {
@@ -470,7 +491,10 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{sweep_orphan_attachment_files, PendingAttachmentWrites};
+    use super::{
+        attachment_garbage_collection_is_safe, sweep_orphan_attachment_files,
+        PendingAttachmentWrites,
+    };
 
     fn attachment_test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("lantor-{label}-{}", Uuid::new_v4()))
@@ -539,5 +563,13 @@ mod tests {
         assert_eq!(report.removed_files, 0);
         assert!(recent.exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn orphan_sweep_requires_an_attachment_override_for_custom_databases() {
+        assert!(attachment_garbage_collection_is_safe(false, false));
+        assert!(attachment_garbage_collection_is_safe(false, true));
+        assert!(attachment_garbage_collection_is_safe(true, true));
+        assert!(!attachment_garbage_collection_is_safe(true, false));
     }
 }

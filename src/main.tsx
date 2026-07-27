@@ -259,7 +259,7 @@ type ConfirmRequest = {
   onConfirm: () => Promise<void> | void;
 };
 
-type ActiveTab = "chat" | "tasks";
+type ActiveTab = "chat" | "tasks" | "github";
 type MobileModal = "search" | "activity" | "saved";
 
 type AppHistoryState = {
@@ -268,7 +268,7 @@ type AppHistoryState = {
   index: number;
   activeChannelId: string | null;
   activeThreadId: string | null;
-  activeTab: "chat" | "tasks";
+  activeTab: ActiveTab;
   showThread: boolean;
   showMobileSidebar: boolean;
   selectedAgentId: string | null;
@@ -320,7 +320,12 @@ function isAppHistoryState(value: unknown): value is AppHistoryState {
     && typeof state.index === "number"
     && (state.activeChannelId === undefined || state.activeChannelId === null || typeof state.activeChannelId === "string")
     && (state.activeThreadId === undefined || state.activeThreadId === null || typeof state.activeThreadId === "string")
-    && (state.activeTab === undefined || state.activeTab === "chat" || state.activeTab === "tasks")
+    && (
+      state.activeTab === undefined
+      || state.activeTab === "chat"
+      || state.activeTab === "tasks"
+      || state.activeTab === "github"
+    )
     && typeof state.showThread === "boolean"
     && typeof state.showMobileSidebar === "boolean"
     && (state.selectedAgentId === null || typeof state.selectedAgentId === "string")
@@ -2661,6 +2666,8 @@ function App() {
           actor: task.status.replace("_", " "),
           timestamp: task.updated_at,
           unread: task.status === "in_review",
+          actorAgentId: task.assignee_id,
+          actorRole: task.assignee_id ? "agent" : null,
           channelId: task.channel_id,
           threadId: task.message_id,
           messageId: task.message_id,
@@ -3997,6 +4004,20 @@ function App() {
     });
   }
 
+  async function createGithubReviewTask(pullNumber: number, agentId: string) {
+    if (!channel) throw new Error("No active channel");
+    const result = await mutate("create_github_review_task", {
+      channelId: channel.id,
+      pullNumber,
+      agentId,
+    });
+    setActiveChannelId(channel.id);
+    revealThread(result.thread_root_id, channel.id);
+    setActiveTab("chat");
+    setFocusedMessageId(result.thread_root_id);
+    return result;
+  }
+
   function openWorkItem(item: AgentWorkItem, focusedMessageIdOverride?: string | null) {
     if (item.channel_id) setActiveChannelId(item.channel_id);
     if (item.thread_root_id) {
@@ -4550,6 +4571,7 @@ function App() {
         claimTask={claimTask}
         updateTaskStatus={updateTaskStatus}
         openTask={openTask}
+        createGithubReviewTask={createGithubReviewTask}
         setDraft={setDraft}
         addDraftAttachments={(files) => appendDraftAttachments(files, "root")}
         removeDraftAttachment={(id) => updateRootComposerDraft(activeChannelId, (current) => ({

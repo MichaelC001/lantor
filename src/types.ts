@@ -176,6 +176,54 @@ export type Task = {
   updated_at: string;
 };
 
+export type GithubAccount = {
+  login: string;
+  host: string;
+};
+
+export type GithubRepositoryBinding = {
+  channel_id: string;
+  repository_id: string;
+  name_with_owner: string;
+  url: string;
+  local_path: string;
+  account_login: string;
+  review_login: string;
+  review_queue_synced_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GithubPullRequest = {
+  number: number;
+  title: string;
+  url: string;
+  author_login: string;
+  is_draft: boolean;
+  state: string;
+  updated_at: string;
+  linked_thread_root_id: string | null;
+  linked_task_id: string | null;
+  linked_task_number: number | null;
+  linked_task_status: string | null;
+  linked_assignee_id: string | null;
+  linked_assignee_name: string | null;
+};
+
+export type GithubChannelOverview = {
+  account: GithubAccount;
+  binding: GithubRepositoryBinding | null;
+  review_requests: GithubPullRequest[];
+};
+
+export type GithubReviewTaskResult = {
+  thread_root_id: string;
+  task_id: string;
+  task_number: number;
+  head_sha: string;
+  created: boolean;
+};
+
 export type Reminder = {
   id: string;
   channel_id: string | null;
