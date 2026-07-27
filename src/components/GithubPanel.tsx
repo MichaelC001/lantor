@@ -13,6 +13,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { apiInvoke, openExternalUrl } from "../apiClient";
+import { formatRelativeTime } from "../ui-utils";
 import type {
   Agent,
   Channel,
@@ -436,10 +437,13 @@ export function GithubPanel({
                 Personal queues for <b>@{binding.review_login}</b>
                 {binding.local_path ? ` · ${binding.local_path}` : ""}
               </span>
-              <span className="github-sync-status">
+              <span
+                className="github-sync-status"
+                title={syncedAt ? formattedUpdate(syncedAt) : undefined}
+              >
                 {refreshing && <LoaderCircle className="spin" size={12} />}
                 {syncedAt
-                  ? `${refreshing ? "Refreshing · " : ""}Last synced ${formattedUpdate(
+                  ? `${refreshing ? "Refreshing · " : ""}Last synced ${formatRelativeTime(
                       syncedAt,
                     )}`
                   : refreshing
@@ -474,7 +478,7 @@ export function GithubPanel({
             >
               <GitPullRequest size={16} />
               Pull requests
-              <mark>{overview.review_requests.length}</mark>
+              <mark>{pullRequestCounts.review_requested}</mark>
             </button>
             <button
               type="button"
@@ -491,19 +495,11 @@ export function GithubPanel({
 
           {activeResource === "pulls" ? (
             <section className="github-queue" aria-label="GitHub pull requests">
-              <div className="github-queue-heading">
-                <div>
-                  <span>Pull requests</span>
-                  <strong>Personal work queue</strong>
-                </div>
-                <mark>{filteredPullRequests.length}</mark>
-              </div>
-
               <div className="github-issue-controls">
                 <div className="github-issue-filters" role="group" aria-label="Filter pull requests">
                   {([
                     ["review_requested", "Review requested"],
-                    ["authored", "Created by me"],
+                    ["authored", "Authored"],
                     ["linked", "Linked"],
                     ["all", "All personal"],
                   ] as Array<[GithubPullRequestFilter, string]>).map(([filter, label]) => (
@@ -568,54 +564,61 @@ export function GithubPanel({
                       >
                         <div className="github-pull-main">
                           <div className="github-pull-eyebrow">
+                            <GitPullRequest
+                              size={13}
+                              className={pullRequest.is_draft ? "state-draft" : "state-open"}
+                              aria-hidden="true"
+                            />
                             <span>PR #{pullRequest.number}</span>
-                            {pullRequest.is_review_requested && (
-                              <mark className="review-requested">Review requested</mark>
-                            )}
-                            {pullRequest.is_authored && (
-                              <mark className="authored">Created by me</mark>
+                            {pullRequest.is_review_requested &&
+                              pullRequestFilter !== "review_requested" && (
+                                <mark className="attention">Review requested</mark>
+                              )}
+                            {pullRequest.is_authored && pullRequestFilter !== "authored" && (
+                              <mark>Authored</mark>
                             )}
                             {pullRequest.is_draft && <mark className="draft">Draft</mark>}
-                            {linked && <mark className="linked">Linked</mark>}
+                            {linked && (
+                              <mark
+                                className="linked"
+                                title={pullRequest.linked_assignee_name ?? undefined}
+                              >
+                                Task #{pullRequest.linked_task_number}
+                                {pullRequest.linked_task_status
+                                  ? ` · ${statusLabel(pullRequest.linked_task_status)}`
+                                  : ""}
+                              </mark>
+                            )}
                           </div>
                           <button
                             type="button"
                             className="github-pull-title"
                             onClick={() => void openGithubUrl(pullRequest.url)}
                           >
-                            {pullRequest.title}
+                            <span className="github-card-title-text">{pullRequest.title}</span>
                             <ExternalLink size={14} />
                           </button>
                           <p>
                             @{pullRequest.author_login}
                             <span aria-hidden="true"> · </span>
-                            Updated {formattedUpdate(pullRequest.updated_at)}
+                            <span title={formattedUpdate(pullRequest.updated_at)}>
+                              Updated {formatRelativeTime(pullRequest.updated_at)}
+                            </span>
                           </p>
                         </div>
                         <div className="github-pull-actions">
                           {linked ? (
-                            <>
-                              <div className="github-linked-task">
-                                <strong>Task #{pullRequest.linked_task_number}</strong>
-                                <span>
-                                  {statusLabel(pullRequest.linked_task_status)}
-                                  {pullRequest.linked_assignee_name
-                                    ? ` · ${pullRequest.linked_assignee_name}`
-                                    : ""}
-                                </span>
-                              </div>
-                              <button
-                                type="button"
-                                className="github-primary-action"
-                                onClick={() => {
-                                  if (pullRequest.linked_thread_root_id) {
-                                    onOpenThread(pullRequest.linked_thread_root_id);
-                                  }
-                                }}
-                              >
-                                Open thread
-                              </button>
-                            </>
+                            <button
+                              type="button"
+                              className="github-primary-action"
+                              onClick={() => {
+                                if (pullRequest.linked_thread_root_id) {
+                                  onOpenThread(pullRequest.linked_thread_root_id);
+                                }
+                              }}
+                            >
+                              Open thread
+                            </button>
                           ) : (
                             <button
                               type="button"
@@ -641,14 +644,6 @@ export function GithubPanel({
             </section>
           ) : (
             <section className="github-queue github-issue-queue" aria-label="GitHub issues">
-              <div className="github-queue-heading">
-                <div>
-                  <span>Issues</span>
-                  <strong>Personal work queue</strong>
-                </div>
-                <mark>{filteredIssues.length}</mark>
-              </div>
-
               <div className="github-issue-controls">
                 <div className="github-issue-filters" role="group" aria-label="Filter issues">
                   {([
@@ -712,11 +707,26 @@ export function GithubPanel({
                       >
                         <div className="github-issue-main">
                           <div className="github-issue-eyebrow">
+                            <CircleDot size={13} className="state-open" aria-hidden="true" />
                             <span>Issue #{issue.number}</span>
-                            {relation.assigned && <mark>Assigned</mark>}
-                            {relation.authored && <mark>Authored</mark>}
+                            {relation.assigned && issueFilter !== "assigned" && (
+                              <mark className="attention">Assigned</mark>
+                            )}
+                            {relation.authored && issueFilter !== "authored" && (
+                              <mark>Authored</mark>
+                            )}
                             {relation.involved && <mark>Involved</mark>}
-                            {linked && <mark className="linked">Linked</mark>}
+                            {linked && (
+                              <mark
+                                className="linked"
+                                title={issue.linked_assignee_name ?? undefined}
+                              >
+                                Task #{issue.linked_task_number}
+                                {issue.linked_task_status
+                                  ? ` · ${statusLabel(issue.linked_task_status)}`
+                                  : ""}
+                              </mark>
+                            )}
                           </div>
                           <div className="github-issue-title-row">
                             <button
@@ -724,7 +734,7 @@ export function GithubPanel({
                               className="github-issue-title"
                               onClick={() => openIssue(issue)}
                             >
-                              {issue.title}
+                              <span className="github-card-title-text">{issue.title}</span>
                             </button>
                             <button
                               type="button"
@@ -754,33 +764,24 @@ export function GithubPanel({
                             <MessageCircle size={13} />
                             {issue.comments_count}
                             <span aria-hidden="true"> · </span>
-                            Updated {formattedUpdate(issue.updated_at)}
+                            <span title={formattedUpdate(issue.updated_at)}>
+                              Updated {formatRelativeTime(issue.updated_at)}
+                            </span>
                           </p>
                         </div>
                         <div className="github-pull-actions">
                           {linked ? (
-                            <>
-                              <div className="github-linked-task">
-                                <strong>Task #{issue.linked_task_number}</strong>
-                                <span>
-                                  {statusLabel(issue.linked_task_status)}
-                                  {issue.linked_assignee_name
-                                    ? ` · ${issue.linked_assignee_name}`
-                                    : ""}
-                                </span>
-                              </div>
-                              <button
-                                type="button"
-                                className="github-primary-action"
-                                onClick={() => {
-                                  if (issue.linked_thread_root_id) {
-                                    onOpenThread(issue.linked_thread_root_id);
-                                  }
-                                }}
-                              >
-                                Open thread
-                              </button>
-                            </>
+                            <button
+                              type="button"
+                              className="github-primary-action"
+                              onClick={() => {
+                                if (issue.linked_thread_root_id) {
+                                  onOpenThread(issue.linked_thread_root_id);
+                                }
+                              }}
+                            >
+                              Open thread
+                            </button>
                           ) : (
                             <button
                               type="button"

@@ -5056,45 +5056,6 @@ mark {
   min-width: 0;
 }
 
-.github-queue-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 4px 2px;
-}
-
-.github-queue-heading > div {
-  display: grid;
-  gap: 2px;
-}
-
-.github-queue-heading span {
-  color: var(--muted);
-  font-size: var(--type-size-caption);
-  font-weight: var(--type-weight-semibold);
-  text-transform: uppercase;
-}
-
-.github-queue-heading strong {
-  color: var(--ink);
-  font-size: var(--type-size-message);
-}
-
-.github-queue-heading mark {
-  display: inline-flex;
-  min-width: 28px;
-  height: 28px;
-  align-items: center;
-  justify-content: center;
-  padding: 0 9px;
-  border-radius: 999px;
-  background: var(--task-count-bg);
-  color: var(--ink);
-  font-size: var(--type-size-meta);
-  font-weight: var(--type-weight-semibold);
-}
-
 .github-pull-list {
   display: grid;
   gap: 10px;
@@ -5121,24 +5082,43 @@ mark {
   gap: 6px;
 }
 
-.github-pull-eyebrow {
+.github-pull-eyebrow,
+.github-issue-eyebrow {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 7px;
   color: var(--accent);
-  font-size: var(--type-size-meta);
+  font-size: var(--type-size-caption);
   font-weight: var(--type-weight-semibold);
   text-transform: uppercase;
 }
 
-.github-pull-eyebrow mark {
-  padding: 3px 7px;
+.github-pull-eyebrow > svg.state-open,
+.github-issue-eyebrow > svg.state-open {
+  flex: 0 0 auto;
+  color: var(--status-success);
+}
+
+.github-pull-eyebrow > svg.state-draft {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.github-pull-eyebrow mark,
+.github-issue-eyebrow mark {
+  padding: 2px 7px;
   border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--task-count-bg);
+  color: var(--muted);
   font-size: var(--type-size-caption);
   font-weight: var(--type-weight-semibold);
+}
+
+.github-pull-eyebrow mark.attention,
+.github-issue-eyebrow mark.attention {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .github-pull-eyebrow mark.draft {
@@ -5146,7 +5126,8 @@ mark {
   color: var(--status-warning);
 }
 
-.github-pull-eyebrow mark.linked {
+.github-pull-eyebrow mark.linked,
+.github-issue-eyebrow mark.linked {
   background: var(--status-success-soft);
   color: var(--status-success);
 }
@@ -5175,6 +5156,14 @@ mark {
   flex: 0 0 auto;
 }
 
+.github-card-title-text {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .github-pull-main p {
   margin: 0;
   color: var(--muted);
@@ -5189,14 +5178,14 @@ mark {
 }
 
 .github-primary-action {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--ink-on-accent);
+  border-color: var(--accent-soft-border);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .github-primary-action:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: var(--bg-selected-accent);
+  border-color: var(--accent-soft-hover-border);
+  background: var(--accent-soft);
 }
 
 .github-linked-task {
@@ -5417,7 +5406,7 @@ mark {
 
 .github-issue-list {
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .github-issue-card {
@@ -5425,7 +5414,7 @@ mark {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 16px;
   align-items: center;
-  padding: 13px 14px;
+  padding: 14px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--task-card-bg);
@@ -5441,30 +5430,6 @@ mark {
   gap: 6px;
 }
 
-.github-issue-eyebrow {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  color: var(--accent);
-  font-size: var(--type-size-caption);
-  font-weight: var(--type-weight-semibold);
-  text-transform: uppercase;
-}
-
-.github-issue-eyebrow mark {
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: var(--type-size-caption);
-}
-
-.github-issue-eyebrow mark.linked {
-  background: var(--status-success-soft);
-  color: var(--status-success);
-}
-
 .github-issue-title-row {
   display: flex;
   min-width: 0;
@@ -5473,6 +5438,7 @@ mark {
 }
 
 .github-issue-title {
+  display: inline-flex;
   min-width: 0;
   padding: 0;
   overflow: hidden;
@@ -5482,8 +5448,6 @@ mark {
   font-weight: var(--type-weight-bold);
   line-height: 1.3;
   text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .github-issue-title:hover {
@@ -5492,8 +5456,8 @@ mark {
 
 .github-issue-external {
   display: grid;
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
   place-items: center;
   border-radius: 8px;
@@ -12424,6 +12388,11 @@ body.resizing-column * {
 
   .github-primary-action {
     min-height: 44px;
+  }
+
+  .github-issue-external {
+    width: 44px;
+    height: 44px;
   }
 
   .github-issue-drawer {
