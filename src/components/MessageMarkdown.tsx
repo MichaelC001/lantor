@@ -36,6 +36,7 @@ type MessageMarkdownProps = {
   sourceMessageId?: string;
   onOpenReference?: (sourceMessageId: string, reference: ResolvedMessageReference) => void;
   scrollKey?: string;
+  enableLantorLinks?: boolean;
 };
 
 const INLINE_CODE_SPLIT = /(`[^`\n]*(?:`|$))/g;
@@ -220,8 +221,12 @@ function MessageMarkdownContent({
   sourceMessageId,
   onOpenReference,
   scrollKey,
+  enableLantorLinks = true,
 }: MessageMarkdownProps) {
-  const linkedBody = useMemo(() => messageReferenceMarkdown(linkifyMessageBody(body)), [body]);
+  const linkedBody = useMemo(
+    () => enableLantorLinks ? messageReferenceMarkdown(linkifyMessageBody(body)) : body,
+    [body, enableLantorLinks],
+  );
   const tableIndexRef = useRef(0);
   tableIndexRef.current = 0;
   const handleOpenReference = useCallback((reference: ResolvedMessageReference) => {

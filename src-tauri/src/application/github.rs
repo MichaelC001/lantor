@@ -7,10 +7,12 @@ use crate::{
     agent_work_dispatch::dispatch_task_assignment_to_agent,
     app::{to_string, CommandResult},
     github::{
-        bind_github_repository_in_pool, create_github_review_task_record, github_account,
-        load_cached_github_channel_overview, load_existing_github_review_task, load_github_binding,
-        load_github_pull_request, refresh_github_channel_overview, GithubChannelOverview,
-        GithubRepositoryBinding, GithubReviewTaskResult,
+        bind_github_repository_in_pool, create_github_issue_task_record,
+        create_github_review_task_record, github_account, load_cached_github_channel_overview,
+        load_existing_github_issue_task, load_existing_github_review_task, load_github_binding,
+        load_github_issue, load_github_issue_cli, load_github_pull_request,
+        refresh_github_channel_overview, refresh_github_issue_overview, GithubChannelOverview,
+        GithubIssueDetail, GithubIssueTaskResult, GithubRepositoryBinding, GithubReviewTaskResult,
     },
 };
 
@@ -39,6 +41,21 @@ pub(crate) struct CreateGithubReviewTaskRequest {
     pub(crate) agent_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GithubIssueRequest {
+    pub(crate) channel_id: Uuid,
+    pub(crate) issue_number: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateGithubIssueTaskRequest {
+    pub(crate) channel_id: Uuid,
+    pub(crate) issue_number: i64,
+    pub(crate) agent_id: Uuid,
+}
+
 pub(crate) async fn load_github_review_queue(
     pool: &SqlitePool,
     request: GithubChannelRequest,
@@ -51,6 +68,24 @@ pub(crate) async fn refresh_github_review_queue(
     request: GithubChannelRequest,
 ) -> CommandResult<GithubChannelOverview> {
     refresh_github_channel_overview(pool, request.channel_id).await
+}
+
+pub(crate) async fn refresh_github_issue_queue(
+    pool: &SqlitePool,
+    request: GithubChannelRequest,
+) -> CommandResult<GithubChannelOverview> {
+    refresh_github_issue_overview(pool, request.channel_id).await
+}
+
+pub(crate) async fn load_github_issue_detail(
+    pool: &SqlitePool,
+    request: GithubIssueRequest,
+) -> CommandResult<GithubIssueDetail> {
+    let binding = load_github_binding(pool, request.channel_id)
+        .await?
+        .ok_or_else(|| "channel has no GitHub repository binding".to_owned())?;
+    let _ = github_account().await?;
+    load_github_issue(&binding, request.issue_number).await
 }
 
 pub(crate) async fn bind_github_repository(
@@ -118,6 +153,64 @@ pub(crate) async fn create_github_review_task(
     if result.created {
         dispatch_task_assignment_to_agent(pool, result.task_id, request.agent_id, "github_review")
             .await?;
+    }
+    Ok(result)
+}
+
+pub(crate) async fn create_github_issue_task(
+    pool: &SqlitePool,
+    request: CreateGithubIssueTaskRequest,
+) -> CommandResult<GithubIssueTaskResult> {
+    let binding = load_github_binding(pool, request.channel_id)
+        .await?
+        .ok_or_else(|| "channel has no GitHub repository binding".to_owned())?;
+    if let Some(existing) = load_existing_github_issue_task(
+        pool,
+        request.channel_id,
+        &binding.repository_id,
+        request.issue_number,
+    )
+    .await?
+    {
+        return Ok(existing);
+    }
+
+    let agent_handle: Option<String> =
+        sqlx::query_scalar("select handle from agents where id = $1")
+            .bind(request.agent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(to_string)?;
+    let Some(agent_handle) = agent_handle else {
+        return Err("agent does not exist".to_owned());
+    };
+    if !agent_accepts_new_work(pool, request.agent_id).await? {
+        return Err(format!(
+            "agent @{agent_handle} is in error state and cannot accept new work"
+        ));
+    }
+
+    let _ = github_account().await?;
+    let issue = load_github_issue_cli(&binding, request.issue_number).await?;
+    if !issue.is_open() {
+        return Err("issue is no longer open".to_owned());
+    }
+    let result = create_github_issue_task_record(
+        pool,
+        request.channel_id,
+        request.agent_id,
+        &binding,
+        &issue,
+    )
+    .await?;
+    if result.created {
+        dispatch_task_assignment_to_agent(
+            pool,
+            result.task_id,
+            request.agent_id,
+            "github_issue_investigation",
+        )
+        .await?;
     }
     Ok(result)
 }

@@ -29,7 +29,7 @@ import { isCompactFollowupMessage, messageHasVisibleContent, wasEdited } from ".
 import { DESKTOP_MESSAGE_PREVIEW_CHARS, DESKTOP_MESSAGE_PREVIEW_LINES } from "../message-preview";
 import { messageShareLink, messageToMarkdown } from "../message-share";
 import { appendMessageReferenceToken, messageReferenceToken, parseMessageReferences, removeMessageReferenceToken, withoutMessageReferenceTokens, type MessageReferenceKind, type ResolvedMessageReference } from "../message-references";
-import { Agent, AgentActivity, AgentRun, AgentWorkItem, Artifact, Channel, DraftAttachment, GithubReviewTaskResult, Message, OwnerProfile, TASK_STATUSES, Task, ThreadReplySummary } from "../types";
+import { Agent, AgentActivity, AgentRun, AgentWorkItem, Artifact, Channel, DraftAttachment, GithubIssueTaskResult, GithubReviewTaskResult, Message, OwnerProfile, TASK_STATUSES, Task, ThreadReplySummary } from "../types";
 import { agentForMessageSender, deletedAgentForMessageSender, formatClockTime, formatDateDivider, formatTime, isSameCalendarDay, ownerAsAvatarAgent, visibleAgentDescription, visibleChannelDescription } from "../ui-utils";
 import { ActivityProgressDock, activeProgressByAgent } from "./ActivityProgressDock";
 import { AgentAvatar, AgentAvatarWithProfile } from "./AgentAvatar";
@@ -84,6 +84,7 @@ type ConversationProps = {
   updateTaskStatus: (task: Task, status: string) => void;
   openTask: (task: Task) => void;
   createGithubReviewTask: (pullNumber: number, agentId: string) => Promise<GithubReviewTaskResult>;
+  createGithubIssueTask: (issueNumber: number, agentId: string) => Promise<GithubIssueTaskResult>;
   setDraft: (value: string) => void;
   addDraftAttachments: (files: FileList | File[]) => void;
   removeDraftAttachment: (id: string) => void;
@@ -261,6 +262,7 @@ export function Conversation({
   updateTaskStatus,
   openTask,
   createGithubReviewTask,
+  createGithubIssueTask,
   setDraft,
   addDraftAttachments,
   removeDraftAttachment,
@@ -1436,6 +1438,7 @@ export function Conversation({
           channel={channel}
           agents={taskAssigneeOptions}
           onCreateReviewTask={createGithubReviewTask}
+          onCreateIssueTask={createGithubIssueTask}
           onOpenThread={(threadRootId) => {
             setActiveThreadId(threadRootId);
             setActiveTab("chat");

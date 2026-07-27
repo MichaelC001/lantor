@@ -4,10 +4,13 @@ use uuid::Uuid;
 use crate::{
     app::{AppState, CommandResult},
     application::github::{
-        self as application, BindGithubRepositoryRequest, CreateGithubReviewTaskRequest,
-        GithubChannelRequest,
+        self as application, BindGithubRepositoryRequest, CreateGithubIssueTaskRequest,
+        CreateGithubReviewTaskRequest, GithubChannelRequest, GithubIssueRequest,
     },
-    github::{GithubChannelOverview, GithubRepositoryBinding, GithubReviewTaskResult},
+    github::{
+        GithubChannelOverview, GithubIssueDetail, GithubIssueTaskResult, GithubRepositoryBinding,
+        GithubReviewTaskResult,
+    },
 };
 
 #[tauri::command]
@@ -24,6 +27,30 @@ pub(crate) async fn refresh_github_review_queue(
     state: State<'_, AppState>,
 ) -> CommandResult<GithubChannelOverview> {
     application::refresh_github_review_queue(&state.pool, GithubChannelRequest { channel_id }).await
+}
+
+#[tauri::command]
+pub(crate) async fn refresh_github_issue_queue(
+    channel_id: Uuid,
+    state: State<'_, AppState>,
+) -> CommandResult<GithubChannelOverview> {
+    application::refresh_github_issue_queue(&state.pool, GithubChannelRequest { channel_id }).await
+}
+
+#[tauri::command]
+pub(crate) async fn load_github_issue_detail(
+    channel_id: Uuid,
+    issue_number: i64,
+    state: State<'_, AppState>,
+) -> CommandResult<GithubIssueDetail> {
+    application::load_github_issue_detail(
+        &state.pool,
+        GithubIssueRequest {
+            channel_id,
+            issue_number,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -58,6 +85,24 @@ pub(crate) async fn create_github_review_task(
         CreateGithubReviewTaskRequest {
             channel_id,
             pull_number,
+            agent_id,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn create_github_issue_task(
+    channel_id: Uuid,
+    issue_number: i64,
+    agent_id: Uuid,
+    state: State<'_, AppState>,
+) -> CommandResult<GithubIssueTaskResult> {
+    application::create_github_issue_task(
+        &state.pool,
+        CreateGithubIssueTaskRequest {
+            channel_id,
+            issue_number,
             agent_id,
         },
     )

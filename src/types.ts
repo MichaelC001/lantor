@@ -190,6 +190,7 @@ export type GithubRepositoryBinding = {
   account_login: string;
   review_login: string;
   review_queue_synced_at: string | null;
+  issue_queue_synced_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -202,6 +203,8 @@ export type GithubPullRequest = {
   is_draft: boolean;
   state: string;
   updated_at: string;
+  is_review_requested: boolean;
+  is_authored: boolean;
   linked_thread_root_id: string | null;
   linked_task_id: string | null;
   linked_task_number: number | null;
@@ -210,10 +213,51 @@ export type GithubPullRequest = {
   linked_assignee_name: string | null;
 };
 
+export type GithubLabel = {
+  name: string;
+  color: string;
+};
+
+export type GithubIssue = {
+  number: number;
+  title: string;
+  url: string;
+  author_login: string;
+  assignee_logins: string[];
+  labels: GithubLabel[];
+  state: string;
+  created_at: string;
+  updated_at: string;
+  comments_count: number;
+  is_related: boolean;
+  linked_thread_root_id: string | null;
+  linked_task_id: string | null;
+  linked_task_number: number | null;
+  linked_task_status: string | null;
+  linked_assignee_id: string | null;
+  linked_assignee_name: string | null;
+};
+
+export type GithubIssueDetail = {
+  number: number;
+  title: string;
+  url: string;
+  author_login: string;
+  assignee_logins: string[];
+  labels: GithubLabel[];
+  state: string;
+  state_reason: string | null;
+  body: string;
+  milestone: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type GithubChannelOverview = {
   account: GithubAccount;
   binding: GithubRepositoryBinding | null;
   review_requests: GithubPullRequest[];
+  issues: GithubIssue[];
 };
 
 export type GithubReviewTaskResult = {
@@ -221,6 +265,14 @@ export type GithubReviewTaskResult = {
   task_id: string;
   task_number: number;
   head_sha: string;
+  created: boolean;
+};
+
+export type GithubIssueTaskResult = {
+  thread_root_id: string;
+  task_id: string;
+  task_number: number;
+  anchor_updated_at: string;
   created: boolean;
 };
 

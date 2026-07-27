@@ -214,6 +214,7 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             account_login text not null,
             review_login text not null,
             review_queue_synced_at text,
+            issue_queue_synced_at text,
             created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
             updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
         )
@@ -230,8 +231,30 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             is_draft boolean not null,
             state text not null,
             github_updated_at text not null,
+            is_review_requested boolean not null default 1,
+            is_authored boolean not null default 0,
             cached_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
             primary key (channel_id, repository_id, review_login, pull_number)
+        )
+        "#,
+        r#"
+        create table if not exists github_issue_cache (
+            channel_id blob not null references channels(id) on delete cascade,
+            repository_id text not null,
+            queue_login text not null,
+            issue_number integer not null,
+            title text not null,
+            url text not null,
+            author_login text not null,
+            state text not null,
+            created_at text not null,
+            github_updated_at text not null,
+            comments_count integer not null,
+            labels_json text not null,
+            assignees_json text not null,
+            is_related boolean not null,
+            cached_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
+            primary key (channel_id, repository_id, queue_login, issue_number)
         )
         "#,
         r#"
@@ -578,6 +601,27 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "channel_github_repositories",
         "review_queue_synced_at",
         "text",
+    )
+    .await?;
+    ensure_text_column(
+        pool,
+        "channel_github_repositories",
+        "issue_queue_synced_at",
+        "text",
+    )
+    .await?;
+    ensure_integer_column(
+        pool,
+        "github_review_request_cache",
+        "is_review_requested",
+        "boolean not null default 1",
+    )
+    .await?;
+    ensure_integer_column(
+        pool,
+        "github_review_request_cache",
+        "is_authored",
+        "boolean not null default 0",
     )
     .await?;
     ensure_integer_column(pool, "messages", "seq", "integer not null default 0").await?;

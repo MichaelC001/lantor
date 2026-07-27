@@ -64,7 +64,8 @@ use commands::{
         update_channel,
     },
     github::{
-        bind_github_repository, create_github_review_task, load_github_review_queue,
+        bind_github_repository, create_github_issue_task, create_github_review_task,
+        load_github_issue_detail, load_github_review_queue, refresh_github_issue_queue,
         refresh_github_review_queue,
     },
     inbox::{
@@ -292,6 +293,7 @@ pub fn run() {
             create_agent,
             create_agent_schedule,
             create_channel,
+            create_github_issue_task,
             create_github_review_task,
             create_reminder,
             claim_task,
@@ -314,8 +316,10 @@ pub fn run() {
             load_channel_previews,
             load_message,
             load_github_review_queue,
+            load_github_issue_detail,
             load_older_channel_messages,
             refresh_github_review_queue,
+            refresh_github_issue_queue,
             send_message,
             set_message_saved,
             set_channel_agent_membership,

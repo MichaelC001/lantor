@@ -43,8 +43,8 @@ use crate::application::{
         SetChannelAgentMembershipRequest, UpdateChannelRequest,
     },
     github::{
-        self as github_commands, BindGithubRepositoryRequest, CreateGithubReviewTaskRequest,
-        GithubChannelRequest,
+        self as github_commands, BindGithubRepositoryRequest, CreateGithubIssueTaskRequest,
+        CreateGithubReviewTaskRequest, GithubChannelRequest, GithubIssueRequest,
     },
     inbox::{self as inbox_commands, InboxItemsRequest, MarkChannelReadRequest},
     messages::{
@@ -220,12 +220,24 @@ fn web_router(state: Arc<WebState>, dist_dir: PathBuf) -> Router {
             post(api_refresh_github_review_queue),
         )
         .route(
+            "/api/refresh_github_issue_queue",
+            post(api_refresh_github_issue_queue),
+        )
+        .route(
+            "/api/load_github_issue_detail",
+            post(api_load_github_issue_detail),
+        )
+        .route(
             "/api/bind_github_repository",
             post(api_bind_github_repository),
         )
         .route(
             "/api/create_github_review_task",
             post(api_create_github_review_task),
+        )
+        .route(
+            "/api/create_github_issue_task",
+            post(api_create_github_issue_task),
         )
         .route("/api/create_agent", post(api_create_agent))
         .route("/api/update_agent", post(api_update_agent))
@@ -453,6 +465,26 @@ async fn api_refresh_github_review_queue(
         .map_err(api_error)
 }
 
+async fn api_refresh_github_issue_queue(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<GithubChannelRequest>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::refresh_github_issue_queue(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_load_github_issue_detail(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<GithubIssueRequest>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::load_github_issue_detail(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
 async fn api_bind_github_repository(
     State(state): State<Arc<WebState>>,
     Json(request): Json<BindGithubRepositoryRequest>,
@@ -468,6 +500,16 @@ async fn api_create_github_review_task(
     Json(request): Json<CreateGithubReviewTaskRequest>,
 ) -> Result<impl IntoResponse, Response> {
     github_commands::create_github_review_task(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_create_github_issue_task(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<CreateGithubIssueTaskRequest>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::create_github_issue_task(&state.pool, request)
         .await
         .map(Json)
         .map_err(api_error)

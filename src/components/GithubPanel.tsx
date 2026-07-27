@@ -1,22 +1,30 @@
 import {
   Bot,
+  CircleDot,
   ExternalLink,
   GitPullRequest,
   Github,
   LoaderCircle,
+  MessageCircle,
   RefreshCw,
+  Search,
   Settings2,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { apiInvoke, openExternalUrl } from "../apiClient";
 import type {
   Agent,
   Channel,
   GithubChannelOverview,
+  GithubIssue,
+  GithubIssueDetail,
+  GithubIssueTaskResult,
+  GithubLabel,
   GithubPullRequest,
   GithubReviewTaskResult,
 } from "../types";
+import { GithubIssueDrawer } from "./GithubIssueDrawer";
 import { Modal } from "./Modal";
 import { TaskAssigneePicker } from "./TaskAssigneePicker";
 
@@ -24,8 +32,13 @@ type GithubPanelProps = {
   channel: Channel;
   agents: Agent[];
   onCreateReviewTask: (pullNumber: number, agentId: string) => Promise<GithubReviewTaskResult>;
+  onCreateIssueTask: (issueNumber: number, agentId: string) => Promise<GithubIssueTaskResult>;
   onOpenThread: (threadRootId: string) => void;
 };
+
+type GithubResource = "pulls" | "issues";
+type GithubPullRequestFilter = "review_requested" | "authored" | "linked" | "all";
+type GithubIssueFilter = "related" | "assigned" | "authored" | "linked" | "open";
 
 const GITHUB_AUTO_REFRESH_INTERVAL_MS = 60_000;
 const githubOverviewCache = new Map<string, GithubChannelOverview>();
@@ -36,8 +49,14 @@ function cacheGithubOverview(channelId: string, overview: GithubChannelOverview)
   return overview;
 }
 
-function githubQueueNeedsRefresh(overview: GithubChannelOverview) {
-  const refreshedAt = overview.binding?.review_queue_synced_at;
+function githubQueueSyncedAt(overview: GithubChannelOverview, resource: GithubResource) {
+  return resource === "pulls"
+    ? overview.binding?.review_queue_synced_at
+    : overview.binding?.issue_queue_synced_at;
+}
+
+function githubQueueNeedsRefresh(overview: GithubChannelOverview, resource: GithubResource) {
+  const refreshedAt = githubQueueSyncedAt(overview, resource);
   if (!overview.binding || !refreshedAt) return Boolean(overview.binding);
   const refreshedAtMs = new Date(refreshedAt).getTime();
   return (
@@ -46,15 +65,19 @@ function githubQueueNeedsRefresh(overview: GithubChannelOverview) {
   );
 }
 
-function requestGithubRefresh(channelId: string) {
-  const existing = githubRefreshRequests.get(channelId);
+function requestGithubRefresh(channelId: string, resource: GithubResource) {
+  const requestKey = `${channelId}:${resource}`;
+  const existing = githubRefreshRequests.get(requestKey);
   if (existing) return existing;
-  const request = apiInvoke("refresh_github_review_queue", { channelId }).finally(() => {
-    if (githubRefreshRequests.get(channelId) === request) {
-      githubRefreshRequests.delete(channelId);
+  const request = apiInvoke(
+    resource === "pulls" ? "refresh_github_review_queue" : "refresh_github_issue_queue",
+    { channelId },
+  ).finally(() => {
+    if (githubRefreshRequests.get(requestKey) === request) {
+      githubRefreshRequests.delete(requestKey);
     }
   });
-  githubRefreshRequests.set(channelId, request);
+  githubRefreshRequests.set(requestKey, request);
   return request;
 }
 
@@ -77,17 +100,38 @@ function statusLabel(value: string | null) {
   return value ? value.replace(/_/g, " ") : "";
 }
 
+function issueLabelStyle(label: GithubLabel): CSSProperties | undefined {
+  const color = label.color.trim();
+  if (!/^[0-9a-f]{6}$/i.test(color)) return undefined;
+  return {
+    backgroundColor: `#${color}1f`,
+    borderColor: `#${color}66`,
+  };
+}
+
+function loginMatches(left: string, right: string) {
+  return left.localeCompare(right, undefined, { sensitivity: "accent" }) === 0;
+}
+
+function issueRelation(issue: GithubIssue, login: string) {
+  const authored = loginMatches(issue.author_login, login);
+  const assigned = issue.assignee_logins.some((assignee) => loginMatches(assignee, login));
+  return { authored, assigned, involved: issue.is_related && !authored && !assigned };
+}
+
 export function GithubPanel({
   channel,
   agents,
   onCreateReviewTask,
+  onCreateIssueTask,
   onOpenThread,
 }: GithubPanelProps) {
   const [overview, setOverview] = useState<GithubChannelOverview | null>(
     () => githubOverviewCache.get(channel.id) ?? null,
   );
   const [loading, setLoading] = useState(() => !githubOverviewCache.has(channel.id));
-  const [refreshing, setRefreshing] = useState(false);
+  const [activeResource, setActiveResource] = useState<GithubResource>("pulls");
+  const [refreshingResource, setRefreshingResource] = useState<GithubResource | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showBindingModal, setShowBindingModal] = useState(false);
   const [repositoryDraft, setRepositoryDraft] = useState("");
@@ -99,23 +143,38 @@ export function GithubPanel({
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [pullRequestFilter, setPullRequestFilter] =
+    useState<GithubPullRequestFilter>("review_requested");
+  const [pullRequestSearch, setPullRequestSearch] = useState("");
+  const [issueFilter, setIssueFilter] = useState<GithubIssueFilter>("related");
+  const [issueSearch, setIssueSearch] = useState("");
+  const [selectedIssue, setSelectedIssue] = useState<GithubIssue | null>(null);
+  const [issueDetail, setIssueDetail] = useState<GithubIssueDetail | null>(null);
+  const [issueDetailLoading, setIssueDetailLoading] = useState(false);
+  const [issueDetailError, setIssueDetailError] = useState<string | null>(null);
   const requestEpochRef = useRef(0);
+  const detailRequestEpochRef = useRef(0);
 
-  const refreshOverview = useCallback(async () => {
+  const refreshOverview = useCallback(async (resource: GithubResource) => {
     const requestEpoch = requestEpochRef.current + 1;
     requestEpochRef.current = requestEpoch;
-    setRefreshing(true);
+    setRefreshingResource(resource);
     setError(null);
     try {
-      const next = await requestGithubRefresh(channel.id);
+      const next = await requestGithubRefresh(channel.id, resource);
       if (requestEpochRef.current !== requestEpoch) return;
       cacheGithubOverview(channel.id, next);
       setOverview(next);
     } catch (loadError) {
       if (requestEpochRef.current !== requestEpoch) return;
-      setError(errorMessage(loadError, "Failed to refresh the GitHub review queue"));
+      setError(errorMessage(
+        loadError,
+        resource === "pulls"
+          ? "Failed to refresh the GitHub review queue"
+          : "Failed to refresh the GitHub issue queue",
+      ));
     } finally {
-      if (requestEpochRef.current === requestEpoch) setRefreshing(false);
+      if (requestEpochRef.current === requestEpoch) setRefreshingResource(null);
     }
   }, [channel.id]);
 
@@ -125,7 +184,7 @@ export function GithubPanel({
     const cached = githubOverviewCache.get(channel.id) ?? null;
     setOverview(cached);
     setLoading(!cached);
-    setRefreshing(false);
+    setRefreshingResource(null);
     setError(null);
     try {
       const next = await apiInvoke("load_github_review_queue", {
@@ -135,8 +194,8 @@ export function GithubPanel({
       cacheGithubOverview(channel.id, next);
       setOverview(next);
       setLoading(false);
-      if (githubQueueNeedsRefresh(next)) {
-        void refreshOverview();
+      if (githubQueueNeedsRefresh(next, activeResource)) {
+        void refreshOverview(activeResource);
       }
     } catch (loadError) {
       if (requestEpochRef.current !== requestEpoch) return;
@@ -144,7 +203,7 @@ export function GithubPanel({
       setError(errorMessage(loadError, "Failed to load the cached GitHub review queue"));
       setLoading(false);
     }
-  }, [channel.id, refreshOverview]);
+  }, [activeResource, channel.id, refreshOverview]);
 
   useEffect(() => {
     void loadOverview();
@@ -203,6 +262,40 @@ export function GithubPanel({
     }
   }
 
+  async function loadIssueDetail(issue: GithubIssue) {
+    const requestEpoch = detailRequestEpochRef.current + 1;
+    detailRequestEpochRef.current = requestEpoch;
+    setIssueDetail(null);
+    setIssueDetailLoading(true);
+    setIssueDetailError(null);
+    try {
+      const detail = await apiInvoke("load_github_issue_detail", {
+        channelId: channel.id,
+        issueNumber: issue.number,
+      });
+      if (detailRequestEpochRef.current !== requestEpoch) return;
+      setIssueDetail(detail);
+    } catch (detailError) {
+      if (detailRequestEpochRef.current !== requestEpoch) return;
+      setIssueDetailError(errorMessage(detailError, "Failed to load the GitHub issue"));
+    } finally {
+      if (detailRequestEpochRef.current === requestEpoch) setIssueDetailLoading(false);
+    }
+  }
+
+  function openIssue(issue: GithubIssue) {
+    setSelectedIssue(issue);
+    void loadIssueDetail(issue);
+  }
+
+  function closeIssue() {
+    detailRequestEpochRef.current += 1;
+    setSelectedIssue(null);
+    setIssueDetail(null);
+    setIssueDetailLoading(false);
+    setIssueDetailError(null);
+  }
+
   async function openGithubUrl(url: string) {
     try {
       await openExternalUrl(url);
@@ -210,6 +303,84 @@ export function GithubPanel({
       setError(errorMessage(openError, "Failed to open GitHub"));
     }
   }
+
+  const pullRequestCounts = useMemo(() => {
+    const pullRequests = overview?.review_requests ?? [];
+    return {
+      review_requested: pullRequests.filter((pullRequest) => pullRequest.is_review_requested)
+        .length,
+      authored: pullRequests.filter((pullRequest) => pullRequest.is_authored).length,
+      linked: pullRequests.filter((pullRequest) => Boolean(pullRequest.linked_thread_root_id))
+        .length,
+      all: pullRequests.length,
+    };
+  }, [overview]);
+
+  const filteredPullRequests = useMemo(() => {
+    const search = pullRequestSearch.trim().toLocaleLowerCase();
+    return (overview?.review_requests ?? []).filter((pullRequest) => {
+      const matchesFilter = pullRequestFilter === "review_requested"
+        ? pullRequest.is_review_requested
+        : pullRequestFilter === "authored"
+          ? pullRequest.is_authored
+          : pullRequestFilter === "linked"
+            ? Boolean(pullRequest.linked_thread_root_id)
+            : true;
+      if (!matchesFilter) return false;
+      if (!search) return true;
+      return [
+        pullRequest.number.toString(),
+        `#${pullRequest.number}`,
+        pullRequest.title,
+        pullRequest.author_login,
+      ]
+        .join(" ")
+        .toLocaleLowerCase()
+        .includes(search);
+    });
+  }, [overview, pullRequestFilter, pullRequestSearch]);
+
+  const issueCounts = useMemo(() => {
+    const login = overview?.binding?.review_login ?? "";
+    const issues = overview?.issues ?? [];
+    return {
+      related: issues.filter((issue) => issue.is_related).length,
+      assigned: issues.filter((issue) => issueRelation(issue, login).assigned).length,
+      authored: issues.filter((issue) => issueRelation(issue, login).authored).length,
+      linked: issues.filter((issue) => Boolean(issue.linked_thread_root_id)).length,
+      open: issues.length,
+    };
+  }, [overview]);
+
+  const filteredIssues = useMemo(() => {
+    const login = overview?.binding?.review_login ?? "";
+    const search = issueSearch.trim().toLocaleLowerCase();
+    return (overview?.issues ?? []).filter((issue) => {
+      const relation = issueRelation(issue, login);
+      const matchesFilter = issueFilter === "related"
+        ? issue.is_related
+        : issueFilter === "assigned"
+          ? relation.assigned
+          : issueFilter === "authored"
+            ? relation.authored
+            : issueFilter === "linked"
+              ? Boolean(issue.linked_thread_root_id)
+              : true;
+      if (!matchesFilter) return false;
+      if (!search) return true;
+      const searchable = [
+        issue.number.toString(),
+        `#${issue.number}`,
+        issue.title,
+        issue.author_login,
+        ...issue.assignee_logins,
+        ...issue.labels.map((label) => label.name),
+      ]
+        .join(" ")
+        .toLocaleLowerCase();
+      return searchable.includes(search);
+    });
+  }, [issueFilter, issueSearch, overview]);
 
   if (loading && !overview) {
     return (
@@ -240,6 +411,11 @@ export function GithubPanel({
 
   const binding = overview.binding;
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? null;
+  const refreshing = refreshingResource === activeResource;
+  const syncedAt = githubQueueSyncedAt(overview, activeResource);
+  const drawerIssue = selectedIssue
+    ? overview.issues.find((issue) => issue.number === selectedIssue.number) ?? selectedIssue
+    : null;
   return (
     <div className="github-panel">
       {binding ? (
@@ -257,26 +433,26 @@ export function GithubPanel({
                 <ExternalLink size={14} />
               </button>
               <span>
-                Review requests for <b>@{binding.review_login}</b>
+                Personal queues for <b>@{binding.review_login}</b>
                 {binding.local_path ? ` · ${binding.local_path}` : ""}
               </span>
               <span className="github-sync-status">
                 {refreshing && <LoaderCircle className="spin" size={12} />}
-                {binding.review_queue_synced_at
+                {syncedAt
                   ? `${refreshing ? "Refreshing · " : ""}Last synced ${formattedUpdate(
-                      binding.review_queue_synced_at,
+                      syncedAt,
                     )}`
                   : refreshing
-                    ? "Syncing review requests…"
+                    ? `Syncing ${activeResource === "pulls" ? "pull requests" : "issues"}…`
                     : "Not synced yet"}
               </span>
             </div>
             <div className="github-toolbar-actions">
               <button
                 type="button"
-                disabled={refreshing}
-                onClick={() => void refreshOverview()}
-                title="Refresh review queue"
+                disabled={Boolean(refreshingResource)}
+                onClick={() => void refreshOverview(activeResource)}
+                title={`Refresh ${activeResource === "pulls" ? "pull requests" : "issues"}`}
               >
                 <RefreshCw className={refreshing ? "spin" : ""} size={16} />
                 Refresh
@@ -288,98 +464,347 @@ export function GithubPanel({
             </div>
           </header>
 
-          <section className="github-queue" aria-label="GitHub review requested pull requests">
-            <div className="github-queue-heading">
-              <div>
-                <span>Pull requests</span>
-                <strong>Review requested</strong>
-              </div>
+          <div className="github-resource-tabs" role="tablist" aria-label="GitHub work items">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeResource === "pulls"}
+              className={activeResource === "pulls" ? "active" : ""}
+              onClick={() => setActiveResource("pulls")}
+            >
+              <GitPullRequest size={16} />
+              Pull requests
               <mark>{overview.review_requests.length}</mark>
-            </div>
-            {error && <div className="github-inline-error" role="alert">{error}</div>}
-            {overview.review_requests.length === 0 &&
-            refreshing &&
-            !binding.review_queue_synced_at ? (
-              <div className="empty-state compact github-empty-state" aria-live="polite">
-                <LoaderCircle className="spin" size={28} />
-                <h2>Loading review requests…</h2>
-                <p>The repository is ready while the first queue snapshot syncs.</p>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeResource === "issues"}
+              className={activeResource === "issues" ? "active" : ""}
+              onClick={() => setActiveResource("issues")}
+            >
+              <CircleDot size={16} />
+              Issues
+              <mark>{issueCounts.related}</mark>
+            </button>
+          </div>
+
+          {activeResource === "pulls" ? (
+            <section className="github-queue" aria-label="GitHub pull requests">
+              <div className="github-queue-heading">
+                <div>
+                  <span>Pull requests</span>
+                  <strong>Personal work queue</strong>
+                </div>
+                <mark>{filteredPullRequests.length}</mark>
               </div>
-            ) : overview.review_requests.length === 0 ? (
-              <div className="empty-state compact github-empty-state">
-                <GitPullRequest size={32} />
-                <h2>Review queue is clear</h2>
-                <p>No open pull requests currently request @{binding.review_login}&apos;s review.</p>
+
+              <div className="github-issue-controls">
+                <div className="github-issue-filters" role="group" aria-label="Filter pull requests">
+                  {([
+                    ["review_requested", "Review requested"],
+                    ["authored", "Created by me"],
+                    ["linked", "Linked"],
+                    ["all", "All personal"],
+                  ] as Array<[GithubPullRequestFilter, string]>).map(([filter, label]) => (
+                    <button
+                      type="button"
+                      className={pullRequestFilter === filter ? "active" : ""}
+                      aria-pressed={pullRequestFilter === filter}
+                      onClick={() => setPullRequestFilter(filter)}
+                      key={filter}
+                    >
+                      {label}
+                      <span>{pullRequestCounts[filter]}</span>
+                    </button>
+                  ))}
+                </div>
+                <label className="github-issue-search">
+                  <Search size={15} />
+                  <input
+                    value={pullRequestSearch}
+                    onChange={(event) => setPullRequestSearch(event.target.value)}
+                    placeholder="Search title or #"
+                    aria-label="Search GitHub pull requests"
+                  />
+                </label>
               </div>
-            ) : (
-              <div className="github-pull-list">
-                {overview.review_requests.map((pullRequest) => {
-                  const linked = Boolean(pullRequest.linked_thread_root_id);
-                  return (
-                    <article className={`github-pull-card ${linked ? "linked" : ""}`} key={pullRequest.number}>
-                      <div className="github-pull-main">
-                        <div className="github-pull-eyebrow">
-                          <span>PR #{pullRequest.number}</span>
-                          {pullRequest.is_draft && <mark>Draft</mark>}
-                          {linked && <mark className="linked">Linked</mark>}
+
+              {error && <div className="github-inline-error" role="alert">{error}</div>}
+              {overview.review_requests.length === 0 &&
+              refreshing &&
+              !binding.review_queue_synced_at ? (
+                <div className="empty-state compact github-empty-state" aria-live="polite">
+                  <LoaderCircle className="spin" size={28} />
+                  <h2>Loading review requests…</h2>
+                  <p>The repository is ready while the first queue snapshot syncs.</p>
+                </div>
+              ) : overview.review_requests.length === 0 ? (
+                <div className="empty-state compact github-empty-state">
+                  <GitPullRequest size={32} />
+                  <h2>Pull request queue is clear</h2>
+                  <p>
+                    No open pull requests are currently authored by or requesting review from @
+                    {binding.review_login}.
+                  </p>
+                </div>
+              ) : filteredPullRequests.length === 0 ? (
+                <div className="empty-state compact github-empty-state">
+                  <GitPullRequest size={32} />
+                  <h2>This pull request queue is clear</h2>
+                  <p>
+                    No open pull requests match the {pullRequestFilter.replace(/_/g, " ")} filter
+                    {pullRequestSearch.trim() ? " and current search" : ""}.
+                  </p>
+                </div>
+              ) : (
+                <div className="github-pull-list">
+                  {filteredPullRequests.map((pullRequest) => {
+                    const linked = Boolean(pullRequest.linked_thread_root_id);
+                    return (
+                      <article
+                        className={`github-pull-card ${linked ? "linked" : ""}`}
+                        key={pullRequest.number}
+                      >
+                        <div className="github-pull-main">
+                          <div className="github-pull-eyebrow">
+                            <span>PR #{pullRequest.number}</span>
+                            {pullRequest.is_review_requested && (
+                              <mark className="review-requested">Review requested</mark>
+                            )}
+                            {pullRequest.is_authored && (
+                              <mark className="authored">Created by me</mark>
+                            )}
+                            {pullRequest.is_draft && <mark className="draft">Draft</mark>}
+                            {linked && <mark className="linked">Linked</mark>}
+                          </div>
+                          <button
+                            type="button"
+                            className="github-pull-title"
+                            onClick={() => void openGithubUrl(pullRequest.url)}
+                          >
+                            {pullRequest.title}
+                            <ExternalLink size={14} />
+                          </button>
+                          <p>
+                            @{pullRequest.author_login}
+                            <span aria-hidden="true"> · </span>
+                            Updated {formattedUpdate(pullRequest.updated_at)}
+                          </p>
                         </div>
-                        <button
-                          type="button"
-                          className="github-pull-title"
-                          onClick={() => void openGithubUrl(pullRequest.url)}
-                        >
-                          {pullRequest.title}
-                          <ExternalLink size={14} />
-                        </button>
-                        <p>
-                          @{pullRequest.author_login}
-                          <span aria-hidden="true"> · </span>
-                          Updated {formattedUpdate(pullRequest.updated_at)}
-                        </p>
-                      </div>
-                      <div className="github-pull-actions">
-                        {linked ? (
-                          <>
-                            <div className="github-linked-task">
-                              <strong>Task #{pullRequest.linked_task_number}</strong>
-                              <span>
-                                {statusLabel(pullRequest.linked_task_status)}
-                                {pullRequest.linked_assignee_name
-                                  ? ` · ${pullRequest.linked_assignee_name}`
-                                  : ""}
-                              </span>
-                            </div>
+                        <div className="github-pull-actions">
+                          {linked ? (
+                            <>
+                              <div className="github-linked-task">
+                                <strong>Task #{pullRequest.linked_task_number}</strong>
+                                <span>
+                                  {statusLabel(pullRequest.linked_task_status)}
+                                  {pullRequest.linked_assignee_name
+                                    ? ` · ${pullRequest.linked_assignee_name}`
+                                    : ""}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                className="github-primary-action"
+                                onClick={() => {
+                                  if (pullRequest.linked_thread_root_id) {
+                                    onOpenThread(pullRequest.linked_thread_root_id);
+                                  }
+                                }}
+                              >
+                                Open thread
+                              </button>
+                            </>
+                          ) : (
                             <button
                               type="button"
                               className="github-primary-action"
-                              onClick={() => {
-                                if (pullRequest.linked_thread_root_id) {
-                                  onOpenThread(pullRequest.linked_thread_root_id);
-                                }
-                              }}
+                              disabled={agents.length === 0}
+                              onClick={() => chooseReviewAgent(pullRequest)}
+                              title={
+                                agents.length === 0
+                                  ? "Add an agent to review this pull request"
+                                  : undefined
+                              }
                             >
-                              Open thread
+                              <Bot size={16} />
+                              Review with agent
                             </button>
-                          </>
-                        ) : (
-                          <button
-                            type="button"
-                            className="github-primary-action"
-                            disabled={agents.length === 0}
-                            onClick={() => chooseReviewAgent(pullRequest)}
-                            title={agents.length === 0 ? "Add an agent to review this pull request" : undefined}
-                          >
-                            <Bot size={16} />
-                            Review with agent
-                          </button>
-                        )}
-                      </div>
-                    </article>
-                  );
-                })}
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          ) : (
+            <section className="github-queue github-issue-queue" aria-label="GitHub issues">
+              <div className="github-queue-heading">
+                <div>
+                  <span>Issues</span>
+                  <strong>Personal work queue</strong>
+                </div>
+                <mark>{filteredIssues.length}</mark>
               </div>
-            )}
-          </section>
+
+              <div className="github-issue-controls">
+                <div className="github-issue-filters" role="group" aria-label="Filter issues">
+                  {([
+                    ["related", "Related"],
+                    ["assigned", "Assigned"],
+                    ["authored", "Authored"],
+                    ["linked", "Linked"],
+                    ["open", "Open"],
+                  ] as Array<[GithubIssueFilter, string]>).map(([filter, label]) => (
+                    <button
+                      type="button"
+                      className={issueFilter === filter ? "active" : ""}
+                      aria-pressed={issueFilter === filter}
+                      onClick={() => setIssueFilter(filter)}
+                      key={filter}
+                    >
+                      {label}
+                      <span>{issueCounts[filter]}</span>
+                    </button>
+                  ))}
+                </div>
+                <label className="github-issue-search">
+                  <Search size={15} />
+                  <input
+                    value={issueSearch}
+                    onChange={(event) => setIssueSearch(event.target.value)}
+                    placeholder="Search title, # or label"
+                    aria-label="Search GitHub issues"
+                  />
+                </label>
+              </div>
+
+              {error && <div className="github-inline-error" role="alert">{error}</div>}
+              {overview.issues.length === 0 &&
+              refreshing &&
+              !binding.issue_queue_synced_at ? (
+                <div className="empty-state compact github-empty-state" aria-live="polite">
+                  <LoaderCircle className="spin" size={28} />
+                  <h2>Loading issues…</h2>
+                  <p>The cached queue will appear here after the first background sync.</p>
+                </div>
+              ) : filteredIssues.length === 0 ? (
+                <div className="empty-state compact github-empty-state">
+                  <CircleDot size={32} />
+                  <h2>{issueSearch.trim() ? "No matching issues" : "This issue queue is clear"}</h2>
+                  <p>
+                    {issueSearch.trim()
+                      ? "Try a different title, issue number, author, assignee, or label."
+                      : `No open issues match the ${issueFilter} filter for @${binding.review_login}.`}
+                  </p>
+                </div>
+              ) : (
+                <div className="github-issue-list">
+                  {filteredIssues.map((issue) => {
+                    const linked = Boolean(issue.linked_thread_root_id);
+                    const relation = issueRelation(issue, binding.review_login);
+                    return (
+                      <article
+                        className={`github-issue-card ${linked ? "linked" : ""}`}
+                        key={issue.number}
+                      >
+                        <div className="github-issue-main">
+                          <div className="github-issue-eyebrow">
+                            <span>Issue #{issue.number}</span>
+                            {relation.assigned && <mark>Assigned</mark>}
+                            {relation.authored && <mark>Authored</mark>}
+                            {relation.involved && <mark>Involved</mark>}
+                            {linked && <mark className="linked">Linked</mark>}
+                          </div>
+                          <div className="github-issue-title-row">
+                            <button
+                              type="button"
+                              className="github-issue-title"
+                              onClick={() => openIssue(issue)}
+                            >
+                              {issue.title}
+                            </button>
+                            <button
+                              type="button"
+                              className="github-issue-external"
+                              onClick={() => void openGithubUrl(issue.url)}
+                              aria-label={`Open issue #${issue.number} on GitHub`}
+                              title="Open on GitHub"
+                            >
+                              <ExternalLink size={14} />
+                            </button>
+                          </div>
+                          {issue.labels.length > 0 && (
+                            <div className="github-issue-labels">
+                              {issue.labels.slice(0, 3).map((label) => (
+                                <span style={issueLabelStyle(label)} key={label.name}>
+                                  {label.name}
+                                </span>
+                              ))}
+                              {issue.labels.length > 3 && (
+                                <span className="overflow">+{issue.labels.length - 3}</span>
+                              )}
+                            </div>
+                          )}
+                          <p>
+                            @{issue.author_login}
+                            <span aria-hidden="true"> · </span>
+                            <MessageCircle size={13} />
+                            {issue.comments_count}
+                            <span aria-hidden="true"> · </span>
+                            Updated {formattedUpdate(issue.updated_at)}
+                          </p>
+                        </div>
+                        <div className="github-pull-actions">
+                          {linked ? (
+                            <>
+                              <div className="github-linked-task">
+                                <strong>Task #{issue.linked_task_number}</strong>
+                                <span>
+                                  {statusLabel(issue.linked_task_status)}
+                                  {issue.linked_assignee_name
+                                    ? ` · ${issue.linked_assignee_name}`
+                                    : ""}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                className="github-primary-action"
+                                onClick={() => {
+                                  if (issue.linked_thread_root_id) {
+                                    onOpenThread(issue.linked_thread_root_id);
+                                  }
+                                }}
+                              >
+                                Open thread
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              className="github-primary-action"
+                              disabled={agents.length === 0}
+                              onClick={() => openIssue(issue)}
+                              title={
+                                agents.length === 0
+                                  ? "Add an agent to investigate this issue"
+                                  : undefined
+                              }
+                            >
+                              <Bot size={16} />
+                              Investigate
+                            </button>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          )}
         </>
       ) : (
         <div className="empty-state github-empty-state">
@@ -387,7 +812,7 @@ export function GithubPanel({
           <h2>Bind a GitHub repository</h2>
           <p>
             Signed in through GitHub CLI as @{overview.account.login}. Bind one repository to
-            show pull requests requesting your review.
+            show pull requests and issues related to your work.
           </p>
           <button type="button" className="empty-state-action" onClick={openBindingModal}>
             <Github size={15} />
@@ -395,6 +820,23 @@ export function GithubPanel({
           </button>
         </div>
       )}
+
+      <GithubIssueDrawer
+        issue={drawerIssue}
+        detail={issueDetail}
+        loading={issueDetailLoading}
+        error={issueDetailError}
+        agents={agents}
+        onClose={closeIssue}
+        onOpenGithub={(url) => {
+          void openGithubUrl(url);
+        }}
+        onRetry={() => {
+          if (drawerIssue) void loadIssueDetail(drawerIssue);
+        }}
+        onCreateTask={onCreateIssueTask}
+        onOpenThread={onOpenThread}
+      />
 
       <Modal
         open={showBindingModal}
@@ -417,7 +859,7 @@ export function GithubPanel({
             />
           </label>
           <label>
-            <span>GitHub login for “My review requests”</span>
+            <span>GitHub identity for personal queues</span>
             <input
               value={reviewLoginDraft}
               onChange={(event) => setReviewLoginDraft(event.target.value)}
@@ -434,7 +876,8 @@ export function GithubPanel({
           </label>
           <p className="github-modal-note">
             Authentication uses the active <code>gh</code> account @{overview.account.login}.
-            The local checkout is included in Agent review tasks.
+            This identity filters review requests and related issues. The local checkout is
+            included in Agent tasks.
           </p>
           {bindingError && <div className="github-inline-error" role="alert">{bindingError}</div>}
           <div className="modal-actions">

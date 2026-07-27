@@ -5,6 +5,8 @@ import type {
   Bootstrap,
   ChannelMessagePage,
   GithubChannelOverview,
+  GithubIssueDetail,
+  GithubIssueTaskResult,
   GithubRepositoryBinding,
   GithubReviewTaskResult,
   LaunchAgentStatus,
@@ -110,6 +112,17 @@ export type ApiContract = {
     args: { channelId: string };
     result: GithubChannelOverview;
   };
+  refresh_github_issue_queue: {
+    args: { channelId: string };
+    result: GithubChannelOverview;
+  };
+  load_github_issue_detail: {
+    args: {
+      channelId: string;
+      issueNumber: number;
+    };
+    result: GithubIssueDetail;
+  };
   bind_github_repository: {
     args: {
       channelId: string;
@@ -126,6 +139,14 @@ export type ApiContract = {
       agentId: string;
     };
     result: GithubReviewTaskResult;
+  };
+  create_github_issue_task: {
+    args: {
+      channelId: string;
+      issueNumber: number;
+      agentId: string;
+    };
+    result: GithubIssueTaskResult;
   };
   create_agent: {
     args: AgentDraftRequest & {
@@ -266,8 +287,11 @@ const API_COMMAND_NAMES = {
   delete_channel: true,
   load_github_review_queue: true,
   refresh_github_review_queue: true,
+  refresh_github_issue_queue: true,
+  load_github_issue_detail: true,
   bind_github_repository: true,
   create_github_review_task: true,
+  create_github_issue_task: true,
   create_agent: true,
   update_agent: true,
   delete_agent: true,

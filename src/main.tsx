@@ -4018,6 +4018,20 @@ function App() {
     return result;
   }
 
+  async function createGithubIssueTask(issueNumber: number, agentId: string) {
+    if (!channel) throw new Error("No active channel");
+    const result = await mutate("create_github_issue_task", {
+      channelId: channel.id,
+      issueNumber,
+      agentId,
+    });
+    setActiveChannelId(channel.id);
+    revealThread(result.thread_root_id, channel.id);
+    setActiveTab("chat");
+    setFocusedMessageId(result.thread_root_id);
+    return result;
+  }
+
   function openWorkItem(item: AgentWorkItem, focusedMessageIdOverride?: string | null) {
     if (item.channel_id) setActiveChannelId(item.channel_id);
     if (item.thread_root_id) {
@@ -4572,6 +4586,7 @@ function App() {
         updateTaskStatus={updateTaskStatus}
         openTask={openTask}
         createGithubReviewTask={createGithubReviewTask}
+        createGithubIssueTask={createGithubIssueTask}
         setDraft={setDraft}
         addDraftAttachments={(files) => appendDraftAttachments(files, "root")}
         removeDraftAttachment={(id) => updateRootComposerDraft(activeChannelId, (current) => ({
