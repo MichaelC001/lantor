@@ -77,6 +77,8 @@ pub(crate) struct Channel {
     pub(crate) kind: String,
     pub(crate) dm_agent_id: Option<Uuid>,
     pub(crate) unread_count: i32,
+    pub(crate) github_unread_count: i32,
+    pub(crate) github_review_synced_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

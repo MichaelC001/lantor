@@ -11,10 +11,12 @@ use crate::{
         create_github_review_task_record, github_account, load_cached_github_channel_overview,
         load_existing_github_issue_task, load_existing_github_review_task, load_github_binding,
         load_github_commits_ahead, load_github_issue, load_github_issue_cli,
-        load_github_pull_request, load_github_review_task_context, refresh_github_channel_overview,
-        refresh_github_issue_overview, rereview_github_review_task_record, GithubChannelOverview,
-        GithubIssueDetail, GithubIssueTaskResult, GithubRepositoryBinding,
-        GithubRereviewTaskResult, GithubReviewTaskResult,
+        load_github_pull_request, load_github_review_task_context,
+        mark_github_review_attention_read as mark_github_review_attention_read_in_pool,
+        refresh_github_channel_overview, refresh_github_issue_overview,
+        rereview_github_review_task_record, GithubChannelOverview, GithubIssueDetail,
+        GithubIssueTaskResult, GithubRepositoryBinding, GithubRereviewTaskResult,
+        GithubReviewTaskResult,
     },
 };
 
@@ -84,6 +86,13 @@ pub(crate) async fn refresh_github_issue_queue(
     request: GithubChannelRequest,
 ) -> CommandResult<GithubChannelOverview> {
     refresh_github_issue_overview(pool, request.channel_id).await
+}
+
+pub(crate) async fn mark_github_review_attention_read(
+    pool: &SqlitePool,
+    request: GithubChannelRequest,
+) -> CommandResult<()> {
+    mark_github_review_attention_read_in_pool(pool, request.channel_id).await
 }
 
 pub(crate) async fn load_github_issue_detail(

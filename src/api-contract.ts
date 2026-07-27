@@ -117,6 +117,10 @@ export type ApiContract = {
     args: { channelId: string };
     result: GithubChannelOverview;
   };
+  mark_github_review_attention_read: {
+    args: { channelId: string };
+    result: MutationResult;
+  };
   load_github_issue_detail: {
     args: {
       channelId: string;
@@ -296,6 +300,7 @@ const API_COMMAND_NAMES = {
   load_github_review_queue: true,
   refresh_github_review_queue: true,
   refresh_github_issue_queue: true,
+  mark_github_review_attention_read: true,
   load_github_issue_detail: true,
   bind_github_repository: true,
   create_github_review_task: true,

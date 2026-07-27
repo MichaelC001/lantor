@@ -2214,6 +2214,18 @@ button,
   background: var(--bg-control-flat);
 }
 
+.tabs button.has-unread:not(.active) {
+  color: var(--unread-ink);
+}
+
+.tabs .tab-unread-badge {
+  width: 22px;
+  min-width: 22px;
+  height: 17px;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
 .message-list,
 .task-board,
 .reply-list {

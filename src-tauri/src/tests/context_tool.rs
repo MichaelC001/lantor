@@ -1,16 +1,69 @@
 use super::{
-    agent_context_agent_inspect, agent_context_attachment_info, agent_context_history_read,
-    agent_context_inbox_archive, agent_context_inbox_list, agent_context_inbox_read,
-    agent_context_memory_read, agent_context_message_search, agent_context_run_read,
-    agent_context_workspace_info, agent_context_workspace_list, short_id,
+    agent_context_agent_inspect, agent_context_attachment_info, agent_context_github_sync,
+    agent_context_history_read, agent_context_inbox_archive, agent_context_inbox_list,
+    agent_context_inbox_read, agent_context_memory_read, agent_context_message_search,
+    agent_context_run_read, agent_context_workspace_info, agent_context_workspace_list,
+    render_agent_context_github_sync, short_id,
 };
 use crate::channels::open_dm_with_agent_in_pool;
 use crate::events::activity::record_agent_activity;
+use crate::github::GithubReviewAttentionRefreshResult;
 use crate::message_store::send_owner_message_in_pool;
 use crate::models::AttachmentUpload;
 use crate::test_support::{drop_test_schema, insert_test_agent, insert_test_channel, test_pool};
 use crate::text::read_compact_memory_file;
 use uuid::Uuid;
+
+#[test]
+fn github_sync_result_is_machine_readable() {
+    let channel_id = Uuid::new_v4();
+    let output = render_agent_context_github_sync(
+        "#github-tools",
+        &GithubReviewAttentionRefreshResult {
+            channel_id,
+            repository: "acme/stream".to_owned(),
+            review_login: "octocat".to_owned(),
+            review_request_count: 3,
+            new_unread_count: 2,
+            unread_count: 2,
+            baseline_established: false,
+        },
+    )
+    .expect("render GitHub sync result");
+    let value: serde_json::Value = serde_json::from_str(&output).expect("parse GitHub sync JSON");
+    assert_eq!(value["channel"], "#github-tools");
+    assert_eq!(value["channel_id"], channel_id.to_string());
+    assert_eq!(value["repository"], "acme/stream");
+    assert_eq!(value["review_requests"], 3);
+    assert_eq!(value["new_unread"], 2);
+    assert_eq!(value["unread"], 2);
+    assert_eq!(value["baseline_established"], false);
+}
+
+#[tokio::test]
+async fn github_sync_requires_a_bound_channel() {
+    let Some((pool, schema)) = test_pool().await else {
+        return;
+    };
+    let result: Result<(), String> = async {
+        insert_test_channel(&pool, "github-tools-unbound").await?;
+        let error = agent_context_github_sync(
+            &pool,
+            &[
+                "github-sync".to_owned(),
+                "--channel".to_owned(),
+                "#github-tools-unbound".to_owned(),
+            ],
+        )
+        .await
+        .expect_err("unbound channel should fail before invoking GitHub");
+        assert_eq!(error, "channel has no GitHub repository binding");
+        Ok(())
+    }
+    .await;
+    drop_test_schema(pool, schema).await;
+    assert!(result.is_ok(), "{:?}", result.err());
+}
 
 #[test]
 fn compact_memory_read_preserves_bounded_head_and_tail() {

@@ -54,6 +54,7 @@ fn lantor_context_tools_prompt() -> &'static str {
 - run details: "$LANTOR_CONTEXT_TOOL" --agent-context-tool run-read --run-id "<uuid-or-prefix>"
 - history: "$LANTOR_CONTEXT_TOOL" --agent-context-tool history-read --target "#channel[:thread_id]" --limit 20
 - search: "$LANTOR_CONTEXT_TOOL" --agent-context-tool message-search --query "text" --target "#channel" --limit 20
+- GitHub sync: "$LANTOR_CONTEXT_TOOL" --agent-context-tool github sync --channel "#channel" (reads GitHub and updates that channel's cached review queue/badge; invoke when the user or a reminder asks for it)
 - attachment: "$LANTOR_CONTEXT_TOOL" --agent-context-tool attachment-info --attachment-id "<uuid>"
 - artifact: "$LANTOR_CONTEXT_TOOL" --agent-context-tool artifact-read --artifact-id "<uuid>"
 - agent introspection: "$LANTOR_CONTEXT_TOOL" --agent-context-tool agent-inspect --target "@handle"

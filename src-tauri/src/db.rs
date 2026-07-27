@@ -215,6 +215,8 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             review_login text not null,
             review_queue_synced_at text,
             issue_queue_synced_at text,
+            review_attention_synced_at text,
+            review_attention_initialized boolean not null default 0,
             created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
             updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
         )
@@ -240,6 +242,7 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             checks_failed integer not null default 0,
             failing_checks_json text not null default '[]',
             review_commits_ahead integer,
+            attention_unread boolean not null default 0,
             cached_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
             primary key (channel_id, repository_id, review_login, pull_number)
         )
@@ -617,6 +620,20 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "text",
     )
     .await?;
+    ensure_text_column(
+        pool,
+        "channel_github_repositories",
+        "review_attention_synced_at",
+        "text",
+    )
+    .await?;
+    ensure_integer_column(
+        pool,
+        "channel_github_repositories",
+        "review_attention_initialized",
+        "boolean not null default 0",
+    )
+    .await?;
     ensure_integer_column(
         pool,
         "github_review_request_cache",
@@ -678,6 +695,13 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "github_review_request_cache",
         "review_commits_ahead",
         "integer",
+    )
+    .await?;
+    ensure_integer_column(
+        pool,
+        "github_review_request_cache",
+        "attention_unread",
+        "boolean not null default 0",
     )
     .await?;
     ensure_integer_column(pool, "messages", "seq", "integer not null default 0").await?;

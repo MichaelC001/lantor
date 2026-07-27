@@ -98,6 +98,23 @@ pub(crate) struct GithubChannelOverview {
     pub(crate) issues: Vec<GithubIssue>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct GithubReviewAttentionRefreshResult {
+    pub(crate) channel_id: Uuid,
+    pub(crate) repository: String,
+    pub(crate) review_login: String,
+    pub(crate) review_request_count: usize,
+    pub(crate) new_unread_count: usize,
+    pub(crate) unread_count: usize,
+    pub(crate) baseline_established: bool,
+}
+
+struct GithubReviewAttentionCacheUpdate {
+    new_unread_count: usize,
+    unread_count: usize,
+    baseline_established: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GithubReviewTaskResult {
     pub(crate) thread_root_id: Uuid,
@@ -656,6 +673,18 @@ pub(crate) async fn bind_github_repository_in_pool(
                 then channel_github_repositories.issue_queue_synced_at
                 else null
             end,
+            review_attention_synced_at = case
+                when channel_github_repositories.repository_id = excluded.repository_id
+                 and channel_github_repositories.review_login = excluded.review_login
+                then channel_github_repositories.review_attention_synced_at
+                else null
+            end,
+            review_attention_initialized = case
+                when channel_github_repositories.repository_id = excluded.repository_id
+                 and channel_github_repositories.review_login = excluded.review_login
+                then channel_github_repositories.review_attention_initialized
+                else 0
+            end,
             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
         "#,
     )
@@ -1183,14 +1212,72 @@ async fn replace_cached_review_requests(
     binding: &GithubRepositoryBinding,
     account_login: &str,
     requests: &[GithubPullRequestSnapshot],
-) -> CommandResult<()> {
-    let mut transaction = pool.begin().await.map_err(to_string)?;
+    full_queue_sync: bool,
+) -> CommandResult<GithubReviewAttentionCacheUpdate> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
+    let attention_initialized: Option<bool> = sqlx::query_scalar(
+        r#"
+        select review_attention_initialized
+        from channel_github_repositories
+        where channel_id = $1
+          and repository_id = $2
+          and review_login = $3
+        "#,
+    )
+    .bind(binding.channel_id)
+    .bind(&binding.repository_id)
+    .bind(&binding.review_login)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(to_string)?;
+    let Some(attention_initialized) = attention_initialized else {
+        return Err("GitHub repository binding changed while refreshing".to_owned());
+    };
+    let previous_attention_rows = sqlx::query(
+        r#"
+        select pull_number, is_review_requested, attention_unread
+        from github_review_request_cache
+        where channel_id = $1
+          and repository_id = $2
+          and review_login = $3
+        "#,
+    )
+    .bind(binding.channel_id)
+    .bind(&binding.repository_id)
+    .bind(&binding.review_login)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(to_string)?;
+    let previous_attention = previous_attention_rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<i64, _>("pull_number"),
+                (
+                    row.get::<bool, _>("is_review_requested"),
+                    row.get::<bool, _>("attention_unread"),
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let previous_unread_count = previous_attention
+        .values()
+        .filter(|(is_review_requested, attention_unread)| *is_review_requested && *attention_unread)
+        .count();
     let binding_update = sqlx::query(
         r#"
         update channel_github_repositories
         set
             account_login = $4,
-            review_queue_synced_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+            review_attention_initialized = 1,
+            review_attention_synced_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+            review_queue_synced_at = case
+                when $5 then strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                else review_queue_synced_at
+            end
         where channel_id = $1
           and repository_id = $2
           and review_login = $3
@@ -1200,6 +1287,7 @@ async fn replace_cached_review_requests(
     .bind(&binding.repository_id)
     .bind(&binding.review_login)
     .bind(account_login)
+    .bind(full_queue_sync)
     .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
@@ -1212,21 +1300,49 @@ async fn replace_cached_review_requests(
         .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
+    let mut next_unread_count = 0usize;
+    let mut new_unread_count = 0usize;
     for snapshot in requests {
         let pull_request = &snapshot.pull_request;
         let failing_checks_json =
             serde_json::to_string(&snapshot.checks.failing_checks).map_err(to_string)?;
+        let attention_unread = if !attention_initialized || !snapshot.is_review_requested {
+            false
+        } else {
+            previous_attention
+                .get(&pull_request.number)
+                .map(|(was_review_requested, was_unread)| {
+                    if *was_review_requested {
+                        *was_unread
+                    } else {
+                        true
+                    }
+                })
+                .unwrap_or(true)
+        };
+        let is_new_unread = attention_initialized
+            && snapshot.is_review_requested
+            && !previous_attention
+                .get(&pull_request.number)
+                .is_some_and(|(was_review_requested, _)| *was_review_requested);
+        if attention_unread {
+            next_unread_count += 1;
+        }
+        if is_new_unread {
+            new_unread_count += 1;
+        }
         sqlx::query(
             r#"
             insert into github_review_request_cache (
                 channel_id, repository_id, review_login, pull_number, title, url,
                 author_login, is_draft, state, github_updated_at,
                 is_review_requested, is_authored, head_sha, checks_status, checks_total,
-                checks_pending, checks_failed, failing_checks_json, review_commits_ahead
+                checks_pending, checks_failed, failing_checks_json, review_commits_ahead,
+                attention_unread
             )
             values (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, $15, $16, $17, $18, $19
+                $14, $15, $16, $17, $18, $19, $20
             )
             "#,
         )
@@ -1255,11 +1371,30 @@ async fn replace_cached_review_requests(
         .bind(snapshot.checks.failed)
         .bind(failing_checks_json)
         .bind(snapshot.review_commits_ahead)
+        .bind(attention_unread)
         .execute(&mut *transaction)
         .await
         .map_err(to_string)?;
     }
-    transaction.commit().await.map_err(to_string)
+    if !full_queue_sync || previous_unread_count != next_unread_count {
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::Refresh {
+                reason: if previous_unread_count != next_unread_count {
+                    "github_review_attention_changed"
+                } else {
+                    "github_review_attention_synced"
+                },
+            },
+        )
+        .await?;
+    }
+    transaction.commit().await.map_err(to_string)?;
+    Ok(GithubReviewAttentionCacheUpdate {
+        new_unread_count,
+        unread_count: next_unread_count,
+        baseline_established: !attention_initialized,
+    })
 }
 
 async fn replace_cached_issues(
@@ -1467,6 +1602,115 @@ pub(crate) async fn load_cached_github_channel_overview(
     })
 }
 
+pub(crate) async fn refresh_github_review_attention(
+    pool: &SqlitePool,
+    channel_id: Uuid,
+) -> CommandResult<GithubReviewAttentionRefreshResult> {
+    let binding = load_github_binding(pool, channel_id)
+        .await?
+        .ok_or_else(|| "channel has no GitHub repository binding".to_owned())?;
+    let current_requests = search_review_requests(&binding).await?;
+    let mut cached_requests = load_cached_review_requests(pool, &binding)
+        .await?
+        .into_iter()
+        .map(|snapshot| (snapshot.pull_request.number, snapshot))
+        .collect::<HashMap<_, _>>();
+    let links = load_resource_links(
+        pool,
+        binding.channel_id,
+        &binding.repository_id,
+        PULL_REQUEST_RESOURCE_KIND,
+    )
+    .await?;
+    let mut requests = Vec::with_capacity(current_requests.len() + cached_requests.len());
+    for pull_request in current_requests {
+        let previous = cached_requests.remove(&pull_request.number);
+        let same_head = previous.as_ref().is_some_and(|snapshot| {
+            snapshot.pull_request.head_ref_oid == pull_request.head_ref_oid
+        });
+        let review_commits_ahead = same_head
+            .then(|| {
+                previous
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.review_commits_ahead)
+            })
+            .flatten();
+        let is_authored = previous
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.is_authored);
+        let checks = summarize_checks(&pull_request.status_check_rollup);
+        requests.push(GithubPullRequestSnapshot {
+            pull_request,
+            checks,
+            is_review_requested: true,
+            is_authored,
+            review_commits_ahead,
+        });
+    }
+    requests.extend(cached_requests.into_values().filter_map(|mut snapshot| {
+        let keep = snapshot.is_authored || links.contains_key(&snapshot.pull_request.number);
+        if !keep {
+            return None;
+        }
+        snapshot.is_review_requested = false;
+        Some(snapshot)
+    }));
+    requests.sort_by(|left, right| {
+        right
+            .pull_request
+            .updated_at
+            .cmp(&left.pull_request.updated_at)
+            .then_with(|| right.pull_request.number.cmp(&left.pull_request.number))
+    });
+    let review_request_count = requests
+        .iter()
+        .filter(|request| request.is_review_requested)
+        .count();
+    let update =
+        replace_cached_review_requests(pool, &binding, &binding.account_login, &requests, false)
+            .await?;
+    Ok(GithubReviewAttentionRefreshResult {
+        channel_id,
+        repository: binding.name_with_owner,
+        review_login: binding.review_login,
+        review_request_count,
+        new_unread_count: update.new_unread_count,
+        unread_count: update.unread_count,
+        baseline_established: update.baseline_established,
+    })
+}
+
+pub(crate) async fn mark_github_review_attention_read(
+    pool: &SqlitePool,
+    channel_id: Uuid,
+) -> CommandResult<()> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
+    let update = sqlx::query(
+        r#"
+        update github_review_request_cache
+        set attention_unread = 0
+        where channel_id = $1 and attention_unread
+        "#,
+    )
+    .bind(channel_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(to_string)?;
+    if update.rows_affected() > 0 {
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::Refresh {
+                reason: "github_review_attention_read",
+            },
+        )
+        .await?;
+    }
+    transaction.commit().await.map_err(to_string)
+}
+
 pub(crate) async fn refresh_github_channel_overview(
     pool: &SqlitePool,
     channel_id: Uuid,
@@ -1490,7 +1734,7 @@ pub(crate) async fn refresh_github_channel_overview(
         merge_pull_request_snapshots(review_requests, authored_pull_requests),
     )
     .await?;
-    replace_cached_review_requests(pool, &binding, &account.login, &requests).await?;
+    replace_cached_review_requests(pool, &binding, &account.login, &requests, true).await?;
     let binding = load_github_binding(pool, channel_id)
         .await?
         .ok_or_else(|| "GitHub repository binding changed while refreshing".to_owned())?;
@@ -2236,13 +2480,14 @@ mod tests {
     use super::{
         complete_closed_github_review_tasks, create_github_issue_task_record,
         create_github_review_task_record, load_cached_github_channel_overview, load_resource_links,
-        merge_issue_snapshots, merge_pull_request_snapshots, parse_issues, parse_review_requests,
-        replace_cached_issues, replace_cached_review_requests, rereview_github_review_task_record,
-        summarize_checks, GithubActorCli, GithubCheckSummary, GithubIssueDetailCli,
-        GithubIssueSnapshot, GithubLabel, GithubPullRequestCli, GithubPullRequestDetail,
-        GithubPullRequestSnapshot, GithubRepositoryBinding, GithubStatusCheckCli,
-        PULL_REQUEST_RESOURCE_KIND,
+        mark_github_review_attention_read, merge_issue_snapshots, merge_pull_request_snapshots,
+        parse_issues, parse_review_requests, replace_cached_issues, replace_cached_review_requests,
+        rereview_github_review_task_record, summarize_checks, GithubActorCli, GithubCheckSummary,
+        GithubIssueDetailCli, GithubIssueSnapshot, GithubLabel, GithubPullRequestCli,
+        GithubPullRequestDetail, GithubPullRequestSnapshot, GithubRepositoryBinding,
+        GithubStatusCheckCli, PULL_REQUEST_RESOURCE_KIND,
     };
+    use crate::channels::load_channels;
     use crate::test_support::{
         drop_test_schema, insert_test_agent, insert_test_channel, test_pool,
     };
@@ -2655,7 +2900,12 @@ mod tests {
                     review_commits_ahead: None,
                 },
             ];
-            replace_cached_review_requests(&pool, &binding, "next-owner", &first_snapshot).await?;
+            let baseline_update =
+                replace_cached_review_requests(&pool, &binding, "next-owner", &first_snapshot, true)
+                    .await?;
+            assert!(baseline_update.baseline_established);
+            assert_eq!(baseline_update.new_unread_count, 0);
+            assert_eq!(baseline_update.unread_count, 0);
 
             let first = load_cached_github_channel_overview(&pool, channel_id).await?;
             assert_eq!(first.account.login, "next-owner");
@@ -2667,6 +2917,62 @@ mod tests {
                     .binding
                     .as_ref()
                     .and_then(|binding| binding.review_queue_synced_at.as_ref())
+                    .is_some()
+            );
+            let baseline_unread: i64 = sqlx::query_scalar(
+                r#"
+                select count(*)
+                from github_review_request_cache
+                where channel_id = $1 and attention_unread
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(baseline_unread, 0);
+
+            sqlx::query(
+                r#"
+                update channel_github_repositories
+                set review_queue_synced_at = '2026-07-27T00:00:00+00:00',
+                    review_attention_synced_at = null
+                where channel_id = $1
+                "#,
+            )
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let lightweight_update = replace_cached_review_requests(
+                &pool,
+                &binding,
+                "next-owner",
+                &first_snapshot,
+                false,
+            )
+            .await?;
+            assert!(!lightweight_update.baseline_established);
+            assert_eq!(lightweight_update.new_unread_count, 0);
+            assert_eq!(lightweight_update.unread_count, 0);
+            let sync_timestamps = sqlx::query(
+                r#"
+                select review_queue_synced_at, review_attention_synced_at
+                from channel_github_repositories
+                where channel_id = $1
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(
+                sync_timestamps.get::<Option<String>, _>("review_queue_synced_at"),
+                Some("2026-07-27T00:00:00+00:00".to_owned())
+            );
+            assert!(
+                sync_timestamps
+                    .get::<Option<String>, _>("review_attention_synced_at")
                     .is_some()
             );
 
@@ -2695,7 +3001,8 @@ mod tests {
                 is_authored: false,
                 review_commits_ahead: None,
             }];
-            replace_cached_review_requests(&pool, &binding, "next-owner", &second_snapshot).await?;
+            replace_cached_review_requests(&pool, &binding, "next-owner", &second_snapshot, true)
+                .await?;
 
             let second = load_cached_github_channel_overview(&pool, channel_id).await?;
             assert_eq!(second.review_requests.len(), 1);
@@ -2704,6 +3011,88 @@ mod tests {
             assert_eq!(second.review_requests[0].head_sha, "head-42-next");
             assert_eq!(second.review_requests[0].checks.status, "success");
             assert_eq!(second.review_requests[0].checks.total, 4);
+
+            let mut new_request_snapshot = second_snapshot.clone();
+            new_request_snapshot.push(GithubPullRequestSnapshot {
+                pull_request: GithubPullRequestCli {
+                    number: 44,
+                    title: "New review request".to_owned(),
+                    url: "https://github.com/acme/stream/pull/44".to_owned(),
+                    author: Some(GithubActorCli {
+                        login: "new-author".to_owned(),
+                    }),
+                    is_draft: false,
+                    state: "open".to_owned(),
+                    updated_at: "2026-07-27T07:00:00Z".to_owned(),
+                    head_ref_oid: "head-44".to_owned(),
+                    status_check_rollup: Vec::new(),
+                },
+                checks: GithubCheckSummary::default(),
+                is_review_requested: true,
+                is_authored: false,
+                review_commits_ahead: None,
+            });
+            let new_request_update = replace_cached_review_requests(
+                &pool,
+                &binding,
+                "next-owner",
+                &new_request_snapshot,
+                true,
+            )
+            .await?;
+            assert_eq!(new_request_update.new_unread_count, 1);
+            assert_eq!(new_request_update.unread_count, 1);
+            // Refreshing the same active request must not increment the badge.
+            let repeated_request_update = replace_cached_review_requests(
+                &pool,
+                &binding,
+                "next-owner",
+                &new_request_snapshot,
+                true,
+            )
+            .await?;
+            assert_eq!(repeated_request_update.new_unread_count, 0);
+            assert_eq!(repeated_request_update.unread_count, 1);
+            let unread_after_new_request: i64 = sqlx::query_scalar(
+                r#"
+                select count(*)
+                from github_review_request_cache
+                where channel_id = $1 and attention_unread
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(unread_after_new_request, 1);
+
+            mark_github_review_attention_read(&pool, channel_id).await?;
+            let channels = load_channels(&pool).await?;
+            let channel = channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .ok_or_else(|| "missing GitHub cache test channel".to_owned())?;
+            assert_eq!(channel.github_unread_count, 0);
+
+            // Once a request leaves the queue, a later re-request is unread again.
+            replace_cached_review_requests(&pool, &binding, "next-owner", &second_snapshot, true)
+                .await?;
+            let rerequest_update = replace_cached_review_requests(
+                &pool,
+                &binding,
+                "next-owner",
+                &new_request_snapshot,
+                true,
+            )
+            .await?;
+            assert_eq!(rerequest_update.new_unread_count, 1);
+            assert_eq!(rerequest_update.unread_count, 1);
+            let channels = load_channels(&pool).await?;
+            let channel = channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .ok_or_else(|| "missing GitHub cache test channel".to_owned())?;
+            assert_eq!(channel.github_unread_count, 1);
             Ok(())
         }
         .await;

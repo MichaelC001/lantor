@@ -193,6 +193,11 @@ export function GithubPanel({
   const [issueDetailError, setIssueDetailError] = useState<string | null>(null);
   const requestEpochRef = useRef(0);
   const detailRequestEpochRef = useRef(0);
+  const attentionSnapshotRef = useRef({
+    channelId: channel.id,
+    count: channel.github_unread_count,
+    syncedAt: channel.github_review_synced_at,
+  });
 
   const refreshOverview = useCallback(async (resource: GithubResource) => {
     const requestEpoch = requestEpochRef.current + 1;
@@ -250,6 +255,29 @@ export function GithubPanel({
       requestEpochRef.current += 1;
     };
   }, [loadOverview]);
+
+  useEffect(() => {
+    const previous = attentionSnapshotRef.current;
+    attentionSnapshotRef.current = {
+      channelId: channel.id,
+      count: channel.github_unread_count,
+      syncedAt: channel.github_review_synced_at,
+    };
+    if (previous.channelId !== channel.id) return;
+    const hasNewAttention = channel.github_unread_count > previous.count;
+    const hasNewSync = Boolean(
+      channel.github_review_synced_at
+      && channel.github_review_synced_at !== previous.syncedAt,
+    );
+    if (!hasNewAttention && !hasNewSync) return;
+    githubOverviewCache.delete(channel.id);
+    void loadOverview();
+  }, [
+    channel.github_review_synced_at,
+    channel.github_unread_count,
+    channel.id,
+    loadOverview,
+  ]);
 
   function openBindingModal() {
     setRepositoryDraft(overview?.binding?.name_with_owner ?? "");

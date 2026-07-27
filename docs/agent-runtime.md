@@ -29,9 +29,10 @@ stdout and stderr are preserved only in the run log.
 
 ## Context Tools
 
-The supervisor injects `LANTOR_CONTEXT_TOOL` for read-only context access.
-Agents use it to inspect the current workspace, recover after restart, and
-process inbox wakeups.
+The supervisor injects `LANTOR_CONTEXT_TOOL` for context access and narrow
+agent-triggered Lantor actions. Agents use it to inspect the current workspace,
+recover after restart, process inbox wakeups, and invoke explicit automation
+requested by the user or a reminder.
 
 ```bash
 "$LANTOR_CONTEXT_TOOL" --agent-context-tool inbox-list --state active --limit 20
@@ -43,6 +44,7 @@ process inbox wakeups.
 "$LANTOR_CONTEXT_TOOL" --agent-context-tool run-read --run-id "<uuid-or-prefix>"
 "$LANTOR_CONTEXT_TOOL" --agent-context-tool history-read --target "#channel[:thread_id]" --limit 20
 "$LANTOR_CONTEXT_TOOL" --agent-context-tool message-search --query "<text>" --target "#channel" --limit 20
+"$LANTOR_CONTEXT_TOOL" --agent-context-tool github sync --channel "#channel"
 "$LANTOR_CONTEXT_TOOL" --agent-context-tool attachment-info --attachment-id "<uuid>"
 "$LANTOR_CONTEXT_TOOL" --agent-context-tool artifact-read --artifact-id "<uuid>"
 "$LANTOR_CONTEXT_TOOL" --agent-context-tool agent-inspect --target "@handle"
@@ -50,6 +52,9 @@ process inbox wakeups.
 
 Inbox, workspace, and memory commands default to the current agent. Use
 `--target "@handle"` only when inspecting another visible agent.
+`github sync` reads the bound repository's current review requests, updates the
+channel's cached review queue and badge, and returns a compact JSON result. It
+does not write to GitHub.
 
 ## Agent Memory
 

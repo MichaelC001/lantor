@@ -39,6 +39,15 @@ pub(crate) async fn refresh_github_issue_queue(
 }
 
 #[tauri::command]
+pub(crate) async fn mark_github_review_attention_read(
+    channel_id: Uuid,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    application::mark_github_review_attention_read(&state.pool, GithubChannelRequest { channel_id })
+        .await
+}
+
+#[tauri::command]
 pub(crate) async fn load_github_issue_detail(
     channel_id: Uuid,
     issue_number: i64,

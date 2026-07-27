@@ -90,7 +90,19 @@ pub(crate) async fn load_channels(pool: &SqlitePool) -> CommandResult<Vec<Channe
                       select 1 from artifacts ar where ar.message_id = m.id
                     )
                   )
-            ) as integer) as unread_count
+            ) as integer) as unread_count,
+            cast((
+                select count(*)
+                from github_review_request_cache review_attention
+                where review_attention.channel_id = c.id
+                  and review_attention.is_review_requested
+                  and review_attention.attention_unread
+            ) as integer) as github_unread_count,
+            (
+                select review_attention_synced_at
+                from channel_github_repositories github_binding
+                where github_binding.channel_id = c.id
+            ) as github_review_synced_at
         from channels c
         left join channel_read_state r on r.channel_id = c.id
         left join messages m on m.channel_id = c.id
@@ -117,6 +129,8 @@ pub(crate) async fn load_channels(pool: &SqlitePool) -> CommandResult<Vec<Channe
             kind: row.get("kind"),
             dm_agent_id: row.get("dm_agent_id"),
             unread_count: row.get("unread_count"),
+            github_unread_count: row.get("github_unread_count"),
+            github_review_synced_at: row.get("github_review_synced_at"),
         })
         .collect())
 }

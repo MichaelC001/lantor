@@ -2783,6 +2783,10 @@ function App() {
     if (!activeChannelId) return 0;
     return data?.channels.find((item) => item.id === activeChannelId)?.unread_count ?? 0;
   }, [data?.channels, activeChannelId]);
+  const activeGithubUnreadCount = useMemo(() => {
+    if (!activeChannelId) return 0;
+    return data?.channels.find((item) => item.id === activeChannelId)?.github_unread_count ?? 0;
+  }, [data?.channels, activeChannelId]);
 
   const activeRunFor = useCallback((agentId: string) => {
     return data?.agent_runs.find((run) => run.agent_id === agentId && ACTIVE_RUN_STATUSES.has(run.status)) ?? null;
@@ -3053,6 +3057,19 @@ function App() {
     apiInvoke("mark_channel_read", { channelId: activeChannelId }).catch((err) => console.error(err));
   }, [activeChannelId, activeChannelExists, activeChannelMessageCount, activeChannelUnreadCount]);
 
+  useEffect(() => {
+    if (
+      activeTab !== "github"
+      || !activeChannelId
+      || !activeChannelExists
+      || activeGithubUnreadCount <= 0
+    ) {
+      return;
+    }
+    apiInvoke("mark_github_review_attention_read", { channelId: activeChannelId })
+      .catch((err) => console.error(err));
+  }, [activeChannelId, activeChannelExists, activeGithubUnreadCount, activeTab]);
+
   async function createChannel() {
     if (createChannelSubmittingRef.current) return;
     const name = normalizedChannelNameInput(newChannel);
@@ -3103,6 +3120,8 @@ function App() {
         kind: "channel",
         dm_agent_id: null,
         unread_count: 0,
+        github_unread_count: 0,
+        github_review_synced_at: null,
       };
       // Track it so any in-flight/subsequent `refresh()` re-merges the channel
       // instead of clobbering it back to the old list (and fallback-navigating

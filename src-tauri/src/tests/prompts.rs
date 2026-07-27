@@ -49,6 +49,7 @@ fn runtime_standing_prompt_excludes_memory_snapshot() {
     assert!(prompt.contains("Reply briefly to direct greetings"));
     assert!(prompt.contains("Agent context tools"));
     assert!(prompt.contains("inbox-list"));
+    assert!(prompt.contains("github sync --channel"));
     assert!(prompt.contains("[target=... msg=... time=... type=...]"));
     assert!(prompt.contains("Live inbox delivery"));
     assert!(!prompt.contains("Lantor durable memory snapshot"));

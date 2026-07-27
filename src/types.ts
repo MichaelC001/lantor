@@ -56,6 +56,8 @@ export type Channel = {
   kind: "channel" | "dm";
   dm_agent_id: string | null;
   unread_count: number;
+  github_unread_count: number;
+  github_review_synced_at: string | null;
 };
 
 export type ThreadActivity = {

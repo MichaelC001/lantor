@@ -29,6 +29,8 @@ function channel(id: string, overrides: Partial<Channel> = {}): Channel {
     kind: "channel",
     dm_agent_id: null,
     unread_count: 0,
+    github_unread_count: 0,
+    github_review_synced_at: null,
     ...overrides,
   };
 }

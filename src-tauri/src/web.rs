@@ -225,6 +225,10 @@ fn web_router(state: Arc<WebState>, dist_dir: PathBuf) -> Router {
             post(api_refresh_github_issue_queue),
         )
         .route(
+            "/api/mark_github_review_attention_read",
+            post(api_mark_github_review_attention_read),
+        )
+        .route(
             "/api/load_github_issue_detail",
             post(api_load_github_issue_detail),
         )
@@ -477,6 +481,16 @@ async fn api_refresh_github_issue_queue(
     github_commands::refresh_github_issue_queue(&state.pool, request)
         .await
         .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_mark_github_review_attention_read(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<GithubChannelRequest>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::mark_github_review_attention_read(&state.pool, request)
+        .await
+        .map(|_| Json(json!({ "ok": true })))
         .map_err(api_error)
 }
 

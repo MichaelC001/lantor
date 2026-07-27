@@ -42,6 +42,7 @@ import { MessageArtifacts } from "./MessageArtifacts";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageReferencePreview, type MessageReferencePreviewItem } from "./MessageReferencePreview";
 import { TaskAssigneePicker } from "./TaskAssigneePicker";
+import { UnreadBadge } from "./UnreadBadge";
 
 type WritingSuggestionsTextareaAttrs = TextareaHTMLAttributes<HTMLTextAreaElement> & { "writingsuggestions": "false" };
 
@@ -1008,8 +1009,18 @@ export function Conversation({
             <button className={activeTab === "tasks" ? "active" : ""} onClick={() => setActiveTab("tasks")}>
               <LayoutList size={16} /> Tasks
             </button>
-            <button className={activeTab === "github" ? "active" : ""} onClick={() => setActiveTab("github")}>
-              <Github size={16} /> GitHub
+            <button
+              className={`${activeTab === "github" ? "active" : ""} ${channel?.github_unread_count ? "has-unread" : ""}`}
+              onClick={() => setActiveTab("github")}
+            >
+              <Github size={16} />
+              GitHub
+              {Boolean(channel?.github_unread_count) && (
+                <UnreadBadge
+                  value={channel?.github_unread_count ?? 0}
+                  className="tab-unread-badge"
+                />
+              )}
             </button>
           </>
         )}

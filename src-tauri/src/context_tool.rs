@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::agent_routing::resolve_agent_by_handle;
 use crate::db::db_connect;
 use crate::freshness::advance_agent_target_watermark;
+use crate::github::{refresh_github_review_attention, GithubReviewAttentionRefreshResult};
 use crate::message_store::load_artifact;
 use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
 use crate::{
@@ -1683,10 +1684,39 @@ pub(crate) async fn agent_context_inbox_archive(
     ))
 }
 
+fn render_agent_context_github_sync(
+    channel_label: &str,
+    result: &GithubReviewAttentionRefreshResult,
+) -> CommandResult<String> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "channel": channel_label,
+        "channel_id": result.channel_id,
+        "repository": result.repository,
+        "review_login": result.review_login,
+        "review_requests": result.review_request_count,
+        "new_unread": result.new_unread_count,
+        "unread": result.unread_count,
+        "baseline_established": result.baseline_established,
+    }))
+    .map_err(to_string)
+}
+
+pub(crate) async fn agent_context_github_sync(
+    pool: &SqlitePool,
+    args: &[String],
+) -> CommandResult<String> {
+    let channel = arg_value(args, "--channel")
+        .or_else(|| arg_value(args, "--target"))
+        .ok_or_else(|| "github sync requires --channel \"#channel\"".to_owned())?;
+    let (channel_id, channel_label) = resolve_agent_context_channel(pool, &channel).await?;
+    let result = refresh_github_review_attention(pool, channel_id).await?;
+    render_agent_context_github_sync(&channel_label, &result)
+}
+
 pub(crate) async fn run_agent_context_tool(args: &[String]) -> CommandResult<String> {
     if args.is_empty() || has_arg(args, "--help") || has_arg(args, "-h") {
         return Ok(
-            "Lantor agent context tool\n\nCommands:\n  inbox-list [--state active|unread|processing|archived|all] [--limit 20]\n  inbox-read --inbox-id <uuid-or-prefix>\n  inbox-archive --inbox-id <uuid-or-prefix>\n  workspace-info [--target @handle]\n  workspace-list [--target @handle] [--max-depth 2] [--limit 80]\n  memory-read [--target @handle] [--limit 16000]\n  run-read --run-id <uuid-or-prefix> [--target @handle] [--limit 8] [--log-limit 8000]\n  history-read --target \"#channel[:thread]\" [--limit 30]\n  message-search --query <text> [--target \"#channel\"] [--limit 30]\n  attachment-info --attachment-id <uuid>\n  artifact-read --artifact-id <uuid>\n  agent-inspect --target @handle\n\nTargets may be #channel, #channel:<message-id-prefix>, dm:@agent, channel UUID, or channel UUID:<message-id-prefix>. Inbox, run, workspace, and memory commands default to the current LANTOR_AGENT_ID when invoked by an agent."
+            "Lantor agent context tool\n\nCommands:\n  inbox-list [--state active|unread|processing|archived|all] [--limit 20]\n  inbox-read --inbox-id <uuid-or-prefix>\n  inbox-archive --inbox-id <uuid-or-prefix>\n  workspace-info [--target @handle]\n  workspace-list [--target @handle] [--max-depth 2] [--limit 80]\n  memory-read [--target @handle] [--limit 16000]\n  run-read --run-id <uuid-or-prefix> [--target @handle] [--limit 8] [--log-limit 8000]\n  history-read --target \"#channel[:thread]\" [--limit 30]\n  message-search --query <text> [--target \"#channel\"] [--limit 30]\n  github sync --channel \"#channel\"\n  attachment-info --attachment-id <uuid>\n  artifact-read --artifact-id <uuid>\n  agent-inspect --target @handle\n\nTargets may be #channel, #channel:<message-id-prefix>, dm:@agent, channel UUID, or channel UUID:<message-id-prefix>. Inbox, run, workspace, and memory commands default to the current LANTOR_AGENT_ID when invoked by an agent."
                 .to_owned(),
         );
     }
@@ -1710,6 +1740,14 @@ pub(crate) async fn run_agent_context_tool(args: &[String]) -> CommandResult<Str
         "message-search" | "search-messages" | "search" => {
             agent_context_message_search(&pool, args).await
         }
+        "github-sync" | "github-fetch" | "sync-github" => {
+            agent_context_github_sync(&pool, args).await
+        }
+        "github" => match args.get(1).map(String::as_str) {
+            Some("sync" | "fetch") => agent_context_github_sync(&pool, &args[1..]).await,
+            Some(other) => Err(format!("unknown GitHub command: {other}")),
+            None => Err("github requires a subcommand; available: sync".to_owned()),
+        },
         "attachment-info" | "attachment" | "attachment-view" => {
             agent_context_attachment_info(&pool, args).await
         }

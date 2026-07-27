@@ -65,8 +65,8 @@ use commands::{
     },
     github::{
         bind_github_repository, create_github_issue_task, create_github_review_task,
-        load_github_issue_detail, load_github_review_queue, refresh_github_issue_queue,
-        refresh_github_review_queue, rereview_github_pull_request,
+        load_github_issue_detail, load_github_review_queue, mark_github_review_attention_read,
+        refresh_github_issue_queue, refresh_github_review_queue, rereview_github_pull_request,
     },
     inbox::{
         dismiss_inbox_items, mark_all_inbox_read, mark_channel_read, mark_inbox_items_read,
@@ -306,6 +306,7 @@ pub fn run() {
             mark_inbox_items_read,
             mark_all_inbox_read,
             mark_channel_read,
+            mark_github_review_attention_read,
             open_dm_with_agent,
             complete_startup_splash,
             download_attachment,
