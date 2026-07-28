@@ -4956,6 +4956,8 @@ mark {
   padding: 18px;
   overflow: auto;
   background: var(--task-board-bg);
+  container-type: inline-size;
+  container-name: github-panel;
 }
 
 .github-panel-loading {
@@ -5094,6 +5096,7 @@ mark {
 
 .github-pull-main {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   gap: 6px;
 }
@@ -5502,6 +5505,7 @@ mark {
 
 .github-issue-main {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   gap: 6px;
 }
@@ -5578,6 +5582,43 @@ mark {
   margin: 0;
   color: var(--muted);
   font-size: var(--type-size-meta);
+}
+
+/* Narrow-column layout keyed to the panel's own width (container query), not
+   the viewport: on desktop an open thread panel can squeeze the GitHub tab to
+   ~450px while viewport media queries still apply the wide two-column cards. */
+@container github-panel (max-width: 620px) {
+  .github-panel-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .github-issue-controls {
+    display: grid;
+    gap: 8px;
+  }
+
+  .github-issue-search {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .github-pull-card,
+  .github-issue-card {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .github-pull-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    justify-content: stretch;
+  }
+
+  .github-linked-task {
+    text-align: left;
+  }
 }
 
 .github-issue-drawer-backdrop {
