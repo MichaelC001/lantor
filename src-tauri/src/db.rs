@@ -4,10 +4,12 @@ use std::{env, fs, path::PathBuf, time::Duration};
 use std::os::fd::AsRawFd;
 use std::str::FromStr;
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     Row, SqlitePool,
 };
+use uuid::Uuid;
 
 use crate::app::{to_string, CommandResult};
 use crate::usage::backfill_agent_run_usage_from_logs;
@@ -160,6 +162,108 @@ async fn ensure_integer_column(
     definition: &str,
 ) -> Result<(), sqlx::Error> {
     ensure_column(pool, table, column, definition).await
+}
+
+fn next_recurring_due_after(
+    anchor_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    recurrence: &str,
+) -> Option<DateTime<Utc>> {
+    if anchor_at > now {
+        return Some(anchor_at);
+    }
+    let interval_days = match recurrence {
+        "daily" => 1,
+        "weekly" => 7,
+        _ => return None,
+    };
+    let elapsed_days = now.signed_duration_since(anchor_at).num_days();
+    let elapsed_intervals = elapsed_days / interval_days;
+    anchor_at.checked_add_signed(ChronoDuration::days(
+        (elapsed_intervals + 1) * interval_days,
+    ))
+}
+
+async fn backfill_reminder_recurrence_anchors(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    let rows = sqlx::query(
+        r#"
+        select
+            r.id,
+            r.status,
+            r.recurrence,
+            r.due_at,
+            coalesce(
+                (
+                    select e.detail
+                    from reminder_events e
+                    where e.reminder_id = r.id
+                      and e.event_type = 'created'
+                      and julianday(e.detail) is not null
+                    order by e.created_at asc, e.rowid asc
+                    limit 1
+                ),
+                r.due_at
+            ) as anchor_at,
+            (
+                select e.event_type
+                from reminder_events e
+                where e.reminder_id = r.id
+                order by e.created_at desc, e.rowid desc
+                limit 1
+            ) as latest_event_type
+        from reminders r
+        where r.recurrence_anchor_at is null
+        "#,
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    let now = Utc::now();
+    for row in rows {
+        let reminder_id: Uuid = row.get("id");
+        let status: String = row.get("status");
+        let recurrence: String = row.get("recurrence");
+        let due_at: String = row.get("due_at");
+        let anchor_at: String = row.get("anchor_at");
+        let latest_event_type: Option<String> = row.get("latest_event_type");
+        let repaired_due_at = if status == "scheduled"
+            && matches!(recurrence.as_str(), "daily" | "weekly")
+            && latest_event_type.as_deref() != Some("snoozed")
+        {
+            let parsed_due_at = DateTime::parse_from_rfc3339(&due_at)
+                .ok()
+                .map(|value| value.with_timezone(&Utc));
+            let parsed_anchor_at = DateTime::parse_from_rfc3339(&anchor_at)
+                .ok()
+                .map(|value| value.with_timezone(&Utc));
+            match (parsed_due_at, parsed_anchor_at) {
+                (Some(parsed_due_at), Some(parsed_anchor_at)) if parsed_due_at > now => {
+                    next_recurring_due_after(parsed_anchor_at, now, &recurrence)
+                        .map(|value| value.to_rfc3339())
+                        .unwrap_or_else(|| due_at.clone())
+                }
+                _ => due_at.clone(),
+            }
+        } else {
+            due_at.clone()
+        };
+        sqlx::query(
+            r#"
+            update reminders
+            set recurrence_anchor_at = $2,
+                due_at = $3
+            where id = $1
+              and recurrence_anchor_at is null
+            "#,
+        )
+        .bind(reminder_id)
+        .bind(anchor_at)
+        .bind(repaired_due_at)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
 }
 
 pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -372,6 +476,7 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             note text not null default '',
             status text not null default 'scheduled',
             recurrence text not null default 'none',
+            recurrence_anchor_at text,
             due_at text not null,
             fired_at text,
             completed_at text,
@@ -726,6 +831,8 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "integer not null default 0",
     )
     .await?;
+    ensure_text_column(pool, "reminders", "recurrence_anchor_at", "text").await?;
+    backfill_reminder_recurrence_anchors(pool).await?;
 
     sqlx::query(
         r#"
@@ -830,7 +937,9 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{acquire_supervisor_lock, sqlite_database_file_path};
+    use super::{
+        acquire_supervisor_lock, backfill_reminder_recurrence_anchors, sqlite_database_file_path,
+    };
     use crate::test_support::{drop_test_schema, insert_test_channel, test_pool};
 
     #[test]
@@ -853,6 +962,178 @@ mod tests {
     fn supervisor_lock_skips_memory_database() {
         let lock = acquire_supervisor_lock("sqlite::memory:").expect("memory DB lock check");
         assert!(lock.is_none());
+    }
+
+    #[tokio::test]
+    async fn recurring_reminder_anchor_backfill_repairs_drift_without_losing_pending_work() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let channel_id = insert_test_channel(&pool, "reminder-anchor-backfill").await?;
+            let drifted_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into reminders (
+                    channel_id, title, due_at, recurrence, status
+                )
+                values (
+                    $1,
+                    'Drifted daily reminder',
+                    strftime('%Y-%m-%dT12:14:40.000+00:00','now','+1 day'),
+                    'daily',
+                    'scheduled'
+                )
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into reminder_events (reminder_id, event_type, detail)
+                values (
+                    $1,
+                    'created',
+                    strftime('%Y-%m-%dT01:00:00.000+00:00','now','-3 days')
+                )
+                "#,
+            )
+            .bind(drifted_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let overdue_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into reminders (
+                    channel_id, title, due_at, recurrence, status
+                )
+                values (
+                    $1,
+                    'Overdue daily reminder',
+                    strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 minute'),
+                    'daily',
+                    'scheduled'
+                )
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into reminder_events (reminder_id, event_type, detail)
+                values (
+                    $1,
+                    'created',
+                    strftime('%Y-%m-%dT03:00:00.000+00:00','now','-3 days')
+                )
+                "#,
+            )
+            .bind(overdue_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let overdue_before: String =
+                sqlx::query_scalar("select due_at from reminders where id = $1")
+                    .bind(overdue_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+
+            let snoozed_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into reminders (
+                    channel_id, title, due_at, recurrence, status
+                )
+                values (
+                    $1,
+                    'Snoozed daily reminder',
+                    strftime('%Y-%m-%dT12:30:00.000+00:00','now','+1 day'),
+                    'daily',
+                    'scheduled'
+                )
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                r#"
+                insert into reminder_events (reminder_id, event_type, detail)
+                values
+                    (
+                        $1,
+                        'created',
+                        strftime('%Y-%m-%dT04:00:00.000+00:00','now','-3 days')
+                    ),
+                    ($1, 'snoozed', '60 minutes')
+                "#,
+            )
+            .bind(snoozed_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let snoozed_before: String =
+                sqlx::query_scalar("select due_at from reminders where id = $1")
+                    .bind(snoozed_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+
+            backfill_reminder_recurrence_anchors(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            backfill_reminder_recurrence_anchors(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+
+            let (drifted_anchor, drifted_due): (String, String) =
+                sqlx::query_as("select recurrence_anchor_at, due_at from reminders where id = $1")
+                    .bind(drifted_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert!(drifted_anchor.contains("T01:00:00"));
+            assert!(
+                drifted_due.contains("T01:00:00"),
+                "drifted reminder should return to its original wall-clock time: {drifted_due}"
+            );
+            let now: String =
+                sqlx::query_scalar("select strftime('%Y-%m-%dT%H:%M:%f+00:00','now')")
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert!(drifted_due > now);
+
+            let (overdue_anchor, overdue_after): (String, String) =
+                sqlx::query_as("select recurrence_anchor_at, due_at from reminders where id = $1")
+                    .bind(overdue_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert!(overdue_anchor.contains("T03:00:00"));
+            assert_eq!(overdue_after, overdue_before);
+
+            let (snoozed_anchor, snoozed_after): (String, String) =
+                sqlx::query_as("select recurrence_anchor_at, due_at from reminders where id = $1")
+                    .bind(snoozed_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert!(snoozed_anchor.contains("T04:00:00"));
+            assert_eq!(snoozed_after, snoozed_before);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
     }
 
     #[tokio::test]

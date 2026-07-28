@@ -25,10 +25,38 @@ pub(super) async fn process_due_reminders(pool: &SqlitePool) -> CommandResult<()
             -- the processing time, so late processing (sleep, app closed)
             -- does not permanently drift the schedule. Skips missed periods.
             due_at = case
-                when recurrence = 'daily' then strftime('%Y-%m-%dT%H:%M:%f+00:00', due_at,
-                    '+' || (cast(julianday('now') - julianday(due_at) as integer) + 1) || ' days')
-                when recurrence = 'weekly' then strftime('%Y-%m-%dT%H:%M:%f+00:00', due_at,
-                    '+' || ((cast((julianday('now') - julianday(due_at)) / 7 as integer) + 1) * 7) || ' days')
+                when recurrence = 'daily' then
+                    case
+                        when julianday(coalesce(recurrence_anchor_at, due_at)) > julianday('now')
+                            then coalesce(recurrence_anchor_at, due_at)
+                        else strftime('%Y-%m-%dT%H:%M:%f+00:00',
+                            coalesce(recurrence_anchor_at, due_at),
+                            '+' || (
+                                cast(
+                                    julianday('now')
+                                        - julianday(coalesce(recurrence_anchor_at, due_at))
+                                    as integer
+                                ) + 1
+                            ) || ' days')
+                    end
+                when recurrence = 'weekly' then
+                    case
+                        when julianday(coalesce(recurrence_anchor_at, due_at)) > julianday('now')
+                            then coalesce(recurrence_anchor_at, due_at)
+                        else strftime('%Y-%m-%dT%H:%M:%f+00:00',
+                            coalesce(recurrence_anchor_at, due_at),
+                            '+' || (
+                                (
+                                    cast(
+                                        (
+                                            julianday('now')
+                                                - julianday(coalesce(recurrence_anchor_at, due_at))
+                                        ) / 7
+                                        as integer
+                                    ) + 1
+                                ) * 7
+                            ) || ' days')
+                    end
                 else due_at
             end,
             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
@@ -238,9 +266,10 @@ pub(crate) async fn create_reminder_in_pool(
     let reminder_id: Uuid = sqlx::query_scalar(
         r#"
         insert into reminders (
-            channel_id, creator_agent_id, thread_root_id, message_id, title, note, due_at, recurrence, status
+            channel_id, creator_agent_id, thread_root_id, message_id, title, note,
+            due_at, recurrence_anchor_at, recurrence, status
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, 'scheduled')
+        values ($1, $2, $3, $4, $5, $6, $7, $7, $8, 'scheduled')
         returning id
         "#,
     )
@@ -538,8 +567,18 @@ mod tests {
             // keep the original time-of-day and land strictly in the future.
             let reminder_id: Uuid = sqlx::query_scalar(
                 r#"
-                insert into reminders (channel_id, title, note, due_at, recurrence, status)
-                values ($1, 'Daily memory pass', '', strftime('%Y-%m-%dT03:00:00.000+00:00','now','-3 days'), 'daily', 'scheduled')
+                insert into reminders (
+                    channel_id, title, note, due_at, recurrence_anchor_at, recurrence, status
+                )
+                values (
+                    $1,
+                    'Daily memory pass',
+                    '',
+                    strftime('%Y-%m-%dT%H:%M:%f+00:00','now','-1 minute'),
+                    strftime('%Y-%m-%dT03:00:00.000+00:00','now','-3 days'),
+                    'daily',
+                    'scheduled'
+                )
                 returning id
                 "#,
             )
@@ -550,13 +589,12 @@ mod tests {
 
             process_due_reminders(&pool).await?;
 
-            let (status, due_at): (String, String) = sqlx::query_as(
-                "select status, due_at from reminders where id = $1",
-            )
-            .bind(reminder_id)
-            .fetch_one(&pool)
-            .await
-            .map_err(|err| err.to_string())?;
+            let (status, due_at): (String, String) =
+                sqlx::query_as("select status, due_at from reminders where id = $1")
+                    .bind(reminder_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
             assert_eq!(status, "scheduled");
             assert!(
                 due_at.contains("T03:00:00"),
