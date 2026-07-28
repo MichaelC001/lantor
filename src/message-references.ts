@@ -1,3 +1,5 @@
+import type { Message } from "./types";
+
 export type MessageReferenceKind = "message" | "thread";
 
 export type ParsedMessageReference = {
@@ -17,6 +19,13 @@ export type ResolvedMessageReference = MessageReference & {
   message: import("./types").Message | null;
   channel: import("./types").Channel | null;
   replyCount: number | null;
+};
+
+export type MessageReferenceLocation = {
+  channelId: string;
+  threadId: string | null;
+  focusedMessageId: string;
+  showThread: boolean;
 };
 
 export const MESSAGE_REFERENCE_PATTERN = /\[\[(message|thread):([0-9a-fA-F-]{8,36})\]\]/g;
@@ -47,6 +56,21 @@ export function removeMessageReferenceToken(text: string, token: string) {
 
 export function withoutMessageReferenceTokens(text: string) {
   return text.replace(MESSAGE_REFERENCE_PATTERN, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+export function messageReferenceLocation(
+  kind: MessageReferenceKind,
+  message: Message,
+): MessageReferenceLocation {
+  const threadId = kind === "thread"
+    ? message.thread_root_id ?? message.id
+    : message.thread_root_id;
+  return {
+    channelId: message.channel_id,
+    threadId,
+    focusedMessageId: message.id,
+    showThread: threadId !== null,
+  };
 }
 
 export function resolveMessageReference(

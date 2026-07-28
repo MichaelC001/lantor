@@ -292,11 +292,9 @@ export function ThreadPanel({
       onReferenceThreadJump(sourceMessageId, reference.id);
       return;
     }
-    const target = threadMessageById.get(reference.id);
-    if (!target) return;
-    onReferenceMessageJump(sourceMessageId, target.id);
-    targetMessageIntoView(target.id);
-  }, [onReferenceMessageJump, onReferenceThreadJump, threadMessageById]);
+    onReferenceMessageJump(sourceMessageId, reference.id);
+    targetMessageIntoView(reference.id);
+  }, [onReferenceMessageJump, onReferenceThreadJump]);
 
   function renderMessageBody(message: Message) {
     if (!message.body.trim()) return null;

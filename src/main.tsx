@@ -29,6 +29,7 @@ import { ConfirmModal } from "./components/ConfirmModal";
 import { Conversation } from "./components/Conversation";
 import { CreateChannelModal } from "./components/CreateChannelModal";
 import { ActivityFeedModal } from "./components/ActivityFeedModal";
+import { ArtifactViewerModal } from "./components/ArtifactViewerModal";
 import { OwnerProfileModal, ownerProfileToForm, type OwnerProfileForm } from "./components/OwnerProfileModal";
 import { SavedMessagesModal } from "./components/SavedMessagesModal";
 import { SearchModal } from "./components/SearchModal";
@@ -37,6 +38,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ThreadPanel } from "./components/ThreadPanel";
 import { UnreadBadge } from "./components/UnreadBadge";
 import { isProgressOnlyMessage } from "./message-grouping";
+import { messageReferenceLocation, type MessageReferenceKind } from "./message-references";
 import {
   ACTIVE_RUN_STATUSES,
   Agent,
@@ -257,6 +259,12 @@ type ConfirmRequest = {
   body: string;
   confirmLabel: string;
   onConfirm: () => Promise<void> | void;
+};
+
+type ArtifactViewerState = {
+  artifact: Artifact;
+  loading: boolean;
+  error: string | null;
 };
 
 type ActiveTab = "chat" | "tasks" | "github";
@@ -782,6 +790,9 @@ function App() {
   const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null);
   const [appError, setAppError] = useState<string | null>(null);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
+  const [artifactViewer, setArtifactViewer] = useState<ArtifactViewerState | null>(null);
+  const artifactLoadRequestRef = useRef(0);
+  const referenceNavigationRequestRef = useRef(0);
   const [runtimeChecks, setRuntimeChecks] = useState<Record<string, RuntimeCheck>>({});
   const [threadPanelWidth, setThreadPanelWidth] = useState(() => {
     const value = getStoredNumber(
@@ -1593,15 +1604,26 @@ function App() {
   }
 
   async function openArtifact(artifact: Artifact) {
+    const requestId = artifactLoadRequestRef.current + 1;
+    artifactLoadRequestRef.current = requestId;
+    setArtifactViewer({ artifact, loading: true, error: null });
     try {
       const fullArtifact = await apiInvoke("artifact_read", { artifactId: artifact.id });
-      const blob = new Blob([fullArtifact.content], { type: "text/plain;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      window.open(url, "_blank", "noopener,noreferrer");
-      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      if (artifactLoadRequestRef.current !== requestId) return;
+      setArtifactViewer({ artifact: fullArtifact, loading: false, error: null });
     } catch (err) {
-      setAppError(errorMessage(err, "Failed to open artifact"));
+      if (artifactLoadRequestRef.current !== requestId) return;
+      setArtifactViewer({
+        artifact,
+        loading: false,
+        error: errorMessage(err, "Failed to load artifact"),
+      });
     }
+  }
+
+  function closeArtifactViewer() {
+    artifactLoadRequestRef.current += 1;
+    setArtifactViewer(null);
   }
 
   function handleBackendEvent(payload: unknown) {
@@ -2067,7 +2089,8 @@ function App() {
       if (modifier && event.key === "[") {
         event.preventDefault();
         navigateBack(() => {
-          if (showSearchModal) setShowSearchModal(false);
+          if (artifactViewer) closeArtifactViewer();
+          else if (showSearchModal) setShowSearchModal(false);
           else if (showActivityFeedModal) setShowActivityFeedModal(false);
           else if (showSavedModal) setShowSavedModal(false);
           else if (selectedAgentId) setSelectedAgentId(null);
@@ -2092,6 +2115,7 @@ function App() {
         showSavedModal ||
         showOwnerProfileModal ||
         showSettingsModal ||
+        Boolean(artifactViewer) ||
         Boolean(editingAgentId);
       if (event.key === "Escape" && !modalOpen && !isTextInput(event.target)) {
         if (selectedAgentId) {
@@ -2106,6 +2130,7 @@ function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     activeChannelId,
+    artifactViewer,
     editingAgentId,
     selectedAgentId,
     showChannelAgentsModal,
@@ -2262,6 +2287,7 @@ function App() {
       showCreateAgentModal ||
       showCreateChannelModal ||
       showActivityFeedModal ||
+      Boolean(artifactViewer) ||
       showOwnerProfileModal ||
       showSettingsModal ||
       showSavedModal ||
@@ -2364,6 +2390,7 @@ function App() {
     };
   }, [
     activeThreadId,
+    artifactViewer,
     selectedAgentId,
     showChannelAgentsModal,
     showChannelSettingsModal,
@@ -3415,7 +3442,10 @@ function App() {
     }
   }
 
-  function pushReferenceMessageHistory(originMessageId: string, targetMessageId: string) {
+  function pushReferenceMessageHistory(
+    originMessageId: string,
+    target: ReturnType<typeof messageReferenceLocation>,
+  ) {
     if (isMobileViewport() || !appHistoryReadyRef.current) return;
     const existingState = window.history.state;
     if (!isAppHistoryState(existingState)) return;
@@ -3426,38 +3456,84 @@ function App() {
     window.history.replaceState(originState, "");
     const targetState = {
       ...buildAppHistoryState(existingState.index + 1),
-      focusedMessageId: targetMessageId,
+      activeChannelId: target.channelId,
+      activeThreadId: target.threadId,
+      activeTab: "chat" as const,
+      showThread: target.showThread,
+      showMobileSidebar: false,
+      selectedAgentId: null,
+      activeModal: null,
+      focusedMessageId: target.focusedMessageId,
     };
     window.history.pushState(targetState, "");
-    historyFocusedMessageIdRef.current = targetMessageId;
+    historyFocusedMessageIdRef.current = target.focusedMessageId;
     setAppHistoryPosition(targetState.index, targetState.index);
     lastAppHistoryKeyRef.current = appHistoryKey(targetState);
   }
 
+  async function loadReferencedMessage(messageId: string) {
+    const loadedMessages: Message[] = [];
+    let target = messagesById.get(messageId) ?? null;
+    if (!target) {
+      target = await apiInvoke("load_message", { messageId });
+      loadedMessages.push(target);
+    }
+    if (target.thread_root_id && !messagesById.has(target.thread_root_id)) {
+      const root = await apiInvoke("load_message", { messageId: target.thread_root_id });
+      loadedMessages.push(root);
+    }
+    if (loadedMessages.length > 0) {
+      for (const message of loadedMessages) {
+        loadedHistoricalMessageIdsRef.current.add(message.id);
+        hydratedMessageIdsRef.current.add(message.id);
+        hydratedMessageBodiesRef.current.set(message.id, message.body);
+        knownMessageIdsRef.current?.add(message.id);
+      }
+      setData((current) => current
+        ? { ...current, messages: mergeMessages(current.messages, loadedMessages) }
+        : current);
+    }
+    return target;
+  }
+
+  async function navigateToReference(
+    originMessageId: string,
+    targetMessageId: string,
+    kind: MessageReferenceKind,
+  ) {
+    const requestId = referenceNavigationRequestRef.current + 1;
+    referenceNavigationRequestRef.current = requestId;
+    try {
+      const targetMessage = await loadReferencedMessage(targetMessageId);
+      if (referenceNavigationRequestRef.current !== requestId) return;
+      const target = messageReferenceLocation(kind, targetMessage);
+      pushReferenceMessageHistory(originMessageId, target);
+      pendingChannelRestoreRef.current.delete(target.channelId);
+      setSelectedAgentId(null);
+      setActiveTab("chat");
+      setShowMobileSidebar(false);
+      setActiveChannelId(target.channelId);
+      openThread(target.threadId, target.channelId);
+      setShowThread(target.showThread);
+      setFocusedMessageId(null);
+      window.requestAnimationFrame(() => {
+        if (referenceNavigationRequestRef.current === requestId) {
+          setFocusedMessageId(target.focusedMessageId);
+        }
+      });
+    } catch (err) {
+      if (referenceNavigationRequestRef.current !== requestId) return;
+      setAppError(errorMessage(err, `Failed to open referenced ${kind}`));
+      console.error(err);
+    }
+  }
+
   function navigateToReferencedMessage(originMessageId: string, targetMessageId: string) {
-    pushReferenceMessageHistory(originMessageId, targetMessageId);
-    setFocusedMessageId(null);
-    window.requestAnimationFrame(() => {
-      setFocusedMessageId(targetMessageId);
-    });
+    void navigateToReference(originMessageId, targetMessageId, "message");
   }
 
   function navigateToReferencedThread(originMessageId: string, threadId: string) {
-    // Record the chip's source message in the current history entry before we
-    // switch threads, so Lantor's built-in back button returns to the message
-    // that contained the chip (the thread switch itself pushes the target entry).
-    if (!isMobileViewport() && appHistoryReadyRef.current) {
-      const existingState = window.history.state;
-      if (isAppHistoryState(existingState)) {
-        const originState = {
-          ...buildAppHistoryState(existingState.index),
-          focusedMessageId: originMessageId,
-        };
-        window.history.replaceState(originState, "");
-        lastAppHistoryKeyRef.current = appHistoryKey(originState);
-      }
-    }
-    revealThread(threadId);
+    void navigateToReference(originMessageId, threadId, "thread");
   }
 
   const openAgentDetail = useCallback((agent: Agent) => {
@@ -4074,6 +4150,16 @@ function App() {
 
   function openSearchResult(result: SearchResult) {
     const openedFromSearch = showSearchModal;
+    if (result.kind === "artifact") {
+      const artifact = data?.artifacts.find((item) => item.id === result.id);
+      setShowSearchModal(false);
+      if (artifact) {
+        void openArtifact(artifact);
+      } else {
+        setAppError("Artifact no longer exists");
+      }
+      return;
+    }
     let openedAgentId: string | null = null;
     if (result.agentId) {
       const agent = data?.agents.find((item) => item.id === result.agentId);
@@ -4542,6 +4628,13 @@ function App() {
         onOpenItem={openSavedMessage}
         onUnsaveItem={unsaveSavedMessage}
         onClose={() => closeAppModal(() => setShowSavedModal(false))}
+      />
+
+      <ArtifactViewerModal
+        artifact={artifactViewer?.artifact ?? null}
+        loading={artifactViewer?.loading ?? false}
+        error={artifactViewer?.error ?? null}
+        onClose={closeArtifactViewer}
       />
 
       <OwnerProfileModal
