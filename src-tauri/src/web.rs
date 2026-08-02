@@ -49,8 +49,9 @@ use crate::application::{
     },
     inbox::{self as inbox_commands, InboxItemsRequest, MarkChannelReadRequest},
     messages::{
-        self as message_commands, LoadChannelMessagesRequest, LoadOlderChannelMessagesRequest,
-        MessageIdRequest, SendMessageRequest, SetMessageSavedRequest,
+        self as message_commands, LoadActivityMessagesRequest, LoadChannelMessagesRequest,
+        LoadOlderChannelMessagesRequest, MessageIdRequest, SearchMessagesRequest,
+        SendMessageRequest, SetMessageSavedRequest,
     },
     tasks::{self as task_commands, UpdateTaskStatusRequest, UpdateTaskTitleRequest},
     AgentIdRequest,
@@ -204,6 +205,14 @@ fn web_router(state: Arc<WebState>, dist_dir: PathBuf) -> Router {
         .route(
             "/api/load_channel_previews",
             post(api_load_channel_previews).layer(CompressionLayer::new()),
+        )
+        .route(
+            "/api/load_activity_messages",
+            post(api_load_activity_messages).layer(CompressionLayer::new()),
+        )
+        .route(
+            "/api/search_messages",
+            post(api_search_messages).layer(CompressionLayer::new()),
         )
         .route(
             "/api/load_message",
@@ -409,6 +418,26 @@ async fn api_load_channel_previews(
     State(state): State<Arc<WebState>>,
 ) -> Result<impl IntoResponse, Response> {
     message_commands::load_channel_previews(&state.pool)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_load_activity_messages(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<LoadActivityMessagesRequest>,
+) -> Result<impl IntoResponse, Response> {
+    message_commands::load_activity_messages(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_search_messages(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<SearchMessagesRequest>,
+) -> Result<impl IntoResponse, Response> {
+    message_commands::search_messages(&state.pool, request)
         .await
         .map(Json)
         .map_err(api_error)

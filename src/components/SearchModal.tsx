@@ -7,6 +7,7 @@ import { AgentAvatar } from "./AgentAvatar";
 
 type SearchModalProps = {
   open: boolean;
+  loading: boolean;
   query: string;
   scope: SearchScope;
   timeRange: SearchTimeRange;
@@ -82,6 +83,7 @@ function resultAvatarAgent(result: SearchResult, agents: Agent[], ownerProfile: 
 
 export function SearchModal({
   open,
+  loading,
   query,
   scope,
   timeRange,
@@ -174,7 +176,15 @@ export function SearchModal({
             </div>
           )}
 
-          {query.trim() && groupedResults.length === 0 && (
+          {query.trim() && loading && groupedResults.length === 0 && (
+            <div className="search-empty">
+              <Search size={32} />
+              <h3>Searching…</h3>
+              <p>Searching messages across every channel.</p>
+            </div>
+          )}
+
+          {query.trim() && !loading && groupedResults.length === 0 && (
             <div className="search-empty">
               <Search size={32} />
               <h3>No results</h3>

@@ -494,6 +494,17 @@ function matchesSearchTime(value: string | null, range: SearchTimeRange) {
   return now - timestamp <= days * 24 * 60 * 60 * 1000;
 }
 
+function searchTimeRangeStart(range: SearchTimeRange) {
+  if (range === "any") return null;
+  if (range === "today") {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return start.toISOString();
+  }
+  const days = range === "7d" ? 7 : 30;
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
 function searchScopeAllows(scope: SearchScope, kind: SearchScope) {
   return scope === "all" || scope === kind;
 }
@@ -749,6 +760,9 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchScope, setSearchScope] = useState<SearchScope>("all");
   const [searchTimeRange, setSearchTimeRange] = useState<SearchTimeRange>("any");
+  const [messageSearchResults, setMessageSearchResults] = useState<Message[]>([]);
+  const [messageSearchLoading, setMessageSearchLoading] = useState(false);
+  const [activityFeedSnapshotVersion, setActivityFeedSnapshotVersion] = useState(0);
   const [newChannel, setNewChannel] = useState("");
   const [newChannelNameSubmitError, setNewChannelNameSubmitError] = useState<string | null>(null);
   const [newChannelAgentIds, setNewChannelAgentIds] = useState<Set<string>>(() => new Set());
@@ -877,12 +891,15 @@ function App() {
   const messageHydrationAttemptsRef = useRef<Map<string, number>>(new Map());
   const messageHydrationEpochRef = useRef<Map<string, number>>(new Map());
   const loadedHistoricalMessageIdsRef = useRef<Set<string>>(new Set());
+  const activityFeedMessageIdsRef = useRef<Set<string>>(new Set());
   const paginatedChannelIdsRef = useRef<Set<string>>(new Set());
   const initializedOlderChannelIdsRef = useRef<Set<string>>(new Set());
   const olderChannelBeforeSeqRef = useRef<Map<string, number>>(new Map());
   const loadingOlderChannelIdsRef = useRef<Set<string>>(new Set());
   const olderChannelRequestEpochRef = useRef<Map<string, number>>(new Map());
   const pendingChannelRestoreRef = useRef<Set<string>>(new Set());
+  const activityFeedRequestRef = useRef(0);
+  const messageSearchRequestRef = useRef(0);
   const refreshTimerRef = useRef<number | null>(null);
   const refreshInFlightRef = useRef(false);
   const refreshPromiseRef = useRef<Promise<void> | null>(null);
@@ -1092,7 +1109,10 @@ function App() {
     const applyStartedAt = performance.now();
     const hydration = {
       snapshotInvalidated: refreshInvalidation !== refreshInvalidationRef.current,
-      loadedHistoricalMessageIds: loadedHistoricalMessageIdsRef.current,
+      loadedHistoricalMessageIds: new Set([
+        ...loadedHistoricalMessageIdsRef.current,
+        ...activityFeedMessageIdsRef.current,
+      ]),
       paginatedChannelIds: paginatedChannelIdsRef.current,
       initializedChannelIds: initializedOlderChannelIdsRef.current,
     };
@@ -1197,6 +1217,38 @@ function App() {
       refreshTimerRef.current = null;
       refreshWithError(fallback);
     }, UI_REFRESH_DEBOUNCE_MS);
+  }
+
+  async function hydrateActivityFeedMessages() {
+    const requestId = activityFeedRequestRef.current + 1;
+    activityFeedRequestRef.current = requestId;
+    try {
+      const messages = await apiInvoke("load_activity_messages", {
+        mentionHandles: OWNER_MENTION_HANDLES,
+      });
+      if (activityFeedRequestRef.current !== requestId) return;
+
+      const known = knownMessageIdsRef.current ?? new Set(
+        data?.messages
+          .filter((message) => !isProgressOnlyMessage(message))
+          .map((message) => message.id) ?? [],
+      );
+      activityFeedMessageIdsRef.current = new Set(messages.map((message) => message.id));
+      for (const message of messages) {
+        hydratedMessageIdsRef.current.add(message.id);
+        hydratedMessageBodiesRef.current.set(message.id, message.body);
+        if (!isProgressOnlyMessage(message)) known.add(message.id);
+      }
+      knownMessageIdsRef.current = known;
+      setData((current) => current
+        ? { ...current, messages: mergeMessages(current.messages, messages) }
+        : current);
+      setActivityFeedSnapshotVersion((current) => current + 1);
+    } catch (err) {
+      if (activityFeedRequestRef.current !== requestId) return;
+      setAppError(errorMessage(err, "Failed to load Activity"));
+      console.error(err);
+    }
   }
 
   async function loadChannelMessages(channelId: string) {
@@ -1370,6 +1422,7 @@ function App() {
       const result = applyBackendEvent(current, event);
       for (const messageId of result.deletedMessageIds) {
         loadedHistoricalMessageIdsRef.current.delete(messageId);
+        activityFeedMessageIdsRef.current.delete(messageId);
         knownMessageIdsRef.current?.delete(messageId);
       }
       if (result.needsRefresh) requestRefresh(refreshFallback);
@@ -1812,6 +1865,38 @@ function App() {
       if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
   }, [bootReady, data?.channels]);
+
+  useEffect(() => {
+    const requestId = messageSearchRequestRef.current + 1;
+    messageSearchRequestRef.current = requestId;
+    const query = searchQuery.trim();
+    if (!showSearchModal || !query || !searchScopeAllows(searchScope, "messages")) {
+      setMessageSearchResults([]);
+      setMessageSearchLoading(false);
+      return;
+    }
+
+    setMessageSearchLoading(true);
+    const timer = window.setTimeout(() => {
+      apiInvoke("search_messages", {
+        query,
+        after: searchTimeRangeStart(searchTimeRange),
+        limit: 60,
+      }).then((messages) => {
+        if (messageSearchRequestRef.current !== requestId) return;
+        setMessageSearchResults(messages);
+        setMessageSearchLoading(false);
+      }).catch((err) => {
+        if (messageSearchRequestRef.current !== requestId) return;
+        setMessageSearchResults([]);
+        setMessageSearchLoading(false);
+        setAppError(errorMessage(err, "Failed to search messages"));
+        console.error(err);
+      });
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [searchQuery, searchScope, searchTimeRange, showSearchModal]);
 
   useEffect(() => {
     if (!data || showOwnerProfileModal) return;
@@ -2929,7 +3014,8 @@ function App() {
     }
 
     if (searchScopeAllows(searchScope, "messages")) {
-      results.push(...visibleMessages
+      results.push(...messageSearchResults
+        .filter((item) => !isProgressOnlyMessage(item))
         .filter((item) =>
           matchesSearchTime(item.created_at, searchTimeRange) &&
           includes(`${item.sender_name} ${item.body} ${channelLabel(item.channel_id)}`))
@@ -3021,7 +3107,7 @@ function App() {
     }
 
     return results.slice(0, 80);
-  }, [data, searchQuery, searchScope, searchTimeRange, visibleMessages]);
+  }, [data, messageSearchResults, searchQuery, searchScope, searchTimeRange]);
 
   function taskForMessage(messageId: string) {
     return data?.tasks.find((task) => task.message_id === messageId) ?? null;
@@ -3236,6 +3322,7 @@ function App() {
           for (const message of current.messages) {
             if (message.channel_id !== channelToDelete.id) continue;
             loadedHistoricalMessageIdsRef.current.delete(message.id);
+            activityFeedMessageIdsRef.current.delete(message.id);
             knownMessageIdsRef.current?.delete(message.id);
           }
           return applyOptimisticMutation(current, {
@@ -3496,6 +3583,23 @@ function App() {
     return target;
   }
 
+  async function revealMessageById(messageId: string) {
+    const target = await loadReferencedMessage(messageId);
+    const channelId = target.channel_id;
+    const threadId = target.thread_root_id ?? target.id;
+    pendingChannelRestoreRef.current.delete(channelId);
+    historyFocusedMessageIdRef.current = target.id;
+    setSelectedAgentId(null);
+    setActiveChannelId(channelId);
+    setShowMobileSidebar(false);
+    setActiveTab("chat");
+    openThread(threadId, channelId);
+    setShowThread(true);
+    setFocusedMessageId(null);
+    window.requestAnimationFrame(() => setFocusedMessageId(target.id));
+    return { target, threadId };
+  }
+
   async function navigateToReference(
     originMessageId: string,
     targetMessageId: string,
@@ -3597,6 +3701,7 @@ function App() {
     setShowSearchModal(false);
     setShowSavedModal(false);
     setShowActivityFeedModal(true);
+    void hydrateActivityFeedMessages();
   }
 
   function openSavedModal() {
@@ -4148,7 +4253,7 @@ function App() {
     }
   }
 
-  function openSearchResult(result: SearchResult) {
+  async function openSearchResult(result: SearchResult) {
     const openedFromSearch = showSearchModal;
     if (result.kind === "artifact") {
       const artifact = data?.artifacts.find((item) => item.id === result.id);
@@ -4157,6 +4262,24 @@ function App() {
         void openArtifact(artifact);
       } else {
         setAppError("Artifact no longer exists");
+      }
+      return;
+    }
+    if (result.kind === "message" || result.kind === "reply") {
+      if (openedFromSearch) {
+        replaceNextAppHistoryEntryRef.current = true;
+        searchResultThreadIdRef.current = result.threadId;
+        searchResultAgentIdRef.current = null;
+      }
+      setShowSearchModal(false);
+      try {
+        const { threadId } = await revealMessageById(result.id);
+        if (openedFromSearch) {
+          searchResultThreadIdRef.current = threadId;
+        }
+      } catch (err) {
+        setAppError(errorMessage(err, "Failed to open search result"));
+        console.error(err);
       }
       return;
     }
@@ -4217,23 +4340,26 @@ function App() {
     return new Date(cutoffTime).toISOString();
   }
 
-  function openActivityFeedItem(item: ActivityFeedItem) {
+  async function openActivityFeedItem(item: ActivityFeedItem) {
     if (item.unread) {
       void markActivityFeedItemRead(item);
     }
     const targetThreadId = item.threadId ?? item.messageId;
+    if (item.messageId || targetThreadId) {
+      try {
+        await revealMessageById(item.messageId ?? targetThreadId!);
+        setShowActivityFeedModal(false);
+      } catch (err) {
+        setAppError(errorMessage(err, "Failed to open Activity item"));
+        console.error(err);
+      }
+      return;
+    }
     if (item.channelId) selectChannel(item.channelId);
     setSelectedAgentId(null);
     setActiveTab("chat");
-    if (targetThreadId) {
-      revealThread(targetThreadId, item.channelId ?? activeChannelId);
-    } else {
-      openThread(null, item.channelId ?? activeChannelId);
-      setShowThread(false);
-    }
-    if (item.messageId) {
-      setFocusedMessageId(item.messageId);
-    }
+    openThread(null, item.channelId ?? activeChannelId);
+    setShowThread(false);
     setShowActivityFeedModal(false);
   }
 
@@ -4593,6 +4719,7 @@ function App() {
       />
       <SearchModal
         open={showSearchModal}
+        loading={messageSearchLoading}
         query={searchQuery}
         scope={searchScope}
         timeRange={searchTimeRange}
@@ -4610,6 +4737,7 @@ function App() {
       <ActivityFeedModal
         open={showActivityFeedModal}
         items={activityFeedItems}
+        snapshotVersion={activityFeedSnapshotVersion}
         agents={data.agents}
         ownerProfile={data.owner_profile}
         onOpenItem={openActivityFeedItem}

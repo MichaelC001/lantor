@@ -24,6 +24,9 @@ use crate::{
 pub(crate) const WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL: i64 = 80;
 pub(crate) const CHANNEL_PREVIEW_ROOT_MESSAGES_PER_CHANNEL: i64 = 3;
 const CHANNEL_PREVIEW_REPLIES_PER_THREAD: i64 = 12;
+const ACTIVITY_FEED_THREAD_LIMIT: i64 = 120;
+const ACTIVITY_FEED_MENTION_LIMIT: i64 = 120;
+const MESSAGE_SEARCH_LIMIT_MAX: i64 = 100;
 const MAX_OLDER_CHANNEL_ROOT_MESSAGES_PER_PAGE: i64 = 100;
 
 pub(crate) async fn load_messages(pool: &SqlitePool) -> CommandResult<Vec<Message>> {
@@ -160,6 +163,251 @@ pub(crate) async fn load_channel_preview_messages_without_artifact_content(
     )
     .bind(roots_per_channel)
     .bind(CHANNEL_PREVIEW_REPLIES_PER_THREAD)
+    .fetch_all(pool)
+    .await
+    .map_err(to_string)?;
+
+    messages_from_rows(pool, rows, false).await
+}
+
+pub(crate) async fn load_activity_messages_without_artifact_content(
+    pool: &SqlitePool,
+    mention_handles: &[String],
+) -> CommandResult<Vec<Message>> {
+    let mention_handles = mention_handles
+        .iter()
+        .map(|handle| handle.trim())
+        .filter(|handle| !handle.is_empty())
+        .take(16)
+        .collect::<Vec<_>>();
+    let mention_predicate = if mention_handles.is_empty() {
+        "0".to_owned()
+    } else {
+        std::iter::repeat_n("instr(lower(m.body), lower(?)) > 0", mention_handles.len())
+            .collect::<Vec<_>>()
+            .join(" or ")
+    };
+    let sql = format!(
+        r#"
+        with visible_messages as (
+            select m.*
+            from messages m
+            where m.delivery_state <> 'streaming'
+              and not (
+                m.sender_role <> 'system'
+                and m.sender_role <> 'owner'
+                and m.stream_key glob '????????-????-????-????-????????????:*'
+                and m.delivery_state = 'complete'
+                and trim(m.body) = ''
+                and not exists (
+                  select 1 from message_attachments ma where ma.message_id = m.id
+                )
+                and not exists (
+                  select 1 from artifacts ar where ar.message_id = m.id
+                )
+              )
+        ),
+        latest_channel_messages as (
+            select ranked.id, ranked.thread_root_id
+            from (
+                select
+                    m.id,
+                    m.thread_root_id,
+                    row_number() over (
+                        partition by m.channel_id
+                        order by m.seq desc
+                    ) as message_rank
+                from visible_messages m
+            ) ranked
+            where ranked.message_rank = 1
+        ),
+        thread_read_markers as (
+            select
+                root.id as thread_root_id,
+                case
+                    when thread_read_state.read_until is null then read_state.last_read_at
+                    when read_state.last_read_at is null then thread_read_state.read_until
+                    when julianday(thread_read_state.read_until) >= julianday(read_state.last_read_at)
+                        then thread_read_state.read_until
+                    else read_state.last_read_at
+                end as read_until
+            from visible_messages root
+            left join channel_read_state read_state on read_state.channel_id = root.channel_id
+            left join owner_inbox_read_state thread_read_state
+              on thread_read_state.item_id = 'thread:' || lower(
+                substr(hex(root.id), 1, 8) || '-' ||
+                substr(hex(root.id), 9, 4) || '-' ||
+                substr(hex(root.id), 13, 4) || '-' ||
+                substr(hex(root.id), 17, 4) || '-' ||
+                substr(hex(root.id), 21, 12)
+              )
+            where root.thread_root_id is null
+        ),
+        latest_thread_replies as (
+            select
+                ranked.thread_root_id,
+                ranked.id as latest_message_id,
+                ranked.created_at as latest_activity_at
+            from (
+                select
+                    reply.id,
+                    reply.thread_root_id,
+                    reply.created_at,
+                    reply.seq,
+                    row_number() over (
+                        partition by reply.thread_root_id
+                        order by reply.seq desc
+                    ) as reply_rank
+                from visible_messages reply
+                where reply.thread_root_id is not null
+            ) ranked
+            where ranked.reply_rank = 1
+        ),
+        activity_thread_roots as (
+            select
+                root.id as thread_root_id,
+                latest.latest_message_id,
+                latest.latest_activity_at
+            from visible_messages root
+            join latest_thread_replies latest on latest.thread_root_id = root.id
+            left join thread_read_markers read_marker on read_marker.thread_root_id = root.id
+            where root.thread_root_id is null
+              and (
+                root.thread_followed
+                or exists (
+                    select 1
+                    from visible_messages unread_reply
+                    where unread_reply.thread_root_id = root.id
+                      and unread_reply.sender_role <> 'owner'
+                      and julianday(unread_reply.created_at) > julianday(
+                        coalesce(read_marker.read_until, '0001-01-01T00:00:00+00:00')
+                      )
+                )
+              )
+            order by julianday(latest.latest_activity_at) desc, latest.latest_activity_at desc
+            limit ?
+        ),
+        recent_mentions as (
+            select m.id, m.thread_root_id
+            from visible_messages m
+            where m.sender_role <> 'owner'
+              and ({mention_predicate})
+            order by m.seq desc
+            limit ?
+        ),
+        selected_message_ids as (
+            select id from latest_channel_messages
+            union
+            select thread_root_id from latest_channel_messages where thread_root_id is not null
+            union
+            select thread_root_id from activity_thread_roots
+            union
+            select latest_message_id from activity_thread_roots
+            union
+            select id from recent_mentions
+            union
+            select thread_root_id from recent_mentions where thread_root_id is not null
+        )
+        select
+            m.id,
+            m.seq,
+            m.channel_id,
+            m.thread_root_id,
+            m.sender_agent_id,
+            m.sender_name,
+            m.sender_role,
+            m.body,
+            m.is_task,
+            m.thread_followed,
+            m.delivery_state,
+            m.stream_key,
+            t.number as task_number,
+            t.status as task_status,
+            m.created_at,
+            m.updated_at
+        from messages m
+        left join tasks t on t.message_id = m.id
+        where m.id in (select id from selected_message_ids)
+        order by m.seq asc
+        "#,
+    );
+    let mut query = sqlx::query(&sql).bind(ACTIVITY_FEED_THREAD_LIMIT);
+    for handle in mention_handles {
+        query = query.bind(handle);
+    }
+    let rows = query
+        .bind(ACTIVITY_FEED_MENTION_LIMIT)
+        .fetch_all(pool)
+        .await
+        .map_err(to_string)?;
+
+    messages_from_rows(pool, rows, false).await
+}
+
+pub(crate) async fn search_messages_without_artifact_content(
+    pool: &SqlitePool,
+    search_query: &str,
+    after: Option<&str>,
+    limit: i64,
+) -> CommandResult<Vec<Message>> {
+    let search_query = search_query.trim();
+    if search_query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let escaped = search_query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("%{escaped}%");
+    let rows = sqlx::query(
+        r#"
+        select
+            m.id,
+            m.seq,
+            m.channel_id,
+            m.thread_root_id,
+            m.sender_agent_id,
+            m.sender_name,
+            m.sender_role,
+            m.body,
+            m.is_task,
+            m.thread_followed,
+            m.delivery_state,
+            m.stream_key,
+            t.number as task_number,
+            t.status as task_status,
+            m.created_at,
+            m.updated_at
+        from messages m
+        join channels c on c.id = m.channel_id
+        left join tasks t on t.message_id = m.id
+        where (
+            lower(m.body) like lower($1) escape '\'
+            or lower(m.sender_name) like lower($1) escape '\'
+            or lower(c.name) like lower($1) escape '\'
+        )
+          and ($2 is null or julianday(m.created_at) >= julianday($2))
+          and m.delivery_state <> 'streaming'
+          and not (
+            m.sender_role <> 'system'
+            and m.sender_role <> 'owner'
+            and m.stream_key glob '????????-????-????-????-????????????:*'
+            and m.delivery_state = 'complete'
+            and trim(m.body) = ''
+            and not exists (
+              select 1 from message_attachments ma where ma.message_id = m.id
+            )
+            and not exists (
+              select 1 from artifacts ar where ar.message_id = m.id
+            )
+          )
+        order by m.seq desc
+        limit $3
+        "#,
+    )
+    .bind(pattern)
+    .bind(after)
+    .bind(limit.clamp(1, MESSAGE_SEARCH_LIMIT_MAX))
     .fetch_all(pool)
     .await
     .map_err(to_string)?;
@@ -1490,10 +1738,12 @@ mod tests {
 
     use super::{
         channel_message_history_from_messages, delete_message_in_pool,
+        load_activity_messages_without_artifact_content,
         load_channel_preview_messages_without_artifact_content, load_messages,
         load_older_channel_messages_without_artifact_content,
         load_recent_channel_message_page_without_artifact_content,
         load_recent_channel_messages_without_artifact_content,
+        search_messages_without_artifact_content,
     };
     use crate::attachments::write_attachment_file;
 
@@ -2209,6 +2459,169 @@ mod tests {
             assert!(page_root_ids.contains(&roots[1].0));
             assert!(page_root_ids.contains(&roots[0].0));
             assert_eq!(page_root_ids.len(), 20);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn activity_messages_include_global_channel_thread_and_mention_context() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let mention_channel_id = insert_test_channel(&pool, "activity-mention").await?;
+            let other_channel_id = insert_test_channel(&pool, "activity-other").await?;
+
+            let mention_root_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (
+                    channel_id, sender_name, sender_role, body, is_task, created_at
+                )
+                values ($1, 'Dylan', 'owner', 'old mention root', false, '2026-01-01T00:00:00.000+00:00')
+                returning id
+                "#,
+            )
+            .bind(mention_channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let mention_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (
+                    channel_id, thread_root_id, sender_name, sender_role, body, is_task,
+                    created_at
+                )
+                values (
+                    $1, $2, 'agent', 'agent', 'ping @Dylan from an old thread', false,
+                    '2026-01-01T00:00:01.000+00:00'
+                )
+                returning id
+                "#,
+            )
+            .bind(mention_channel_id)
+            .bind(mention_root_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            for index in 0..5 {
+                sqlx::query(
+                    r#"
+                    insert into messages (
+                        channel_id, sender_name, sender_role, body, is_task, created_at
+                    )
+                    values ($1, 'Dylan', 'owner', $2, false, $3)
+                    "#,
+                )
+                .bind(mention_channel_id)
+                .bind(format!("newer root {index}"))
+                .bind(format!("2026-01-01T00:01:0{index}.000+00:00"))
+                .execute(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            }
+
+            let followed_root_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (
+                    channel_id, sender_name, sender_role, body, is_task, created_at
+                )
+                values ($1, 'Dylan', 'owner', 'followed root', false, '2026-01-01T00:02:00.000+00:00')
+                returning id
+                "#,
+            )
+            .bind(other_channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let followed_reply_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (
+                    channel_id, thread_root_id, sender_name, sender_role, body, is_task,
+                    created_at
+                )
+                values (
+                    $1, $2, 'agent', 'agent', 'latest followed reply', false,
+                    '2026-01-01T00:02:01.000+00:00'
+                )
+                returning id
+                "#,
+            )
+            .bind(other_channel_id)
+            .bind(followed_root_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let messages = load_activity_messages_without_artifact_content(
+                &pool,
+                &["@Dylan".to_owned()],
+            )
+            .await?;
+            let ids = messages
+                .iter()
+                .map(|message| message.id)
+                .collect::<std::collections::HashSet<_>>();
+            assert!(ids.contains(&mention_root_id));
+            assert!(ids.contains(&mention_id));
+            assert!(ids.contains(&followed_root_id));
+            assert!(ids.contains(&followed_reply_id));
+            assert!(messages
+                .iter()
+                .any(|message| message.body == "newer root 4"));
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn message_search_covers_all_channels_and_respects_literals_and_time() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let channel_id = insert_test_channel(&pool, "search-everywhere").await?;
+            let target_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into messages (
+                    channel_id, sender_name, sender_role, body, is_task, created_at
+                )
+                values (
+                    $1, 'agent', 'agent', 'literal 100%_match across every channel', false,
+                    '2026-01-02T00:00:00.000+00:00'
+                )
+                returning id
+                "#,
+            )
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+
+            let matches =
+                search_messages_without_artifact_content(&pool, "%_match", None, 40).await?;
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].id, target_id);
+
+            let too_new = search_messages_without_artifact_content(
+                &pool,
+                "every channel",
+                Some("2026-01-03T00:00:00.000+00:00"),
+                40,
+            )
+            .await?;
+            assert!(too_new.is_empty());
+
+            let channel_match =
+                search_messages_without_artifact_content(&pool, "search-everywhere", None, 40)
+                    .await?;
+            assert_eq!(channel_match.len(), 1);
+            assert_eq!(channel_match[0].id, target_id);
             Ok(())
         }
         .await;

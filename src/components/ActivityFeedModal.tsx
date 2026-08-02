@@ -10,6 +10,7 @@ type ActivityFeedFilter = "all" | "unread" | ActivityFeedKind;
 type ActivityFeedModalProps = {
   open: boolean;
   items: ActivityFeedItem[];
+  snapshotVersion: number;
   agents: Agent[];
   ownerProfile: OwnerProfile;
   onOpenItem: (item: ActivityFeedItem) => void;
@@ -67,6 +68,7 @@ function sortActivityFeedItems(items: ActivityFeedItem[]) {
 export function ActivityFeedModal({
   open,
   items,
+  snapshotVersion,
   agents,
   ownerProfile,
   onOpenItem,
@@ -117,6 +119,12 @@ export function ActivityFeedModal({
     if (!open) return;
     setVisibleCount(ACTIVITY_FEED_INITIAL_VISIBLE);
   }, [open]);
+
+  useEffect(() => {
+    if (!open || snapshotVersion === 0) return;
+    setDisplayItems(sortActivityFeedItems(items));
+    setVisibleCount(ACTIVITY_FEED_INITIAL_VISIBLE);
+  }, [open, snapshotVersion]);
 
   useEffect(() => {
     if (open) return;

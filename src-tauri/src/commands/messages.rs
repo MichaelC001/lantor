@@ -4,8 +4,9 @@ use uuid::Uuid;
 use crate::{
     app::{AppState, CommandResult},
     application::messages::{
-        self as application, LoadChannelMessagesRequest, LoadOlderChannelMessagesRequest,
-        MessageIdRequest, SendMessageRequest, SetMessageSavedRequest, UpdateMessageRequest,
+        self as application, LoadActivityMessagesRequest, LoadChannelMessagesRequest,
+        LoadOlderChannelMessagesRequest, MessageIdRequest, SearchMessagesRequest,
+        SendMessageRequest, SetMessageSavedRequest, UpdateMessageRequest,
     },
     models::{AttachmentUpload, ChannelMessagePage, Message},
 };
@@ -45,6 +46,36 @@ pub(crate) async fn load_channel_previews(
     state: State<'_, AppState>,
 ) -> CommandResult<Vec<Message>> {
     application::load_channel_previews(&state.pool).await
+}
+
+#[tauri::command]
+pub(crate) async fn load_activity_messages(
+    mention_handles: Vec<String>,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<Message>> {
+    application::load_activity_messages(
+        &state.pool,
+        LoadActivityMessagesRequest { mention_handles },
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn search_messages(
+    query: String,
+    after: Option<String>,
+    limit: i64,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<Message>> {
+    application::search_messages(
+        &state.pool,
+        SearchMessagesRequest {
+            query,
+            after,
+            limit,
+        },
+    )
+    .await
 }
 
 #[tauri::command]

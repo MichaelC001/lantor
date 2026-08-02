@@ -5,10 +5,12 @@ use uuid::Uuid;
 use crate::{
     app::CommandResult,
     message_store::{
-        delete_message_in_pool, load_channel_preview_messages_without_artifact_content,
+        delete_message_in_pool, load_activity_messages_without_artifact_content,
+        load_channel_preview_messages_without_artifact_content,
         load_message_without_artifact_content,
         load_older_channel_messages_without_artifact_content,
-        load_recent_channel_message_page_without_artifact_content, send_owner_message_in_pool,
+        load_recent_channel_message_page_without_artifact_content,
+        search_messages_without_artifact_content, send_owner_message_in_pool,
         set_message_saved_in_pool, update_message_in_pool,
         CHANNEL_PREVIEW_ROOT_MESSAGES_PER_CHANNEL, WEB_BOOTSTRAP_ROOT_MESSAGES_PER_CHANNEL,
     },
@@ -29,6 +31,20 @@ pub(crate) struct SendMessageRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LoadChannelMessagesRequest {
     pub(crate) channel_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LoadActivityMessagesRequest {
+    pub(crate) mention_handles: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchMessagesRequest {
+    pub(crate) query: String,
+    pub(crate) after: Option<String>,
+    pub(crate) limit: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +106,26 @@ pub(crate) async fn load_channel_previews(pool: &SqlitePool) -> CommandResult<Ve
     load_channel_preview_messages_without_artifact_content(
         pool,
         CHANNEL_PREVIEW_ROOT_MESSAGES_PER_CHANNEL,
+    )
+    .await
+}
+
+pub(crate) async fn load_activity_messages(
+    pool: &SqlitePool,
+    request: LoadActivityMessagesRequest,
+) -> CommandResult<Vec<Message>> {
+    load_activity_messages_without_artifact_content(pool, &request.mention_handles).await
+}
+
+pub(crate) async fn search_messages(
+    pool: &SqlitePool,
+    request: SearchMessagesRequest,
+) -> CommandResult<Vec<Message>> {
+    search_messages_without_artifact_content(
+        pool,
+        &request.query,
+        request.after.as_deref(),
+        request.limit,
     )
     .await
 }

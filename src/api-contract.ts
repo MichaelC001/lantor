@@ -81,6 +81,18 @@ export type ApiContract = {
     args: undefined;
     result: Message[];
   };
+  load_activity_messages: {
+    args: { mentionHandles: string[] };
+    result: Message[];
+  };
+  search_messages: {
+    args: {
+      query: string;
+      after?: string | null;
+      limit: number;
+    };
+    result: Message[];
+  };
   load_message: {
     args: { messageId: string };
     result: Message;
@@ -293,6 +305,8 @@ const API_COMMAND_NAMES = {
   load_older_channel_messages: true,
   load_channel_messages: true,
   load_channel_previews: true,
+  load_activity_messages: true,
+  search_messages: true,
   load_message: true,
   create_channel: true,
   update_channel: true,
