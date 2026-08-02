@@ -221,6 +221,7 @@ export function ThreadPanel({
   const threadScrollMetricsRef = useRef({ scrollHeight: 0, scrollTop: 0, clientHeight: 0 });
   const threadScrollStateByThreadRef = useRef<Map<string, ThreadScrollState>>(new Map());
   const threadScrollAnchorRef = useRef<ThreadScrollAnchor | null>(null);
+  const focusedThreadMessageScrollKeyRef = useRef<string | null>(null);
   const openLinkedAgentDetail = useCallback((handle: string) => {
     const agent = agents.find((candidate) => candidate.handle.toLowerCase() === handle.toLowerCase());
     if (agent) openAgentDetail(agent);
@@ -660,14 +661,42 @@ export function ThreadPanel({
     preserveThreadViewport();
   }, [activeRoot?.id, focusedMessageId, activeRoot?.updated_at, replies.length, lastReply?.id, lastReply?.updated_at, lastReply?.delivery_state]);
 
-  useEffect(() => {
-    if (!focusedMessageId) return;
-    const element = threadScrollRef.current?.querySelector<HTMLElement>(`[data-message-id="${focusedMessageId}"]`);
-    if (!element) return;
-    // Detach from bottom-follow so the jump target stays put once focus clears.
-    stopFollowingThread();
-    element.scrollIntoView({ block: "center" });
-  }, [activeRoot?.id, focusedMessageId]);
+  useLayoutEffect(() => {
+    if (!focusedMessageId) {
+      focusedThreadMessageScrollKeyRef.current = null;
+      return;
+    }
+    const focusedScrollKey = `${activeRoot?.id ?? "none"}:${focusedMessageId}`;
+    if (focusedThreadMessageScrollKeyRef.current === focusedScrollKey) return;
+    let frameId = 0;
+    let settleFrameId = 0;
+    let attemptsRemaining = 6;
+    function scrollFocusedThreadMessage() {
+      const scrollRoot = threadScrollRef.current;
+      const element = scrollRoot?.querySelector<HTMLElement>(`[data-message-id="${focusedMessageId}"]`);
+      if (element) {
+        focusedThreadMessageScrollKeyRef.current = focusedScrollKey;
+        // Detach from bottom-follow so the jump target stays put once focus clears.
+        stopFollowingThread();
+        element.scrollIntoView({ block: "center" });
+        settleFrameId = window.requestAnimationFrame(() => {
+          const currentScrollRoot = threadScrollRef.current;
+          if (currentScrollRoot) rememberThreadScrollMetrics(currentScrollRoot);
+        });
+        return;
+      }
+      // The target reply may render a few frames later (channel hydration,
+      // freshly merged historical messages) — retry before giving up.
+      if (attemptsRemaining <= 0) return;
+      attemptsRemaining -= 1;
+      frameId = window.requestAnimationFrame(scrollFocusedThreadMessage);
+    }
+    scrollFocusedThreadMessage();
+    return () => {
+      if (frameId) window.cancelAnimationFrame(frameId);
+      if (settleFrameId) window.cancelAnimationFrame(settleFrameId);
+    };
+  }, [activeRoot?.id, focusedMessageId, replies.length, lastReply?.id, lastReply?.updated_at, lastReply?.delivery_state]);
 
   function hasSelectedText() {
     return Boolean(window.getSelection()?.toString().trim());

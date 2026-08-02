@@ -2716,6 +2716,12 @@ function App() {
         ? messagesById.get(threadActivity.latest_message_id) ?? replies[replies.length - 1] ?? root
         : replies[replies.length - 1] ?? root;
       const unread = unreadCount > 0;
+      // Jump to the first unread reply rather than the latest message —
+      // landing on the newest message is indistinguishable from just opening
+      // the thread at the bottom.
+      const firstUnread = unread && replies.length > 0
+        ? replies[Math.max(0, replies.length - unreadCount)] ?? replies[0]
+        : null;
       items.push({
         id: `thread:${root.id}`,
         dismissId: `thread:${root.id}`,
@@ -2730,7 +2736,7 @@ function App() {
         actorRole: latestActivity.sender_role,
         channelId: root.channel_id,
         threadId: root.id,
-        messageId: latestActivity.id,
+        messageId: firstUnread?.id ?? latestActivity.id,
         taskId: null,
         reminderId: null,
         replyCount: threadReplyCounts[root.id] ?? 0,
