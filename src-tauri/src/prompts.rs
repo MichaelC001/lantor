@@ -17,7 +17,8 @@ fn lantor_operating_policy_prompt() -> &'static str {
 - Keep visible replies high-density: final results, decisions, blockers, user questions, and handoffs. Put intermediate steps in activity events.
 - Activity events are the short progress notes a user would otherwise see in chat. When work takes more than a moment, emit them with a concrete user-facing title and detail that says what you are doing or what you just learned, not just a generic phase label.
 - Reminders are visible, cancelable future wakeups. Use them for user-requested future follow-up or state that needs re-checking later.
-- MEMORY.md is durable recovery context. Keep it concise, index-like, and useful after restart or context compaction; do not use it as a turn-by-turn journal."#
+- MEMORY.md is durable recovery context. Keep it concise, index-like, and useful after restart or context compaction; do not use it as a turn-by-turn journal.
+- A channel may have a channel wiki: shared required reading before substantive work in that channel. Wake turns announce the current wiki revision; when it is inlined, read it in place, and when only the revision id is shown, run wiki-read unless you already read that revision. Any channel member may update the wiki with wiki-write (pass the current head as --parent; on conflict re-read and merge). Keep wikis concise and index-like: stable conventions, key decisions, and links — not chat logs or transient status."#
 }
 
 fn lantor_memory_management_prompt() -> &'static str {
@@ -53,7 +54,10 @@ fn lantor_context_tools_prompt() -> &'static str {
 - durable memory: "$LANTOR_CONTEXT_TOOL" --agent-context-tool memory-read --limit 16000
 - run details: "$LANTOR_CONTEXT_TOOL" --agent-context-tool run-read --run-id "<uuid-or-prefix>"
 - history: "$LANTOR_CONTEXT_TOOL" --agent-context-tool history-read --target "#channel[:thread_id]" --limit 20
-- search: "$LANTOR_CONTEXT_TOOL" --agent-context-tool message-search --query "text" --target "#channel" --limit 20
+- search: "$LANTOR_CONTEXT_TOOL" --agent-context-tool message-search --query "text" --target "#channel" --limit 20 (also reports channel-wiki matches)
+- channel wiki read: "$LANTOR_CONTEXT_TOOL" --agent-context-tool wiki-read --channel "#channel"
+- channel wiki write: "$LANTOR_CONTEXT_TOOL" --agent-context-tool wiki-write --channel "#channel" --parent "<head-rev>" --file <markdown-path> --note "<one-line reason>" (omit --parent only for the first revision)
+- channel wiki history: "$LANTOR_CONTEXT_TOOL" --agent-context-tool wiki-log --channel "#channel" --limit 10
 - GitHub sync: "$LANTOR_CONTEXT_TOOL" --agent-context-tool github sync --channel "#channel" (reads GitHub and updates that channel's cached review queue/badge; invoke when the user or a reminder asks for it)
 - attachment: "$LANTOR_CONTEXT_TOOL" --agent-context-tool attachment-info --attachment-id "<uuid>"
 - artifact: "$LANTOR_CONTEXT_TOOL" --agent-context-tool artifact-read --artifact-id "<uuid>"

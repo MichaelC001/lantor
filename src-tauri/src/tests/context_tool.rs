@@ -2,7 +2,8 @@ use super::{
     agent_context_agent_inspect, agent_context_attachment_info, agent_context_github_sync,
     agent_context_history_read, agent_context_inbox_archive, agent_context_inbox_list,
     agent_context_inbox_read, agent_context_memory_read, agent_context_message_search,
-    agent_context_run_read, agent_context_workspace_info, agent_context_workspace_list,
+    agent_context_run_read, agent_context_wiki_log, agent_context_wiki_read,
+    agent_context_wiki_write, agent_context_workspace_info, agent_context_workspace_list,
     render_agent_context_github_sync, short_id,
 };
 use crate::channels::open_dm_with_agent_in_pool;
@@ -549,6 +550,124 @@ async fn agent_context_inbox_tools_list_read_and_archive_items() {
             .await
             .map_err(|err| err.to_string())?;
         assert_eq!(state, "archived");
+        Ok(())
+    }
+    .await;
+    drop_test_schema(pool, schema).await;
+    assert!(result.is_ok(), "{:?}", result.err());
+}
+
+#[tokio::test]
+async fn wiki_tools_write_read_log_and_surface_search_matches() {
+    let Some((pool, schema)) = test_pool().await else {
+        return;
+    };
+    let result: Result<(), String> = async {
+        insert_test_channel(&pool, "wiki-cli").await?;
+
+        let read_empty = agent_context_wiki_read(
+            &pool,
+            &[
+                "wiki-read".to_owned(),
+                "--channel".to_owned(),
+                "#wiki-cli".to_owned(),
+            ],
+        )
+        .await?;
+        assert!(read_empty.contains("has no wiki yet"));
+
+        let write_args = |content: &str, parent: Option<&str>| {
+            let mut args = vec![
+                "wiki-write".to_owned(),
+                "--channel".to_owned(),
+                "#wiki-cli".to_owned(),
+                "--content".to_owned(),
+                content.to_owned(),
+                "--note".to_owned(),
+                "test edit".to_owned(),
+            ];
+            if let Some(parent) = parent {
+                args.push("--parent".to_owned());
+                args.push(parent.to_owned());
+            }
+            args
+        };
+
+        let published =
+            agent_context_wiki_write(&pool, &write_args("# Playbook\nzanzibar convention", None))
+                .await?;
+        assert!(published.contains("Published wiki rev"));
+
+        // Missing --parent while a head exists must fail with the current rev.
+        let missing_parent = agent_context_wiki_write(&pool, &write_args("# v2", None)).await;
+        let err = missing_parent
+            .err()
+            .ok_or("second write without --parent must fail")?;
+        assert!(err.contains("pass --parent"), "unexpected error: {err}");
+
+        let read = agent_context_wiki_read(
+            &pool,
+            &[
+                "wiki-read".to_owned(),
+                "--channel".to_owned(),
+                "#wiki-cli".to_owned(),
+            ],
+        )
+        .await?;
+        assert!(read.contains("Channel wiki for #wiki-cli"));
+        assert!(read.contains("zanzibar convention"));
+        assert!(read.contains("note: test edit"));
+        let head_rev = read
+            .lines()
+            .find_map(|line| line.strip_prefix("rev ").map(|rest| rest[..8].to_owned()))
+            .ok_or("wiki-read output missing rev line")?;
+
+        let updated =
+            agent_context_wiki_write(&pool, &write_args("# Playbook v2", Some(&head_rev))).await?;
+        assert!(updated.contains("Published wiki rev"));
+
+        // Reusing the stale parent must report a conflict with merge guidance.
+        let conflict =
+            agent_context_wiki_write(&pool, &write_args("# stale", Some(&head_rev))).await;
+        let err = conflict.err().ok_or("stale parent write must conflict")?;
+        assert!(err.contains("wiki head moved"), "unexpected error: {err}");
+
+        let log = agent_context_wiki_log(
+            &pool,
+            &[
+                "wiki-log".to_owned(),
+                "--channel".to_owned(),
+                "#wiki-cli".to_owned(),
+            ],
+        )
+        .await?;
+        assert!(log.contains("2 revisions"));
+        assert!(log.contains("[head]"));
+
+        // The head content is searchable; superseded content is not.
+        let search = agent_context_message_search(
+            &pool,
+            &[
+                "message-search".to_owned(),
+                "--query".to_owned(),
+                "Playbook".to_owned(),
+                "--target".to_owned(),
+                "#wiki-cli".to_owned(),
+            ],
+        )
+        .await?;
+        assert!(search.contains("Channel wiki matches (1):"));
+        assert!(search.contains("[wiki target=#wiki-cli rev="));
+        let stale_search = agent_context_message_search(
+            &pool,
+            &[
+                "message-search".to_owned(),
+                "--query".to_owned(),
+                "zanzibar".to_owned(),
+            ],
+        )
+        .await?;
+        assert!(!stale_search.contains("Channel wiki matches"));
         Ok(())
     }
     .await;

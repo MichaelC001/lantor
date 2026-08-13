@@ -700,6 +700,28 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
         )
         "#,
+        r#"
+        create table if not exists channel_wiki_revisions (
+            id blob primary key not null default (randomblob(16)),
+            channel_id blob not null references channels(id) on delete cascade,
+            parent_id blob references channel_wiki_revisions(id),
+            content text not null,
+            author text not null default '',
+            note text not null default '',
+            created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
+        )
+        "#,
+        r#"
+        create index if not exists idx_channel_wiki_revisions_channel
+            on channel_wiki_revisions (channel_id, created_at desc)
+        "#,
+        r#"
+        create table if not exists channel_wiki_heads (
+            channel_id blob primary key not null references channels(id) on delete cascade,
+            head_id blob not null references channel_wiki_revisions(id),
+            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
+        )
+        "#,
     ] {
         sqlx::query(statement).execute(pool).await?;
     }

@@ -10,6 +10,7 @@ use crate::ui_notifications::{
 use crate::{
     app::{to_string, CommandResult},
     attachments::attachment_summary_sql,
+    channel_wiki::channel_wiki_wake_block,
     context_tool::short_id,
     events::activity::record_agent_activity,
     text::compact_chars_middle,
@@ -463,12 +464,36 @@ fn inbox_wake_work_item_title(items: &[InboxWakeItem]) -> String {
 
 #[cfg(test)]
 pub(crate) fn inbox_wake_context(items: &[InboxWakeItem]) -> String {
-    inbox_wake_context_with_thread_context(items, None)
+    inbox_wake_context_with_thread_context(items, None, None)
+}
+
+/// Load the channel-wiki announcement block for the batch's primary channel,
+/// so every inbox wake tells the agent which wiki revision is current.
+async fn load_channel_wiki_context(
+    pool: &SqlitePool,
+    items: &[InboxWakeItem],
+) -> CommandResult<Option<String>> {
+    let Some(primary) = items.first() else {
+        return Ok(None);
+    };
+    let Some(channel_id) = primary.channel_id else {
+        return Ok(None);
+    };
+    let label = match (
+        primary.channel_name.as_deref(),
+        primary.channel_kind.as_deref(),
+    ) {
+        (Some(name), Some("dm")) => format!("dm:{name}"),
+        (Some(name), _) => format!("#{name}"),
+        _ => "this channel".to_owned(),
+    };
+    channel_wiki_wake_block(pool, channel_id, &label).await
 }
 
 pub(crate) fn inbox_wake_context_with_thread_context(
     items: &[InboxWakeItem],
     same_thread_context: Option<&str>,
+    channel_wiki_block: Option<&str>,
 ) -> String {
     let Some(primary) = items.first() else {
         return "Lantor agent inbox wake.".to_owned();
@@ -490,6 +515,10 @@ pub(crate) fn inbox_wake_context_with_thread_context(
         format!("Default reply target for normal assistant text: {target}"),
         String::new(),
     ];
+    if let Some(channel_wiki_block) = channel_wiki_block.filter(|block| !block.trim().is_empty()) {
+        lines.push(channel_wiki_block.trim().to_owned());
+        lines.push(String::new());
+    }
     if let Some(same_thread_context) =
         same_thread_context.filter(|context| !context.trim().is_empty())
     {
@@ -685,6 +714,7 @@ async fn refresh_inbox_wake_work_item(
         return Ok(());
     };
     let same_thread_context = load_recent_same_thread_context(pool, items).await?;
+    let channel_wiki_block = load_channel_wiki_context(pool, items).await?;
     let context_max_seq = inbox_wake_context_max_seq(items, same_thread_context.as_ref());
     let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
@@ -714,6 +744,7 @@ async fn refresh_inbox_wake_work_item(
         same_thread_context
             .as_ref()
             .map(|context| context.body.as_str()),
+        channel_wiki_block.as_deref(),
     ))
     .bind(context_max_seq)
     .execute(&mut *transaction)
@@ -843,6 +874,7 @@ pub(crate) async fn ensure_agent_inbox_wake_work_item(
     }
 
     let same_thread_context = load_recent_same_thread_context(pool, &batch).await?;
+    let channel_wiki_block = load_channel_wiki_context(pool, &batch).await?;
     let context_max_seq = inbox_wake_context_max_seq(&batch, same_thread_context.as_ref());
     let mut transaction = pool.begin().await.map_err(to_string)?;
     let work_item_id: Uuid = sqlx::query_scalar(
@@ -867,6 +899,7 @@ pub(crate) async fn ensure_agent_inbox_wake_work_item(
         same_thread_context
             .as_ref()
             .map(|context| context.body.as_str()),
+        channel_wiki_block.as_deref(),
     ))
     .bind(context_max_seq)
     .fetch_one(&mut *transaction)

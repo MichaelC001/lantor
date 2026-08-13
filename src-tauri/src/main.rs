@@ -13,6 +13,7 @@ mod application;
 mod artifact_store;
 mod attachments;
 mod bootstrap;
+mod channel_wiki;
 mod channels;
 mod commands;
 mod context_tool;

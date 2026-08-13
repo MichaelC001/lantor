@@ -73,6 +73,7 @@ fn inbox_wake_context_includes_recent_thread_context_without_repeating_policy() 
             sender_role: Some("owner".to_owned()),
         }],
         Some("[target=#support:abc msg=abc time=2026-01-01T00:00:00+00:00 type=agent delivery=error] Agent: partial work"),
+        Some("Channel wiki for #support (rev abcd1234, updated 2026-01-01T00:00:00Z by @worker) — required reading before substantive work; skip if you already read this revision:\n# Support playbook"),
     );
 
     assert!(context.contains("Recent same-thread context"));

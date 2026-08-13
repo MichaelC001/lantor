@@ -9,6 +9,10 @@ use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::agent_routing::resolve_agent_by_handle;
+use crate::channel_wiki::{
+    list_channel_wiki_revisions, load_channel_wiki_head, publish_channel_wiki_revision,
+    short_revision_id, ChannelWikiPublishOutcome, ChannelWikiRevision, CHANNEL_WIKI_MAX_BYTES,
+};
 use crate::db::db_connect;
 use crate::freshness::advance_agent_target_watermark;
 use crate::github::{refresh_github_review_attention, GithubReviewAttentionRefreshResult};
@@ -454,6 +458,7 @@ pub(crate) async fn agent_context_message_search(
         None => None,
     };
     let pattern = format!("%{}%", escape_like_pattern(query));
+    let wiki_channel_filter = target.as_ref().map(|target| target.channel_id);
 
     let rows = if let Some(target) = target {
         sqlx::query(&format!(
@@ -474,7 +479,7 @@ pub(crate) async fn agent_context_message_search(
             attachment_summary_sql()
         ))
         .bind(target.channel_id)
-        .bind(pattern)
+        .bind(&pattern)
         .bind(limit)
         .fetch_all(pool)
         .await
@@ -496,7 +501,7 @@ pub(crate) async fn agent_context_message_search(
             "#,
             attachment_summary_sql()
         ))
-        .bind(pattern)
+        .bind(&pattern)
         .bind(limit)
         .fetch_all(pool)
         .await
@@ -512,7 +517,275 @@ pub(crate) async fn agent_context_message_search(
     for row in rows {
         output.push(format_context_message_row(&row, None));
     }
+
+    let wiki_rows = if let Some(channel_id) = wiki_channel_filter {
+        sqlx::query(
+            r#"
+            select c.name as channel_name, c.kind as channel_kind,
+                   r.id as rev_id, r.author, r.created_at, r.content
+            from channel_wiki_heads h
+            join channel_wiki_revisions r on r.id = h.head_id
+            join channels c on c.id = h.channel_id
+            where h.channel_id = $1
+              and lower(r.content) like lower($2) escape '\'
+            "#,
+        )
+        .bind(channel_id)
+        .bind(&pattern)
+        .fetch_all(pool)
+        .await
+        .map_err(to_string)?
+    } else {
+        sqlx::query(
+            r#"
+            select c.name as channel_name, c.kind as channel_kind,
+                   r.id as rev_id, r.author, r.created_at, r.content
+            from channel_wiki_heads h
+            join channel_wiki_revisions r on r.id = h.head_id
+            join channels c on c.id = h.channel_id
+            where lower(r.content) like lower($1) escape '\'
+            order by r.created_at desc
+            limit $2
+            "#,
+        )
+        .bind(&pattern)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(to_string)?
+    };
+    if !wiki_rows.is_empty() {
+        output.push(format!("Channel wiki matches ({}):", wiki_rows.len()));
+        for row in wiki_rows {
+            let channel_name: String = row.get("channel_name");
+            let channel_kind: String = row.get("channel_kind");
+            let rev_id: Uuid = row.get("rev_id");
+            let author: String = row.get("author");
+            let created_at: DateTime<Utc> = row.get("created_at");
+            let content: String = row.get("content");
+            let label = if channel_kind == "dm" {
+                format!("dm:{channel_name}")
+            } else {
+                format!("#{channel_name}")
+            };
+            let snippet = content
+                .lines()
+                .find(|line| line.to_lowercase().contains(&query.to_lowercase()))
+                .unwrap_or_default()
+                .trim()
+                .chars()
+                .take(200)
+                .collect::<String>();
+            output.push(format!(
+                "[wiki target={label} rev={} updated={} author={author}] {snippet}\n  Read the full wiki with wiki-read --channel \"{label}\".",
+                short_revision_id(rev_id),
+                created_at.to_rfc3339(),
+            ));
+        }
+    }
     Ok(output.join("\n\n"))
+}
+
+async fn resolve_wiki_channel(
+    pool: &SqlitePool,
+    args: &[String],
+    command: &str,
+) -> CommandResult<(Uuid, String)> {
+    let channel = arg_value(args, "--channel")
+        .or_else(|| arg_value(args, "--target"))
+        .ok_or_else(|| format!("{command} requires --channel \"#channel\""))?;
+    let (channel_ref, _) = split_context_target(&channel);
+    resolve_agent_context_channel(pool, &channel_ref).await
+}
+
+async fn resolve_wiki_revision_ref(
+    pool: &SqlitePool,
+    channel_id: Uuid,
+    raw: &str,
+) -> CommandResult<Uuid> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("wiki revision reference is empty".to_owned());
+    }
+    if let Ok(revision_id) = Uuid::parse_str(raw) {
+        return Ok(revision_id);
+    }
+    let pattern = format!("{raw}%");
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        select id
+        from channel_wiki_revisions
+        where channel_id = $1 and lower(hex(id)) like replace(lower($2), '-', '')
+        limit 2
+        "#,
+    )
+    .bind(channel_id)
+    .bind(pattern)
+    .fetch_all(pool)
+    .await
+    .map_err(to_string)?;
+    match ids.as_slice() {
+        [id] => Ok(*id),
+        [] => Err(format!("unknown wiki revision: {raw}")),
+        _ => Err(format!("ambiguous wiki revision prefix: {raw}")),
+    }
+}
+
+async fn current_agent_wiki_author(pool: &SqlitePool, channel_id: Uuid) -> CommandResult<String> {
+    let Some(agent_id) = current_agent_id_from_env(pool).await? else {
+        return Ok("owner".to_owned());
+    };
+    let row = sqlx::query(
+        r#"
+        select
+            a.handle,
+            c.kind as channel_kind,
+            c.dm_agent_id,
+            exists(
+                select 1 from channel_members cm
+                where cm.channel_id = $2 and cm.agent_id = a.id
+            ) as is_member
+        from agents a
+        join channels c on c.id = $2
+        where a.id = $1
+        "#,
+    )
+    .bind(agent_id)
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(to_string)?
+    .ok_or_else(|| "current agent or channel no longer exists".to_owned())?;
+    let handle: String = row.get("handle");
+    let channel_kind: String = row.get("channel_kind");
+    let dm_agent_id: Option<Uuid> = row.get("dm_agent_id");
+    let is_member: bool = row.get("is_member");
+    let allowed = match channel_kind.as_str() {
+        "dm" => dm_agent_id == Some(agent_id),
+        _ => is_member,
+    };
+    if !allowed {
+        return Err(format!(
+            "@{handle} is not a member of this channel; only channel members and the owner may edit its wiki"
+        ));
+    }
+    Ok(format!("@{handle}"))
+}
+
+fn format_wiki_revision_summary(revision: &ChannelWikiRevision, is_head: bool) -> String {
+    let mut line = format!(
+        "rev {}{} parent={} author={} time={} size={}B",
+        short_revision_id(revision.id),
+        if is_head { " [head]" } else { "" },
+        revision
+            .parent_id
+            .map(short_revision_id)
+            .unwrap_or_else(|| "none".to_owned()),
+        revision.author,
+        revision.created_at.to_rfc3339(),
+        revision.content.len(),
+    );
+    if !revision.note.trim().is_empty() {
+        line.push_str(&format!(" note: {}", revision.note.trim()));
+    }
+    line
+}
+
+pub(crate) async fn agent_context_wiki_read(
+    pool: &SqlitePool,
+    args: &[String],
+) -> CommandResult<String> {
+    let (channel_id, channel_label) = resolve_wiki_channel(pool, args, "wiki-read").await?;
+    let Some(head) = load_channel_wiki_head(pool, channel_id).await? else {
+        return Ok(format!(
+            "{channel_label} has no wiki yet. Create one with wiki-write --channel \"{channel_label}\" --file <markdown-path> --note \"<one-line reason>\"."
+        ));
+    };
+    Ok(format!(
+        "Channel wiki for {channel_label}\n{}\nTo update: wiki-write --channel \"{channel_label}\" --parent {} --file <markdown-path> --note \"<one-line reason>\"\n\n{}",
+        format_wiki_revision_summary(&head, true),
+        short_revision_id(head.id),
+        head.content.trim(),
+    ))
+}
+
+pub(crate) async fn agent_context_wiki_write(
+    pool: &SqlitePool,
+    args: &[String],
+) -> CommandResult<String> {
+    let (channel_id, channel_label) = resolve_wiki_channel(pool, args, "wiki-write").await?;
+    let content = match (arg_value(args, "--file"), arg_value(args, "--content")) {
+        (Some(_), Some(_)) => {
+            return Err("wiki-write accepts --file or --content, not both".to_owned())
+        }
+        (Some(path), None) => fs::read_to_string(Path::new(&path))
+            .map_err(|err| format!("failed to read {path}: {err}"))?,
+        (None, Some(content)) => content,
+        (None, None) => {
+            return Err(
+                "wiki-write requires the new full wiki content via --file <markdown-path> or --content <text>"
+                    .to_owned(),
+            )
+        }
+    };
+    let note = arg_value(args, "--note").unwrap_or_default();
+    let author = current_agent_wiki_author(pool, channel_id).await?;
+    let parent_id = match arg_value(args, "--parent") {
+        Some(parent) => Some(resolve_wiki_revision_ref(pool, channel_id, &parent).await?),
+        None => None,
+    };
+    if parent_id.is_none() {
+        if let Some(head) = load_channel_wiki_head(pool, channel_id).await? {
+            return Err(format!(
+                "{channel_label} already has a wiki at rev {}; pass --parent {} (re-read with wiki-read first, then merge your edit into the latest content)",
+                short_revision_id(head.id),
+                short_revision_id(head.id),
+            ));
+        }
+    }
+    match publish_channel_wiki_revision(pool, channel_id, parent_id, &content, &author, &note)
+        .await?
+    {
+        ChannelWikiPublishOutcome::Published(revision) => Ok(format!(
+            "Published wiki rev {} for {channel_label} ({} bytes, limit {}). Agents will see this revision announced on their next wake in this channel.",
+            short_revision_id(revision.id),
+            revision.content.len(),
+            CHANNEL_WIKI_MAX_BYTES,
+        )),
+        ChannelWikiPublishOutcome::Conflict(head) => Err(format!(
+            "wiki head moved: current head is now rev {} ({}). Re-read with wiki-read --channel \"{channel_label}\", merge your edit into the latest content, then retry with --parent {}.",
+            short_revision_id(head.id),
+            format_wiki_revision_summary(&head, true),
+            short_revision_id(head.id),
+        )),
+    }
+}
+
+pub(crate) async fn agent_context_wiki_log(
+    pool: &SqlitePool,
+    args: &[String],
+) -> CommandResult<String> {
+    let (channel_id, channel_label) = resolve_wiki_channel(pool, args, "wiki-log").await?;
+    let limit = parse_context_tool_limit(args, 10, 50)?;
+    let head_id = load_channel_wiki_head(pool, channel_id)
+        .await?
+        .map(|head| head.id);
+    let revisions = list_channel_wiki_revisions(pool, channel_id, limit).await?;
+    if revisions.is_empty() {
+        return Ok(format!("{channel_label} has no wiki revisions."));
+    }
+    let mut output = vec![format!(
+        "Wiki revision log for {channel_label} ({} revision{}, newest first):",
+        revisions.len(),
+        if revisions.len() == 1 { "" } else { "s" }
+    )];
+    for revision in &revisions {
+        output.push(format_wiki_revision_summary(
+            revision,
+            head_id == Some(revision.id),
+        ));
+    }
+    Ok(output.join("\n"))
 }
 
 pub(crate) async fn agent_context_attachment_info(
@@ -1716,7 +1989,7 @@ pub(crate) async fn agent_context_github_sync(
 pub(crate) async fn run_agent_context_tool(args: &[String]) -> CommandResult<String> {
     if args.is_empty() || has_arg(args, "--help") || has_arg(args, "-h") {
         return Ok(
-            "Lantor agent context tool\n\nCommands:\n  inbox-list [--state active|unread|processing|archived|all] [--limit 20]\n  inbox-read --inbox-id <uuid-or-prefix>\n  inbox-archive --inbox-id <uuid-or-prefix>\n  workspace-info [--target @handle]\n  workspace-list [--target @handle] [--max-depth 2] [--limit 80]\n  memory-read [--target @handle] [--limit 16000]\n  run-read --run-id <uuid-or-prefix> [--target @handle] [--limit 8] [--log-limit 8000]\n  history-read --target \"#channel[:thread]\" [--limit 30]\n  message-search --query <text> [--target \"#channel\"] [--limit 30]\n  github sync --channel \"#channel\"\n  attachment-info --attachment-id <uuid>\n  artifact-read --artifact-id <uuid>\n  agent-inspect --target @handle\n\nTargets may be #channel, #channel:<message-id-prefix>, dm:@agent, channel UUID, or channel UUID:<message-id-prefix>. Inbox, run, workspace, and memory commands default to the current LANTOR_AGENT_ID when invoked by an agent."
+            "Lantor agent context tool\n\nCommands:\n  inbox-list [--state active|unread|processing|archived|all] [--limit 20]\n  inbox-read --inbox-id <uuid-or-prefix>\n  inbox-archive --inbox-id <uuid-or-prefix>\n  workspace-info [--target @handle]\n  workspace-list [--target @handle] [--max-depth 2] [--limit 80]\n  memory-read [--target @handle] [--limit 16000]\n  run-read --run-id <uuid-or-prefix> [--target @handle] [--limit 8] [--log-limit 8000]\n  history-read --target \"#channel[:thread]\" [--limit 30]\n  message-search --query <text> [--target \"#channel\"] [--limit 30]\n  wiki-read --channel \"#channel\"\n  wiki-write --channel \"#channel\" [--parent <rev>] --file <markdown-path> | --content <text> [--note \"<one-line reason>\"]\n  wiki-log --channel \"#channel\" [--limit 10]\n  github sync --channel \"#channel\"\n  attachment-info --attachment-id <uuid>\n  artifact-read --artifact-id <uuid>\n  agent-inspect --target @handle\n\nTargets may be #channel, #channel:<message-id-prefix>, dm:@agent, channel UUID, or channel UUID:<message-id-prefix>. Inbox, run, workspace, and memory commands default to the current LANTOR_AGENT_ID when invoked by an agent."
                 .to_owned(),
         );
     }
@@ -1740,6 +2013,16 @@ pub(crate) async fn run_agent_context_tool(args: &[String]) -> CommandResult<Str
         "message-search" | "search-messages" | "search" => {
             agent_context_message_search(&pool, args).await
         }
+        "wiki-read" | "read-wiki" => agent_context_wiki_read(&pool, args).await,
+        "wiki-write" | "write-wiki" | "wiki-update" => agent_context_wiki_write(&pool, args).await,
+        "wiki-log" | "wiki-history" => agent_context_wiki_log(&pool, args).await,
+        "wiki" => match args.get(1).map(String::as_str) {
+            Some("read") => agent_context_wiki_read(&pool, &args[1..]).await,
+            Some("write" | "update") => agent_context_wiki_write(&pool, &args[1..]).await,
+            Some("log" | "history") => agent_context_wiki_log(&pool, &args[1..]).await,
+            Some(other) => Err(format!("unknown wiki command: {other}")),
+            None => Err("wiki requires a subcommand; available: read, write, log".to_owned()),
+        },
         "github-sync" | "github-fetch" | "sync-github" => {
             agent_context_github_sync(&pool, args).await
         }
