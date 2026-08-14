@@ -8,8 +8,9 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
+    middleware::{from_fn, Next},
     response::{
         sse::{Event, KeepAlive},
         IntoResponse, Response, Sse,
@@ -303,11 +304,35 @@ fn web_router(state: Arc<WebState>, dist_dir: PathBuf) -> Router {
         )
         .with_state(state);
 
-    if index.is_file() {
+    let app = if index.is_file() {
         app.fallback_service(ServeDir::new(&dist_dir).fallback(ServeFile::new(index)))
     } else {
         app.fallback(get(move || missing_dist(dist_dir)))
+    };
+    app.layer(from_fn(static_cache_control))
+}
+
+/// ServeDir emits no Cache-Control header, so browsers fall back to heuristic
+/// caching keyed off Last-Modified and can keep showing a stale UI for hours
+/// after `npm run build`. Hashed /assets/ bundles are immutable by
+/// construction; everything else (notably index.html) must revalidate on
+/// every load. API responses are left untouched.
+async fn static_cache_control(request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let is_api = path.starts_with("/api/");
+    let is_hashed_asset = path.starts_with("/assets/");
+    let mut response = next.run(request).await;
+    if !is_api {
+        let value = if is_hashed_asset {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        };
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
     }
+    response
 }
 
 fn web_dist_dir() -> PathBuf {
