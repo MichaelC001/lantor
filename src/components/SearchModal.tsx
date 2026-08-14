@@ -1,4 +1,4 @@
-import { Activity, ArrowLeft, Bot, CalendarDays, ChevronDown, FileText, Hash, LayoutList, MessageSquare, Search, X } from "lucide-react";
+import { Activity, ArrowLeft, BookOpen, Bot, CalendarDays, ChevronDown, FileText, Hash, LayoutList, MessageSquare, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 import type { Agent, OwnerProfile, SearchResult, SearchScope, SearchTimeRange } from "../types";
 import { APP_DISPLAY_NAME } from "../branding";
@@ -30,6 +30,7 @@ const SCOPE_OPTIONS: Array<{ value: SearchScope; label: string }> = [
   { value: "agents", label: "Agents" },
   { value: "activity", label: "Activity" },
   { value: "artifacts", label: "Artifacts" },
+  { value: "wiki", label: "Wiki" },
 ];
 
 const TIME_OPTIONS: Array<{ value: SearchTimeRange; label: string }> = [
@@ -46,6 +47,7 @@ const GROUPS = [
   { key: "agents", title: "Agents", kinds: new Set(["agent"]), icon: Bot },
   { key: "activity", title: "Activity & agent turns", kinds: new Set(["activity", "request"]), icon: Activity },
   { key: "artifacts", title: "Artifacts", kinds: new Set(["artifact"]), icon: FileText },
+  { key: "wiki", title: "Channel wikis", kinds: new Set(["wiki"]), icon: BookOpen },
 ];
 
 function escapeRegExp(value: string) {
@@ -57,6 +59,7 @@ function resultLabel(kind: string) {
   if (kind === "reply") return "Thread";
   if (kind === "request") return "Agent turn";
   if (kind === "artifact") return "Artifact";
+  if (kind === "wiki") return "Wiki";
   return kind;
 }
 

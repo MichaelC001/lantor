@@ -4,8 +4,8 @@ use uuid::Uuid;
 use crate::{
     app::{AppState, CommandResult},
     application::wiki::{
-        self as application, ChannelWikiOverview, LoadChannelWikiRequest,
-        PublishChannelWikiRequest, PublishChannelWikiResult,
+        self as application, ChannelWikiOverview, ChannelWikiSearchHit, LoadChannelWikiRequest,
+        PublishChannelWikiRequest, PublishChannelWikiResult, SearchChannelWikisRequest,
     },
 };
 
@@ -15,6 +15,15 @@ pub(crate) async fn load_channel_wiki(
     state: State<'_, AppState>,
 ) -> CommandResult<ChannelWikiOverview> {
     application::load_channel_wiki(&state.pool, LoadChannelWikiRequest { channel_id }).await
+}
+
+#[tauri::command]
+pub(crate) async fn search_channel_wikis(
+    query: String,
+    limit: Option<i64>,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<ChannelWikiSearchHit>> {
+    application::search_channel_wikis(&state.pool, SearchChannelWikisRequest { query, limit }).await
 }
 
 #[tauri::command]

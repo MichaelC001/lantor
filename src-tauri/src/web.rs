@@ -55,7 +55,10 @@ use crate::application::{
         SendMessageRequest, SetMessageSavedRequest,
     },
     tasks::{self as task_commands, UpdateTaskStatusRequest, UpdateTaskTitleRequest},
-    wiki::{self as wiki_commands, LoadChannelWikiRequest, PublishChannelWikiRequest},
+    wiki::{
+        self as wiki_commands, LoadChannelWikiRequest, PublishChannelWikiRequest,
+        SearchChannelWikisRequest,
+    },
     AgentIdRequest,
 };
 use crate::domain::reminders::complete_reminder_in_pool;
@@ -228,6 +231,10 @@ fn web_router(state: Arc<WebState>, dist_dir: PathBuf) -> Router {
             post(api_load_channel_wiki).layer(CompressionLayer::new()),
         )
         .route("/api/publish_channel_wiki", post(api_publish_channel_wiki))
+        .route(
+            "/api/search_channel_wikis",
+            post(api_search_channel_wikis).layer(CompressionLayer::new()),
+        )
         .route(
             "/api/load_github_review_queue",
             post(api_load_github_review_queue),
@@ -529,6 +536,16 @@ async fn api_publish_channel_wiki(
     Json(request): Json<PublishChannelWikiRequest>,
 ) -> Result<impl IntoResponse, Response> {
     wiki_commands::publish_channel_wiki(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_search_channel_wikis(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<SearchChannelWikisRequest>,
+) -> Result<impl IntoResponse, Response> {
+    wiki_commands::search_channel_wikis(&state.pool, request)
         .await
         .map(Json)
         .map_err(api_error)

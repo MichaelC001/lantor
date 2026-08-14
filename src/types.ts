@@ -296,6 +296,16 @@ export type PublishChannelWikiResult = {
   overview: ChannelWikiOverview;
 };
 
+export type ChannelWikiSearchHit = {
+  channel_id: string;
+  channel_name: string;
+  channel_kind: string;
+  rev_short_id: string;
+  author: string;
+  updated_at: string;
+  snippet: string;
+};
+
 export type GithubReviewTaskResult = {
   thread_root_id: string;
   task_id: string;
@@ -494,7 +504,7 @@ export type BootstrapPerf = {
   };
 };
 
-export type SearchScope = "all" | "messages" | "channels" | "tasks" | "agents" | "activity" | "artifacts";
+export type SearchScope = "all" | "messages" | "channels" | "tasks" | "agents" | "activity" | "artifacts" | "wiki";
 
 export type SearchTimeRange = "any" | "today" | "7d" | "30d";
 

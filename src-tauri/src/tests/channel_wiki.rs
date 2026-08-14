@@ -308,3 +308,112 @@ async fn publish_announces_system_message_and_application_flow_reports_conflict(
     drop_test_schema(pool, schema).await;
     assert!(result.is_ok(), "{:?}", result.err());
 }
+
+#[tokio::test]
+async fn search_channel_wikis_matches_heads_only() {
+    let Some((pool, schema)) = test_pool().await else {
+        return;
+    };
+    let result: Result<(), String> = async {
+        use crate::application::wiki::{search_channel_wikis, SearchChannelWikisRequest};
+
+        let flock_channel = insert_test_channel(&pool, "wiki-search-a").await?;
+        let bench_channel = insert_test_channel(&pool, "wiki-search-b").await?;
+
+        let first = match publish_channel_wiki_revision(
+            &pool,
+            flock_channel,
+            None,
+            "# Ops\nsupervisor uses a flock singleton lock",
+            "@vegapunk",
+            "",
+        )
+        .await?
+        {
+            ChannelWikiPublishOutcome::Published(revision) => revision,
+            other => return Err(format!("expected publish, got {other:?}")),
+        };
+        match publish_channel_wiki_revision(
+            &pool,
+            bench_channel,
+            None,
+            "# Notes\nBenchmark methodology lives in artifacts",
+            "@arch",
+            "",
+        )
+        .await?
+        {
+            ChannelWikiPublishOutcome::Published(_) => {}
+            other => return Err(format!("expected publish, got {other:?}")),
+        }
+
+        let hits = search_channel_wikis(
+            &pool,
+            SearchChannelWikisRequest {
+                query: "flock".to_owned(),
+                limit: None,
+            },
+        )
+        .await?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].channel_id, flock_channel);
+        assert_eq!(hits[0].channel_name, "wiki-search-a");
+        assert!(
+            hits[0].snippet.contains("flock"),
+            "snippet: {}",
+            hits[0].snippet
+        );
+
+        // Case-insensitive match.
+        let hits = search_channel_wikis(
+            &pool,
+            SearchChannelWikisRequest {
+                query: "BENCHMARK".to_owned(),
+                limit: None,
+            },
+        )
+        .await?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].channel_id, bench_channel);
+
+        // Advancing the head past the matching content removes the hit: old
+        // revisions are never searched.
+        match publish_channel_wiki_revision(
+            &pool,
+            flock_channel,
+            Some(first.id),
+            "# Ops\nsupervisor notes moved elsewhere",
+            "@vegapunk",
+            "drop lock details",
+        )
+        .await?
+        {
+            ChannelWikiPublishOutcome::Published(_) => {}
+            other => return Err(format!("expected publish, got {other:?}")),
+        }
+        let hits = search_channel_wikis(
+            &pool,
+            SearchChannelWikisRequest {
+                query: "flock".to_owned(),
+                limit: None,
+            },
+        )
+        .await?;
+        assert!(hits.is_empty(), "old revisions must not match: {hits:?}");
+
+        // Blank queries return nothing instead of matching every wiki.
+        let hits = search_channel_wikis(
+            &pool,
+            SearchChannelWikisRequest {
+                query: "   ".to_owned(),
+                limit: None,
+            },
+        )
+        .await?;
+        assert!(hits.is_empty());
+        Ok(())
+    }
+    .await;
+    drop_test_schema(pool, schema).await;
+    assert!(result.is_ok(), "{:?}", result.err());
+}

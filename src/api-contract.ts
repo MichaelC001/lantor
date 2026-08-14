@@ -5,6 +5,7 @@ import type {
   Bootstrap,
   ChannelMessagePage,
   ChannelWikiOverview,
+  ChannelWikiSearchHit,
   GithubChannelOverview,
   GithubIssueDetail,
   GithubIssueTaskResult,
@@ -122,6 +123,13 @@ export type ApiContract = {
   load_channel_wiki: {
     args: { channelId: string };
     result: ChannelWikiOverview;
+  };
+  search_channel_wikis: {
+    args: {
+      query: string;
+      limit?: number | null;
+    };
+    result: ChannelWikiSearchHit[];
   };
   publish_channel_wiki: {
     args: {
@@ -328,6 +336,7 @@ const API_COMMAND_NAMES = {
   delete_channel: true,
   load_channel_wiki: true,
   publish_channel_wiki: true,
+  search_channel_wikis: true,
   load_github_review_queue: true,
   refresh_github_review_queue: true,
   refresh_github_issue_queue: true,

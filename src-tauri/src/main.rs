@@ -79,7 +79,7 @@ use commands::{
         set_message_saved, update_message,
     },
     tasks::{update_task_status, update_task_title},
-    wiki::{load_channel_wiki, publish_channel_wiki},
+    wiki::{load_channel_wiki, publish_channel_wiki, search_channel_wikis},
 };
 use context_tool::run_agent_context_tool;
 use db::{db_connect_with_url, db_url, migrate};
@@ -326,6 +326,7 @@ pub fn run() {
             load_github_issue_detail,
             load_older_channel_messages,
             search_messages,
+            search_channel_wikis,
             refresh_github_review_queue,
             refresh_github_issue_queue,
             rereview_github_pull_request,

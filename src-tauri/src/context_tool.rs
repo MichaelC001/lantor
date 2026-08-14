@@ -55,7 +55,7 @@ fn has_arg(args: &[String], name: &str) -> bool {
 
 /// Escape SQL LIKE metacharacters so user queries match them literally.
 /// Queries using the result must add `escape '\'`.
-fn escape_like_pattern(input: &str) -> String {
+pub(crate) fn escape_like_pattern(input: &str) -> String {
     input
         .replace('\\', "\\\\")
         .replace('%', "\\%")

@@ -51,6 +51,7 @@ import {
   Channel,
   ChannelMessagePage,
   ChannelMember,
+  ChannelWikiSearchHit,
   DraftAttachment,
   EMPTY_AGENT_FORM,
   ActivityFeedItem,
@@ -763,6 +764,7 @@ function App() {
   const [searchTimeRange, setSearchTimeRange] = useState<SearchTimeRange>("any");
   const [messageSearchResults, setMessageSearchResults] = useState<Message[]>([]);
   const [messageSearchLoading, setMessageSearchLoading] = useState(false);
+  const [wikiSearchResults, setWikiSearchResults] = useState<ChannelWikiSearchHit[]>([]);
   const [activityFeedSnapshotVersion, setActivityFeedSnapshotVersion] = useState(0);
   const [newChannel, setNewChannel] = useState("");
   const [newChannelNameSubmitError, setNewChannelNameSubmitError] = useState<string | null>(null);
@@ -901,6 +903,7 @@ function App() {
   const pendingChannelRestoreRef = useRef<Set<string>>(new Set());
   const activityFeedRequestRef = useRef(0);
   const messageSearchRequestRef = useRef(0);
+  const wikiSearchRequestRef = useRef(0);
   const refreshTimerRef = useRef<number | null>(null);
   const refreshInFlightRef = useRef(false);
   const refreshPromiseRef = useRef<Promise<void> | null>(null);
@@ -1898,6 +1901,29 @@ function App() {
 
     return () => window.clearTimeout(timer);
   }, [searchQuery, searchScope, searchTimeRange, showSearchModal]);
+
+  useEffect(() => {
+    const requestId = wikiSearchRequestRef.current + 1;
+    wikiSearchRequestRef.current = requestId;
+    const query = searchQuery.trim();
+    if (!showSearchModal || !query || !searchScopeAllows(searchScope, "wiki")) {
+      setWikiSearchResults([]);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      apiInvoke("search_channel_wikis", { query, limit: 20 }).then((hits) => {
+        if (wikiSearchRequestRef.current !== requestId) return;
+        setWikiSearchResults(hits);
+      }).catch((err) => {
+        if (wikiSearchRequestRef.current !== requestId) return;
+        setWikiSearchResults([]);
+        console.error(err);
+      });
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [searchQuery, searchScope, showSearchModal]);
 
   useEffect(() => {
     if (!data || showOwnerProfileModal) return;
@@ -3113,8 +3139,24 @@ function App() {
       })).slice(0, 16));
     }
 
+    if (searchScopeAllows(searchScope, "wiki")) {
+      results.push(...wikiSearchResults
+        .filter((item) => matchesSearchTime(item.updated_at, searchTimeRange))
+        .map((item) => ({
+          id: `wiki-${item.channel_id}`,
+          kind: "wiki",
+          title: item.channel_kind === "dm" ? "DM wiki" : `#${item.channel_name} wiki`,
+          detail: `rev ${item.rev_short_id} · ${item.author} · ${formatTime(item.updated_at)}`,
+          excerpt: item.snippet,
+          createdAt: item.updated_at,
+          channelId: item.channel_id,
+          threadId: null,
+          agentId: null,
+        })).slice(0, 10));
+    }
+
     return results.slice(0, 80);
-  }, [data, messageSearchResults, searchQuery, searchScope, searchTimeRange]);
+  }, [data, messageSearchResults, wikiSearchResults, searchQuery, searchScope, searchTimeRange]);
 
   function taskForMessage(messageId: string) {
     return data?.tasks.find((task) => task.message_id === messageId) ?? null;
@@ -4262,6 +4304,19 @@ function App() {
 
   async function openSearchResult(result: SearchResult) {
     const openedFromSearch = showSearchModal;
+    if (result.kind === "wiki") {
+      setShowSearchModal(false);
+      if (result.channelId) {
+        selectChannel(result.channelId);
+        setActiveTab("wiki");
+      }
+      if (openedFromSearch) {
+        replaceNextAppHistoryEntryRef.current = true;
+        searchResultThreadIdRef.current = null;
+        searchResultAgentIdRef.current = null;
+      }
+      return;
+    }
     if (result.kind === "artifact") {
       const artifact = data?.artifacts.find((item) => item.id === result.id);
       setShowSearchModal(false);
