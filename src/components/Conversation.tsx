@@ -1,6 +1,7 @@
 import {
   ArrowLeft,
   ArrowRight,
+  BookOpen,
   CheckCircle2,
   ChevronRight,
   Flag,
@@ -36,6 +37,7 @@ import { AgentAvatar, AgentAvatarWithProfile } from "./AgentAvatar";
 import { ComposerReferenceTextarea } from "./ComposerReferenceTextarea";
 import { DraftAttachmentsPreview } from "./DraftAttachmentsPreview";
 import { GithubPanel } from "./GithubPanel";
+import { WikiPanel } from "./WikiPanel";
 import { MessageActionMenu } from "./MessageActionMenu";
 import { MessageAttachments } from "./MessageAttachments";
 import { MessageArtifacts } from "./MessageArtifacts";
@@ -57,7 +59,7 @@ type ConversationProps = {
   agentRuns: AgentRun[];
   agentWorkItems: AgentWorkItem[];
   channelAgents: Agent[];
-  activeTab: "chat" | "tasks" | "github";
+  activeTab: "chat" | "tasks" | "github" | "wiki";
   activeRoot: Message | null;
   rootMessages: Message[];
   messages: Message[];
@@ -68,7 +70,7 @@ type ConversationProps = {
   draft: string;
   draftAttachments: DraftAttachment[];
   taskTitleDrafts: Record<string, string>;
-  setActiveTab: (tab: "chat" | "tasks" | "github") => void;
+  setActiveTab: (tab: "chat" | "tasks" | "github" | "wiki") => void;
   setActiveThreadId: (threadId: string | null) => void;
   openMobileSidebar: () => void;
   canNavigateBack: boolean;
@@ -1022,6 +1024,9 @@ export function Conversation({
                 />
               )}
             </button>
+            <button className={activeTab === "wiki" ? "active" : ""} onClick={() => setActiveTab("wiki")}>
+              <BookOpen size={16} /> Wiki
+            </button>
           </>
         )}
       </div>
@@ -1444,6 +1449,8 @@ export function Conversation({
             </div>
           )}
         </div>
+      ) : activeTab === "wiki" ? (
+        channel ? <WikiPanel channel={channel} /> : null
       ) : channel ? (
         <GithubPanel
           channel={channel}

@@ -79,6 +79,7 @@ use commands::{
         set_message_saved, update_message,
     },
     tasks::{update_task_status, update_task_title},
+    wiki::{load_channel_wiki, publish_channel_wiki},
 };
 use context_tool::run_agent_context_tool;
 use db::{db_connect_with_url, db_url, migrate};
@@ -310,6 +311,7 @@ pub fn run() {
             mark_channel_read,
             mark_github_review_attention_read,
             open_dm_with_agent,
+            publish_channel_wiki,
             complete_startup_splash,
             download_attachment,
             open_external_url,
@@ -318,6 +320,7 @@ pub fn run() {
             load_activity_messages,
             load_channel_messages,
             load_channel_previews,
+            load_channel_wiki,
             load_message,
             load_github_review_queue,
             load_github_issue_detail,

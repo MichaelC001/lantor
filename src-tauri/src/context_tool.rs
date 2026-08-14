@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use crate::agent_routing::resolve_agent_by_handle;
 use crate::channel_wiki::{
-    list_channel_wiki_revisions, load_channel_wiki_head, publish_channel_wiki_revision,
-    short_revision_id, ChannelWikiPublishOutcome, ChannelWikiRevision, CHANNEL_WIKI_MAX_BYTES,
+    announce_channel_wiki_publish, list_channel_wiki_revisions, load_channel_wiki_head,
+    publish_channel_wiki_revision, short_revision_id, ChannelWikiPublishOutcome,
+    ChannelWikiRevision, CHANNEL_WIKI_MAX_BYTES,
 };
 use crate::db::db_connect;
 use crate::freshness::advance_agent_target_watermark;
@@ -746,12 +747,15 @@ pub(crate) async fn agent_context_wiki_write(
     match publish_channel_wiki_revision(pool, channel_id, parent_id, &content, &author, &note)
         .await?
     {
-        ChannelWikiPublishOutcome::Published(revision) => Ok(format!(
-            "Published wiki rev {} for {channel_label} ({} bytes, limit {}). Agents will see this revision announced on their next wake in this channel.",
-            short_revision_id(revision.id),
-            revision.content.len(),
-            CHANNEL_WIKI_MAX_BYTES,
-        )),
+        ChannelWikiPublishOutcome::Published(revision) => {
+            announce_channel_wiki_publish(pool, channel_id, &revision).await;
+            Ok(format!(
+                "Published wiki rev {} for {channel_label} ({} bytes, limit {}). Agents will see this revision announced on their next wake in this channel.",
+                short_revision_id(revision.id),
+                revision.content.len(),
+                CHANNEL_WIKI_MAX_BYTES,
+            ))
+        }
         ChannelWikiPublishOutcome::Conflict(head) => Err(format!(
             "wiki head moved: current head is now rev {} ({}). Re-read with wiki-read --channel \"{channel_label}\", merge your edit into the latest content, then retry with --parent {}.",
             short_revision_id(head.id),

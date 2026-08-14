@@ -275,6 +275,27 @@ export type GithubChannelOverview = {
   issues: GithubIssue[];
 };
 
+export type ChannelWikiRevision = {
+  id: string;
+  short_id: string;
+  parent_short_id: string | null;
+  content: string;
+  author: string;
+  note: string;
+  created_at: string;
+};
+
+export type ChannelWikiOverview = {
+  head: ChannelWikiRevision | null;
+  revisions: ChannelWikiRevision[];
+  max_bytes: number;
+};
+
+export type PublishChannelWikiResult = {
+  outcome: "published" | "conflict";
+  overview: ChannelWikiOverview;
+};
+
 export type GithubReviewTaskResult = {
   thread_root_id: string;
   task_id: string;

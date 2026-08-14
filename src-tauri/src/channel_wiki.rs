@@ -153,7 +153,10 @@ pub(crate) async fn list_channel_wiki_revisions(
         select r.id, r.parent_id, r.content, r.author, r.note, r.created_at
         from channel_wiki_revisions r
         where r.channel_id = $1
-        order by r.created_at desc, r.id desc
+        -- Revisions are append-only, so rowid reflects insertion order and
+        -- breaks same-millisecond created_at ties deterministically (random
+        -- blob ids do not).
+        order by r.created_at desc, r.rowid desc
         limit $2
         "#,
     )
@@ -167,6 +170,31 @@ pub(crate) async fn list_channel_wiki_revisions(
 
 pub(crate) fn short_revision_id(id: Uuid) -> String {
     id.to_string().chars().take(8).collect()
+}
+
+/// Post a system message in the channel announcing a published wiki revision,
+/// so required-reading changes never land silently. Best-effort: the revision
+/// itself is already committed when this runs.
+pub(crate) async fn announce_channel_wiki_publish(
+    pool: &SqlitePool,
+    channel_id: Uuid,
+    revision: &ChannelWikiRevision,
+) {
+    let action = if revision.parent_id.is_none() {
+        "created"
+    } else {
+        "updated"
+    };
+    let mut body = format!(
+        "📖 {} {action} the channel wiki (rev {})",
+        revision.author,
+        short_revision_id(revision.id),
+    );
+    let note = revision.note.trim();
+    if !note.is_empty() {
+        body.push_str(&format!(" — {note}"));
+    }
+    let _ = crate::ui_notifications::insert_system_message(pool, channel_id, None, body).await;
 }
 
 /// Build the wake-envelope wiki block for a channel, or None when the channel

@@ -267,7 +267,7 @@ type ArtifactViewerState = {
   error: string | null;
 };
 
-type ActiveTab = "chat" | "tasks" | "github";
+type ActiveTab = "chat" | "tasks" | "github" | "wiki";
 type MobileModal = "search" | "activity" | "saved";
 
 type AppHistoryState = {
@@ -333,6 +333,7 @@ function isAppHistoryState(value: unknown): value is AppHistoryState {
       || state.activeTab === "chat"
       || state.activeTab === "tasks"
       || state.activeTab === "github"
+      || state.activeTab === "wiki"
     )
     && typeof state.showThread === "boolean"
     && typeof state.showMobileSidebar === "boolean"

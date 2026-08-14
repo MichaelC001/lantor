@@ -4,6 +4,7 @@ import type {
   Artifact,
   Bootstrap,
   ChannelMessagePage,
+  ChannelWikiOverview,
   GithubChannelOverview,
   GithubIssueDetail,
   GithubIssueTaskResult,
@@ -12,6 +13,7 @@ import type {
   GithubReviewTaskResult,
   LaunchAgentStatus,
   Message,
+  PublishChannelWikiResult,
   RuntimeCheck,
 } from "./types";
 
@@ -116,6 +118,19 @@ export type ApiContract = {
   delete_channel: {
     args: { channelId: string };
     result: MutationResult;
+  };
+  load_channel_wiki: {
+    args: { channelId: string };
+    result: ChannelWikiOverview;
+  };
+  publish_channel_wiki: {
+    args: {
+      channelId: string;
+      parentId?: string | null;
+      content: string;
+      note: string;
+    };
+    result: PublishChannelWikiResult;
   };
   load_github_review_queue: {
     args: { channelId: string };
@@ -311,6 +326,8 @@ const API_COMMAND_NAMES = {
   create_channel: true,
   update_channel: true,
   delete_channel: true,
+  load_channel_wiki: true,
+  publish_channel_wiki: true,
   load_github_review_queue: true,
   refresh_github_review_queue: true,
   refresh_github_issue_queue: true,

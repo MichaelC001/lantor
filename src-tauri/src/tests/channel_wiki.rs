@@ -175,3 +175,136 @@ async fn wake_block_inlines_small_wikis_and_announces_large_ones() {
     drop_test_schema(pool, schema).await;
     assert!(result.is_ok(), "{:?}", result.err());
 }
+
+#[tokio::test]
+async fn publish_announces_system_message_and_application_flow_reports_conflict() {
+    let Some((pool, schema)) = test_pool().await else {
+        return;
+    };
+    let result: Result<(), String> = async {
+        use uuid::Uuid;
+
+        use crate::application::wiki::{
+            load_channel_wiki, publish_channel_wiki, LoadChannelWikiRequest,
+            PublishChannelWikiRequest,
+        };
+
+        let channel_id = insert_test_channel(&pool, "wiki-ui").await?;
+
+        let empty = load_channel_wiki(&pool, LoadChannelWikiRequest { channel_id }).await?;
+        assert!(empty.head.is_none());
+        assert!(empty.revisions.is_empty());
+        assert_eq!(empty.max_bytes, CHANNEL_WIKI_MAX_BYTES);
+
+        // First publish from the owner UI succeeds and announces in chat.
+        let first = publish_channel_wiki(
+            &pool,
+            PublishChannelWikiRequest {
+                channel_id,
+                parent_id: None,
+                content: "# Wiki v1".to_owned(),
+                note: "first version".to_owned(),
+            },
+        )
+        .await?;
+        assert_eq!(first.outcome, "published");
+        let head = first.overview.head.as_ref().ok_or("missing head")?;
+        assert_eq!(head.author, "owner");
+        assert_eq!(first.overview.revisions.len(), 1);
+
+        let announcements: i64 = sqlx::query_scalar(
+            r#"
+            select count(*)
+            from messages
+            where channel_id = $1
+              and sender_role = 'system'
+              and body like '%created the channel wiki%'
+            "#,
+        )
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        assert_eq!(announcements, 1, "publish must announce in chat");
+
+        // A stale parent (still None while a head exists) must come back as a
+        // structured conflict with the current head attached, and must not
+        // announce or advance the head.
+        let conflict = publish_channel_wiki(
+            &pool,
+            PublishChannelWikiRequest {
+                channel_id,
+                parent_id: None,
+                content: "# Stale rewrite".to_owned(),
+                note: String::new(),
+            },
+        )
+        .await?;
+        assert_eq!(
+            conflict.outcome, "conflict",
+            "parentless republish must conflict"
+        );
+        assert_eq!(conflict.overview.revisions.len(), 1);
+
+        let stale_parent = Uuid::new_v4();
+        let conflict = publish_channel_wiki(
+            &pool,
+            PublishChannelWikiRequest {
+                channel_id,
+                parent_id: Some(stale_parent),
+                content: "# Stale rewrite".to_owned(),
+                note: String::new(),
+            },
+        )
+        .await?;
+        assert_eq!(conflict.outcome, "conflict");
+        assert_eq!(
+            conflict.overview.head.as_ref().map(|rev| rev.id),
+            first.overview.head.as_ref().map(|rev| rev.id),
+            "conflict must return the unchanged head"
+        );
+
+        let system_messages: i64 = sqlx::query_scalar(
+            "select count(*) from messages where channel_id = $1 and sender_role = 'system'",
+        )
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        assert_eq!(system_messages, 1, "conflict must not announce");
+
+        // Advancing from the real head publishes and announces an update.
+        let head_id = first.overview.head.as_ref().map(|rev| rev.id);
+        let second = publish_channel_wiki(
+            &pool,
+            PublishChannelWikiRequest {
+                channel_id,
+                parent_id: head_id,
+                content: "# Wiki v2".to_owned(),
+                note: "expand conventions".to_owned(),
+            },
+        )
+        .await?;
+        assert_eq!(second.outcome, "published");
+        assert_eq!(second.overview.revisions.len(), 2);
+        let updates: i64 = sqlx::query_scalar(
+            r#"
+            select count(*)
+            from messages
+            where channel_id = $1
+              and sender_role = 'system'
+              and body like '%updated the channel wiki%'
+              and body like '%expand conventions%'
+            "#,
+        )
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        assert_eq!(updates, 1);
+        Ok(())
+    }
+    .await;
+    drop_test_schema(pool, schema).await;
+    assert!(result.is_ok(), "{:?}", result.err());
+}

@@ -9,6 +9,7 @@ pub(crate) mod github;
 pub(crate) mod inbox;
 pub(crate) mod messages;
 pub(crate) mod tasks;
+pub(crate) mod wiki;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
