@@ -156,15 +156,6 @@ export function ActivityFeedModal({
     });
   }, [items, open]);
 
-  useEffect(() => {
-    if (!open) return;
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
   if (!open) return null;
 
   function startSwipe(item: ActivityFeedItem, event: PointerEvent<HTMLElement>) {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { X } from "lucide-react";
+import { shouldDismissOnEscape } from "../escape-dismiss";
 
 type ModalProps = {
   open: boolean;
@@ -25,8 +26,8 @@ export function Modal({
   useEffect(() => {
     if (!open) return;
     function onKey(event: KeyboardEvent) {
-      if (!closeOnEscape || event.key !== "Escape" || event.defaultPrevented) return;
-      if (event.isComposing || event.keyCode === 229) return;
+      if (!closeOnEscape || !shouldDismissOnEscape(event)) return;
+      event.preventDefault();
       onClose();
     }
     window.addEventListener("keydown", onKey);

@@ -19,6 +19,11 @@ import { Bookmark, Home, Inbox, Search } from "lucide-react";
 import { apiInvoke, apiInvokeMeasured, completeStartupSplash, isTauriRuntime, subscribeBackendEvents } from "./apiClient";
 import type { ApiArgsTuple, ApiCommand, ApiResult } from "./api-contract";
 import { APP_DISPLAY_NAME } from "./branding";
+import {
+  shouldPopAppModalHistory,
+  shouldReplaceAppModalHistory,
+  type AppModal,
+} from "./app-modal-history";
 import { AgentDetailDrawer } from "./components/AgentDetailDrawer";
 import type { AgentPerformance } from "./components/AgentDetailDrawer";
 import { AgentFormModal } from "./components/AgentFormModal";
@@ -39,6 +44,7 @@ import { ThreadPanel } from "./components/ThreadPanel";
 import { UnreadBadge } from "./components/UnreadBadge";
 import { isProgressOnlyMessage } from "./message-grouping";
 import { messageReferenceLocation, type MessageReferenceKind } from "./message-references";
+import { shouldDismissOnEscape } from "./escape-dismiss";
 import {
   ACTIVE_RUN_STATUSES,
   Agent,
@@ -269,7 +275,6 @@ type ArtifactViewerState = {
 };
 
 type ActiveTab = "chat" | "tasks" | "github" | "wiki";
-type MobileModal = "search" | "activity" | "saved";
 
 type AppHistoryState = {
   __lantorUiHistory?: true;
@@ -281,7 +286,7 @@ type AppHistoryState = {
   showThread: boolean;
   showMobileSidebar: boolean;
   selectedAgentId: string | null;
-  activeModal: MobileModal | null;
+  activeModal: AppModal | null;
   focusedMessageId: string | null;
 };
 
@@ -945,6 +950,7 @@ function App() {
   const appHistoryReadyRef = useRef(false);
   const appHistoryIndexRef = useRef(0);
   const appHistoryMaxIndexRef = useRef(0);
+  const appModalHistoryBackPendingRef = useRef(false);
   const restoringAppHistoryRef = useRef(false);
   const replaceNextAppHistoryEntryRef = useRef(false);
   const lastAppHistoryKeyRef = useRef<string | null>(null);
@@ -953,13 +959,34 @@ function App() {
   const searchResultAgentIdRef = useRef<string | null>(null);
   const [appHistoryIndex, setAppHistoryIndex] = useState(0);
   const [appHistoryMaxIndex, setAppHistoryMaxIndex] = useState(0);
-  const activeMobileModal: MobileModal | null = showSearchModal
+  const activeAppModal: AppModal | null = showSearchModal
     ? "search"
     : showActivityFeedModal
       ? "activity"
       : showSavedModal
         ? "saved"
         : null;
+  const appSurfaceStateRef = useRef({
+    activeModal: activeAppModal,
+    blockingModalOpen: false,
+    selectedAgentId,
+    showThread,
+  });
+  appSurfaceStateRef.current = {
+    activeModal: activeAppModal,
+    blockingModalOpen:
+      showCreateChannelModal ||
+      showChannelSettingsModal ||
+      showChannelAgentsModal ||
+      showCreateAgentModal ||
+      showOwnerProfileModal ||
+      showSettingsModal ||
+      Boolean(confirmRequest) ||
+      Boolean(artifactViewer) ||
+      Boolean(editingAgentId),
+    selectedAgentId,
+    showThread,
+  };
 
   useEffect(() => {
     return () => {
@@ -992,7 +1019,7 @@ function App() {
       showThread,
       showMobileSidebar,
       selectedAgentId,
-      activeModal: activeMobileModal,
+      activeModal: activeAppModal,
       focusedMessageId: historyFocusedMessageIdRef.current,
     };
   }
@@ -2217,22 +2244,30 @@ function App() {
         return;
       }
 
-      const modalOpen =
-        showCreateChannelModal ||
-        showChannelSettingsModal ||
-        showChannelAgentsModal ||
-        showCreateAgentModal ||
-        showSearchModal ||
-        showActivityFeedModal ||
-        showSavedModal ||
-        showOwnerProfileModal ||
-        showSettingsModal ||
-        Boolean(artifactViewer) ||
-        Boolean(editingAgentId);
-      if (event.key === "Escape" && !modalOpen && !isTextInput(event.target)) {
-        if (selectedAgentId) {
+      if (event.key === "Escape") {
+        const surface = appSurfaceStateRef.current;
+        if (!shouldDismissOnEscape(event) || surface.blockingModalOpen) return;
+        if (surface.activeModal === "search") {
+          event.preventDefault();
+          closeAppModal("search", () => setShowSearchModal(false));
+          return;
+        }
+        if (surface.activeModal === "activity") {
+          event.preventDefault();
+          closeAppModal("activity", () => setShowActivityFeedModal(false));
+          return;
+        }
+        if (surface.activeModal === "saved") {
+          event.preventDefault();
+          closeAppModal("saved", () => setShowSavedModal(false));
+          return;
+        }
+        if (isTextInput(event.target)) return;
+        if (surface.selectedAgentId) {
+          event.preventDefault();
           setSelectedAgentId(null);
-        } else if (showThread) {
+        } else if (surface.showThread) {
+          event.preventDefault();
           setShowThread(false);
         }
       }
@@ -2275,6 +2310,7 @@ function App() {
 
   useEffect(() => {
     function onPopState(event: PopStateEvent) {
+      appModalHistoryBackPendingRef.current = false;
       if (!isAppHistoryState(event.state)) return;
       if (isMobileViewport()) {
         window.history.replaceState(null, "");
@@ -2388,7 +2424,7 @@ function App() {
     activeThreadId,
     activeTab,
     selectedAgentId,
-    activeMobileModal,
+    activeAppModal,
     showMobileSidebar,
     showThread,
   ]);
@@ -3737,6 +3773,9 @@ function App() {
   }
 
   function openSearchModal() {
+    if (shouldReplaceAppModalHistory(appSurfaceStateRef.current.activeModal, "search")) {
+      replaceNextAppHistoryEntryRef.current = true;
+    }
     setShowMobileSidebar(false);
     setMobileSidebarFocus("home");
     setShowActivityFeedModal(false);
@@ -3745,6 +3784,9 @@ function App() {
   }
 
   function openActivityFeedModal() {
+    if (shouldReplaceAppModalHistory(appSurfaceStateRef.current.activeModal, "activity")) {
+      replaceNextAppHistoryEntryRef.current = true;
+    }
     setShowMobileSidebar(false);
     setMobileSidebarFocus("home");
     setShowSearchModal(false);
@@ -3754,6 +3796,9 @@ function App() {
   }
 
   function openSavedModal() {
+    if (shouldReplaceAppModalHistory(appSurfaceStateRef.current.activeModal, "saved")) {
+      replaceNextAppHistoryEntryRef.current = true;
+    }
     setShowMobileSidebar(false);
     setMobileSidebarFocus("home");
     setShowSearchModal(false);
@@ -3778,14 +3823,28 @@ function App() {
     });
   }
 
-  function closeAppModal(fallback: () => void) {
+  function closeAppModal(expectedModal: AppModal, fallback: () => void) {
     if (isMobileViewport()) {
       fallback();
       return;
     }
-    if (activeMobileModal && canNavigateBack()) {
+    if (appModalHistoryBackPendingRef.current) return;
+    const historyState = isAppHistoryState(window.history.state)
+      ? window.history.state
+      : null;
+    if (shouldPopAppModalHistory({
+      activeModal: appSurfaceStateRef.current.activeModal,
+      expectedModal,
+      canNavigateBack: canNavigateBack(),
+      currentIndex: appHistoryIndexRef.current,
+      historyState,
+    })) {
+      appModalHistoryBackPendingRef.current = true;
       window.history.back();
       return;
+    }
+    if (appHistoryReadyRef.current && historyState) {
+      replaceNextAppHistoryEntryRef.current = true;
     }
     fallback();
   }
@@ -4793,7 +4852,7 @@ function App() {
         onTimeRangeChange={setSearchTimeRange}
         onOpenResult={openSearchResult}
         onClear={() => setSearchQuery("")}
-        onClose={() => closeAppModal(() => setShowSearchModal(false))}
+        onClose={() => closeAppModal("search", () => setShowSearchModal(false))}
       />
 
       <ActivityFeedModal
@@ -4807,7 +4866,7 @@ function App() {
         onDismissItem={dismissActivityFeedItem}
         onDismissItems={dismissActivityFeedItems}
         onMarkAllRead={markAllActivityFeedRead}
-        onClose={() => closeAppModal(() => setShowActivityFeedModal(false))}
+        onClose={() => closeAppModal("activity", () => setShowActivityFeedModal(false))}
       />
 
       <SavedMessagesModal
@@ -4817,7 +4876,7 @@ function App() {
         ownerProfile={data.owner_profile}
         onOpenItem={openSavedMessage}
         onUnsaveItem={unsaveSavedMessage}
-        onClose={() => closeAppModal(() => setShowSavedModal(false))}
+        onClose={() => closeAppModal("saved", () => setShowSavedModal(false))}
       />
 
       <ArtifactViewerModal

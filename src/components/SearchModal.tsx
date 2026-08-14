@@ -111,15 +111,10 @@ export function SearchModal({
   useEffect(() => {
     if (!open) return;
     const frame = window.requestAnimationFrame(() => inputRef.current?.focus());
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
     return () => {
       window.cancelAnimationFrame(frame);
-      window.removeEventListener("keydown", onKey);
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
