@@ -20,7 +20,9 @@ import { apiInvoke, apiInvokeMeasured, completeStartupSplash, isTauriRuntime, su
 import type { ApiArgsTuple, ApiCommand, ApiResult } from "./api-contract";
 import { APP_DISPLAY_NAME } from "./branding";
 import {
+  resolveAppModalHistoryPop,
   shouldPopAppModalHistory,
+  shouldReplaceActiveAppModalHistory,
   shouldReplaceAppModalHistory,
   type AppModal,
 } from "./app-modal-history";
@@ -863,7 +865,15 @@ function App() {
   useEffect(() => {
     if (!focusedMessageId) return;
     const timer = window.setTimeout(() => {
-      replaceNextAppHistoryEntryRef.current = true;
+      historyFocusedMessageIdRef.current = null;
+      const historyState = isAppHistoryState(window.history.state)
+        ? window.history.state
+        : null;
+      if (historyState?.index === appHistoryIndexRef.current) {
+        const nextState = { ...historyState, focusedMessageId: null };
+        window.history.replaceState(nextState, "");
+        lastAppHistoryKeyRef.current = appHistoryKey(nextState);
+      }
       setFocusedMessageId(null);
     }, 2600);
     return () => window.clearTimeout(timer);
@@ -951,6 +961,7 @@ function App() {
   const appHistoryIndexRef = useRef(0);
   const appHistoryMaxIndexRef = useRef(0);
   const appModalHistoryBackPendingRef = useRef(false);
+  const appHistorySnapshotRef = useRef<AppHistoryState | null>(null);
   const restoringAppHistoryRef = useRef(false);
   const replaceNextAppHistoryEntryRef = useRef(false);
   const lastAppHistoryKeyRef = useRef<string | null>(null);
@@ -1023,6 +1034,10 @@ function App() {
       focusedMessageId: historyFocusedMessageIdRef.current,
     };
   }
+
+  useLayoutEffect(() => {
+    appHistorySnapshotRef.current = buildAppHistoryState(appHistoryIndexRef.current);
+  });
 
   async function refreshRuntimeChecks() {
     if (!isTauriRuntime()) {
@@ -2311,7 +2326,15 @@ function App() {
   useEffect(() => {
     function onPopState(event: PopStateEvent) {
       appModalHistoryBackPendingRef.current = false;
-      if (!isAppHistoryState(event.state)) return;
+      const currentSnapshot = appHistorySnapshotRef.current;
+      const targetHistoryState = isAppHistoryState(event.state) ? event.state : null;
+      const historyState = !isMobileViewport()
+        ? resolveAppModalHistoryPop(currentSnapshot, targetHistoryState)
+        : targetHistoryState;
+      if (historyState && historyState !== targetHistoryState) {
+        window.history.replaceState(historyState, "");
+      }
+      if (!historyState) return;
       if (isMobileViewport()) {
         window.history.replaceState(null, "");
         appHistoryReadyRef.current = false;
@@ -2321,13 +2344,13 @@ function App() {
       }
       restoringAppHistoryRef.current = true;
       appHistoryReadyRef.current = true;
-      setAppHistoryPosition(event.state.index);
-      const activeChannelIdFromState = event.state.activeChannelId ?? null;
-      const activeThreadIdFromState = event.state.activeThreadId ?? null;
-      const activeTabFromState = event.state.activeTab ?? "chat";
-      historyFocusedMessageIdRef.current = event.state.focusedMessageId ?? null;
+      setAppHistoryPosition(historyState.index);
+      const activeChannelIdFromState = historyState.activeChannelId ?? null;
+      const activeThreadIdFromState = historyState.activeThreadId ?? null;
+      const activeTabFromState = historyState.activeTab ?? "chat";
+      historyFocusedMessageIdRef.current = historyState.focusedMessageId ?? null;
       lastAppHistoryKeyRef.current = appHistoryKey({
-        ...event.state,
+        ...historyState,
         activeChannelId: activeChannelIdFromState,
         activeThreadId: activeThreadIdFromState,
         activeTab: activeTabFromState,
@@ -2338,14 +2361,14 @@ function App() {
         rememberChannelThread(activeChannelIdFromState, activeThreadIdFromState);
       }
       setActiveTab(activeTabFromState);
-      setShowThread(event.state.showThread);
-      setShowMobileSidebar(event.state.showMobileSidebar);
+      setShowThread(historyState.showThread);
+      setShowMobileSidebar(historyState.showMobileSidebar);
       setMobileSidebarDragPx(0);
-      setSelectedAgentId(event.state.selectedAgentId);
-      setFocusedMessageId(event.state.focusedMessageId ?? null);
-      setShowSearchModal(event.state.activeModal === "search");
-      setShowActivityFeedModal(event.state.activeModal === "activity");
-      setShowSavedModal(event.state.activeModal === "saved");
+      setSelectedAgentId(historyState.selectedAgentId);
+      setFocusedMessageId(historyState.focusedMessageId ?? null);
+      setShowSearchModal(historyState.activeModal === "search");
+      setShowActivityFeedModal(historyState.activeModal === "activity");
+      setShowSavedModal(historyState.activeModal === "saved");
     }
 
     window.addEventListener("popstate", onPopState);
@@ -2405,7 +2428,16 @@ function App() {
 
     if (lastAppHistoryKeyRef.current === currentKey) return;
 
-    if (replaceNextAppHistoryEntryRef.current) {
+    const historyState = isAppHistoryState(window.history.state)
+      ? window.history.state
+      : null;
+    const shouldReplaceActiveModal = shouldReplaceActiveAppModalHistory({
+      activeModal: activeAppModal,
+      currentIndex: appHistoryIndexRef.current,
+      historyState,
+    });
+
+    if (replaceNextAppHistoryEntryRef.current || shouldReplaceActiveModal) {
       replaceNextAppHistoryEntryRef.current = false;
       const nextState = { ...currentState, index: appHistoryIndexRef.current };
       window.history.replaceState(nextState, "");
@@ -3840,6 +3872,7 @@ function App() {
       historyState,
     })) {
       appModalHistoryBackPendingRef.current = true;
+      appHistorySnapshotRef.current = buildAppHistoryState(appHistoryIndexRef.current);
       window.history.back();
       return;
     }

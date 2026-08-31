@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  dismissAppModalHistoryEntry,
+  resolveAppModalHistoryPop,
   shouldPopAppModalHistory,
+  shouldReplaceActiveAppModalHistory,
   shouldReplaceAppModalHistory,
 } from "../src/app-modal-history";
 import { shouldDismissOnEscape, type EscapeDismissEvent } from "../src/escape-dismiss";
@@ -22,6 +25,71 @@ test("switching between app modals replaces the current history entry", () => {
   assert.equal(shouldReplaceAppModalHistory("activity", "search"), true);
   assert.equal(shouldReplaceAppModalHistory("search", "search"), false);
   assert.equal(shouldReplaceAppModalHistory(null, "search"), false);
+});
+
+test("background changes replace the current history entry while a modal stays open", () => {
+  const input = {
+    activeModal: "activity" as const,
+    currentIndex: 4,
+    historyState: { index: 4, activeModal: "activity" as const },
+  };
+
+  assert.equal(shouldReplaceActiveAppModalHistory(input), true);
+  assert.equal(
+    shouldReplaceActiveAppModalHistory({
+      ...input,
+      historyState: { index: 3, activeModal: "activity" },
+    }),
+    false,
+  );
+  assert.equal(
+    shouldReplaceActiveAppModalHistory({
+      ...input,
+      historyState: { index: 4, activeModal: "search" },
+    }),
+    false,
+  );
+  assert.equal(shouldReplaceActiveAppModalHistory({ ...input, activeModal: null }), false);
+});
+
+test("dismissing a modal preserves its current background surface", () => {
+  const current = {
+    index: 5,
+    activeModal: "activity" as const,
+    activeChannelId: "channel-current",
+    activeThreadId: "thread-current",
+    showThread: true,
+  };
+
+  assert.deepEqual(dismissAppModalHistoryEntry(current, 4), {
+    ...current,
+    index: 4,
+    activeModal: null,
+  });
+});
+
+test("one history pop closes Activity even when the target entry also has Activity open", () => {
+  const current = {
+    index: 5,
+    activeModal: "activity" as const,
+    activeChannelId: "channel-current",
+    activeThreadId: "thread-current",
+    showThread: true,
+  };
+  const staleTarget = {
+    index: 4,
+    activeModal: "activity" as const,
+    activeChannelId: "channel-old",
+    activeThreadId: "thread-old",
+    showThread: true,
+  };
+
+  assert.deepEqual(resolveAppModalHistoryPop(current, staleTarget), {
+    ...current,
+    index: staleTarget.index,
+    activeModal: null,
+  });
+  assert.equal(resolveAppModalHistoryPop({ ...current, activeModal: null }, staleTarget), staleTarget);
 });
 
 test("closing an app modal only pops its matching current history entry", () => {
