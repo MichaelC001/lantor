@@ -10,7 +10,8 @@ use crate::agent_routing::{
 };
 use crate::agent_work_dispatch::dispatch_unassigned_task_availability;
 use crate::attachments::{
-    remove_attachment_files, write_attachment_file, PendingAttachmentWrites, ATTACHMENT_SIZE_LIMIT,
+    attachment_exceeds_size_limit, remove_attachment_files, write_attachment_file,
+    PendingAttachmentWrites, ATTACHMENT_SIZE_LIMIT_MIB,
 };
 use crate::ui_notifications::{enqueue_ui_event_in_tx, UiEvent};
 use crate::{
@@ -1361,10 +1362,10 @@ pub(crate) async fn insert_message_attachments_tx(
         if attachment.bytes.is_empty() {
             continue;
         }
-        if attachment.bytes.len() > ATTACHMENT_SIZE_LIMIT {
+        if attachment_exceeds_size_limit(attachment.bytes.len() as u64) {
             return Err(format!(
-                "attachment {} is larger than 25MB",
-                attachment.original_name
+                "attachment {} is larger than {ATTACHMENT_SIZE_LIMIT_MIB}MB",
+                attachment.original_name,
             ));
         }
         let attachment_id = Uuid::new_v4();

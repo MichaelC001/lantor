@@ -8,7 +8,7 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State},
+    extract::{DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{from_fn, Next},
     response::{
@@ -66,6 +66,7 @@ use crate::launch_agent;
 use crate::lifecycle_commands::start_agent_in_pool;
 use crate::system_commands::check_runtime_in_env;
 use crate::ui_notifications::{enqueue_ui_event, enqueue_ui_event_in_tx, UiEvent};
+use crate::web_upload::parse_multipart_send_message;
 use crate::{
     app::{to_string, CommandResult},
     cancel_agent_work_in_pool, claim_task_in_pool, retry_agent_work_in_pool,
@@ -422,10 +423,42 @@ async fn api_check_runtime(
         .map_err(api_error)
 }
 
+fn is_multipart_request(request: &Request) -> bool {
+    request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .to_ascii_lowercase()
+                .starts_with("multipart/form-data;")
+        })
+}
+
+async fn extract_send_message_request(
+    request: Request,
+    state: &Arc<WebState>,
+) -> Result<SendMessageRequest, Response> {
+    if is_multipart_request(&request) {
+        let multipart = Multipart::from_request(request, state)
+            .await
+            .map_err(|rejection| rejection.into_response())?;
+        return parse_multipart_send_message(multipart)
+            .await
+            .map_err(api_error);
+    }
+
+    Json::<SendMessageRequest>::from_request(request, state)
+        .await
+        .map(|Json(request)| request)
+        .map_err(|rejection| rejection.into_response())
+}
+
 async fn api_send_message(
     State(state): State<Arc<WebState>>,
-    Json(request): Json<SendMessageRequest>,
+    request: Request,
 ) -> Result<impl IntoResponse, Response> {
+    let request = extract_send_message_request(request, &state).await?;
     message_commands::send_message(&state.pool, request)
         .await
         .map(Json)

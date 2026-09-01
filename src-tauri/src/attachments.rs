@@ -15,8 +15,13 @@ use crate::{
     models::AttachmentUpload,
 };
 
-pub(crate) const ATTACHMENT_SIZE_LIMIT: usize = 25 * 1024 * 1024;
+pub(crate) const ATTACHMENT_SIZE_LIMIT_MIB: usize = 64;
+pub(crate) const ATTACHMENT_SIZE_LIMIT: usize = ATTACHMENT_SIZE_LIMIT_MIB * 1024 * 1024;
 const ATTACHMENT_ORPHAN_GRACE: Duration = Duration::from_secs(60 * 60);
+
+pub(crate) fn attachment_exceeds_size_limit(size_bytes: u64) -> bool {
+    size_bytes > ATTACHMENT_SIZE_LIMIT as u64
+}
 
 #[derive(Default)]
 pub(crate) struct PendingAttachmentWrites {
@@ -108,10 +113,10 @@ pub(crate) fn load_agent_attachment_uploads(
         if !metadata.is_file() {
             return Err(format!("attachment path is not a file: {}", path.display()));
         }
-        if metadata.len() > ATTACHMENT_SIZE_LIMIT as u64 {
+        if attachment_exceeds_size_limit(metadata.len()) {
             return Err(format!(
-                "attachment file {} is larger than 25MB",
-                path.display()
+                "attachment file {} is larger than {ATTACHMENT_SIZE_LIMIT_MIB}MB",
+                path.display(),
             ));
         }
         let bytes = fs::read(&path)
@@ -492,12 +497,20 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        attachment_garbage_collection_is_safe, sweep_orphan_attachment_files,
-        PendingAttachmentWrites,
+        attachment_exceeds_size_limit, attachment_garbage_collection_is_safe,
+        sweep_orphan_attachment_files, PendingAttachmentWrites, ATTACHMENT_SIZE_LIMIT,
     };
 
     fn attachment_test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("lantor-{label}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn attachment_size_limit_accepts_64_mib_exactly() {
+        assert!(!attachment_exceeds_size_limit(ATTACHMENT_SIZE_LIMIT as u64));
+        assert!(attachment_exceeds_size_limit(
+            ATTACHMENT_SIZE_LIMIT as u64 + 1
+        ));
     }
 
     fn managed_test_path(root: &Path) -> PathBuf {

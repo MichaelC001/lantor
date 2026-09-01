@@ -16,7 +16,14 @@ import {
 } from "react";
 import { createRoot } from "react-dom/client";
 import { Bookmark, Home, Inbox, Search } from "lucide-react";
-import { apiInvoke, apiInvokeMeasured, completeStartupSplash, isTauriRuntime, subscribeBackendEvents } from "./apiClient";
+import {
+  apiInvoke,
+  apiInvokeMeasured,
+  completeStartupSplash,
+  isTauriRuntime,
+  sendMessage,
+  subscribeBackendEvents,
+} from "./apiClient";
 import type { ApiArgsTuple, ApiCommand, ApiResult } from "./api-contract";
 import { APP_DISPLAY_NAME } from "./branding";
 import {
@@ -198,7 +205,8 @@ const UI_RECONCILE_INTERVAL_MS = 60_000;
 const EPHEMERAL_FLUSH_FALLBACK_MS = 80;
 const CHANNEL_PREVIEW_HYDRATION_DELAY_MS = 200;
 const MIN_BOOT_SPLASH_MS = 600;
-const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_MIB = 64;
+const MAX_ATTACHMENT_BYTES = MAX_ATTACHMENT_MIB * 1024 * 1024;
 const OLDER_CHANNEL_MESSAGES_PAGE_SIZE = 40;
 // Issue #82: run states that must bypass the ephemeral coalescing buffer
 // so terminal transitions land immediately. "stopped" is included to
@@ -609,17 +617,6 @@ function getStoredFontPreset(): FontPreset {
 
 function getStoredShowImageThumbnails() {
   return window.localStorage.getItem(SHOW_IMAGE_THUMBNAILS_STORAGE_KEY) !== "false";
-}
-
-async function attachmentUploads(attachments: DraftAttachment[]) {
-  return Promise.all(attachments.map(async (attachment) => {
-    const buffer = await attachment.file.arrayBuffer();
-    return {
-      originalName: attachment.original_name,
-      mimeType: attachment.mime_type,
-      bytes: Array.from(new Uint8Array(buffer)),
-    };
-  }));
 }
 
 function defaultAgentWorkspace(handle: string) {
@@ -4002,7 +3999,7 @@ function App() {
     const nextAttachments = Array.from(files)
       .filter((file) => {
         if (file.size <= MAX_ATTACHMENT_BYTES) return true;
-        setAppError(`${file.name} is larger than 25MB`);
+        setAppError(`${file.name} is larger than ${MAX_ATTACHMENT_MIB}MB`);
         return false;
       })
       .map(draftAttachmentFromFile);
@@ -4254,13 +4251,15 @@ function App() {
     const optimisticId = addOptimisticOwnerMessage(channel.id, null, body, sendAsTask, attachments);
     updateRootComposerDraft(channel.id, () => EMPTY_COMPOSER_DRAFT);
     try {
-      const persistedMessage = await apiInvoke("send_message", {
-        channelId: channel.id,
-        threadRootId: null,
-        body,
-        asTask: sendAsTask,
-        attachments: await attachmentUploads(attachments),
-      });
+      const persistedMessage = await sendMessage(
+        {
+          channelId: channel.id,
+          threadRootId: null,
+          body,
+          asTask: sendAsTask,
+        },
+        attachments.map((attachment) => attachment.file),
+      );
       settleOptimisticMessage(optimisticId, persistedMessage);
     } catch (err) {
       removeOptimisticMessage(optimisticId);
@@ -4294,13 +4293,15 @@ function App() {
     const optimisticId = addOptimisticOwnerMessage(channel.id, activeRoot.id, body, false, attachments);
     updateReplyComposerDraft(activeRoot.id, () => EMPTY_COMPOSER_DRAFT);
     try {
-      const persistedMessage = await apiInvoke("send_message", {
-        channelId: channel.id,
-        threadRootId: activeRoot.id,
-        body,
-        asTask: false,
-        attachments: await attachmentUploads(attachments),
-      });
+      const persistedMessage = await sendMessage(
+        {
+          channelId: channel.id,
+          threadRootId: activeRoot.id,
+          body,
+          asTask: false,
+        },
+        attachments.map((attachment) => attachment.file),
+      );
       settleOptimisticMessage(optimisticId, persistedMessage);
     } catch (err) {
       removeOptimisticMessage(optimisticId);

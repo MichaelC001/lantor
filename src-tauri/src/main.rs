@@ -38,6 +38,7 @@ mod text;
 mod ui_notifications;
 mod usage;
 mod web;
+mod web_upload;
 
 use std::{env, fs, path::PathBuf};
 

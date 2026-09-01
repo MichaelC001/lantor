@@ -2,6 +2,7 @@ import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
+  ApiArgs,
   ApiArgsTuple,
   ApiCommand,
   ApiResult,
@@ -52,6 +53,20 @@ function bootstrapApiPath(args: Record<string, unknown>) {
   return `${apiPath("bootstrap")}?${params.toString()}`;
 }
 
+async function readApiResponse<T>(response: Response, fallbackMessage: string): Promise<T> {
+  const contentType = response.headers.get("content-type") || "";
+  const payload = contentType.includes("application/json")
+    ? await response.json()
+    : await response.text();
+  if (!response.ok) {
+    const message = typeof payload === "object" && payload && "message" in payload
+      ? String((payload as { message: unknown }).message)
+      : String(payload || fallbackMessage);
+    throw new Error(message);
+  }
+  return payload as T;
+}
+
 export async function apiInvoke<C extends ApiCommand>(
   command: C,
   ...argsTuple: ApiArgsTuple<C>
@@ -71,17 +86,46 @@ export async function apiInvoke<C extends ApiCommand>(
       body: JSON.stringify(args),
     });
 
-  const contentType = response.headers.get("content-type") || "";
-  const payload = contentType.includes("application/json")
-    ? await response.json()
-    : await response.text();
-  if (!response.ok) {
-    const message = typeof payload === "object" && payload && "message" in payload
-      ? String((payload as { message: unknown }).message)
-      : String(payload || `${command} failed`);
-    throw new Error(message);
+  return readApiResponse<ApiResult<C>>(response, `${command} failed`);
+}
+
+type SendMessageArgs = Omit<ApiArgs<"send_message">, "attachments">;
+
+export async function sendMessage(
+  args: SendMessageArgs,
+  attachments: readonly File[],
+): Promise<ApiResult<"send_message">> {
+  if (isTauriRuntime()) {
+    const uploads = await Promise.all(
+      attachments.map(async (file) => {
+        const buffer = await file.arrayBuffer();
+        return {
+          originalName: file.name,
+          mimeType: file.type || "application/octet-stream",
+          bytes: Array.from(new Uint8Array(buffer)),
+        };
+      }),
+    );
+    return apiInvoke("send_message", { ...args, attachments: uploads });
   }
-  return payload as ApiResult<C>;
+
+  if (attachments.length === 0) {
+    return apiInvoke("send_message", { ...args, attachments: [] });
+  }
+
+  const formData = new FormData();
+  formData.append("request", JSON.stringify(args));
+  for (const file of attachments) {
+    formData.append("attachments", file, file.name || "attachment");
+  }
+  const response = await fetch(apiPath("send_message"), {
+    method: "POST",
+    body: formData,
+  });
+  return readApiResponse<ApiResult<"send_message">>(
+    response,
+    "send_message failed",
+  );
 }
 
 export type ApiInvokeMeasurement = {
