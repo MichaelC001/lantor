@@ -36,6 +36,9 @@ use crate::runtime::{
     },
     surface::{codex_active_turn_schedule_state, same_codex_surface, CodexActiveTurnScheduleState},
 };
+use crate::subscription_status::{
+    codex_subscription_status_from_response, persist_agent_subscription_status,
+};
 use crate::ui_notifications::{
     enqueue_ui_agent_run_changed_in_tx, enqueue_ui_work_item_changed_in_tx, notify_supervisor_wake,
     reconcile_work_item_change,
@@ -63,6 +66,7 @@ pub(crate) use reaper::reap_stuck_codex_turn;
 use turn::{finish_codex_steer_request, finish_warm_codex_active_turn};
 
 const CODEX_TURN_START_TIMEOUT: Duration = Duration::from_secs(90);
+const CODEX_RATE_LIMIT_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(30);
 const CODEX_APP_SERVER_SHELL_COMMAND: &str =
     "exec codex app-server --listen stdio:// -c 'notify=[]' -c 'features.memories=false'";
 
@@ -83,9 +87,53 @@ struct WarmCodexState {
     alive: bool,
     active: Option<CodexActiveTurn>,
     next_request_id: i64,
+    pending_rate_limit_request_id: Option<i64>,
+    last_rate_limit_request_at: Option<Instant>,
     pending_rotation_marker: Option<String>,
     injected_memory_context: Option<String>,
     last_activity: Instant,
+}
+
+async fn request_codex_rate_limits(runtime: &Arc<WarmCodexRuntime>) -> CommandResult<()> {
+    let request_id = {
+        let mut state = runtime.state.lock().await;
+        let recently_requested = state
+            .last_rate_limit_request_at
+            .is_some_and(|requested_at| {
+                requested_at.elapsed() < CODEX_RATE_LIMIT_REFRESH_MIN_INTERVAL
+            });
+        if recently_requested {
+            return Ok(());
+        }
+        // A lost auxiliary response must not suppress subscription refreshes for
+        // the rest of the warm runtime. Request ids are monotonic, so a late
+        // response to the superseded read cannot collide with newer work.
+        state.pending_rate_limit_request_id = None;
+        let request_id = state.next_request_id;
+        state.next_request_id += 1;
+        state.pending_rate_limit_request_id = Some(request_id);
+        state.last_rate_limit_request_at = Some(Instant::now());
+        request_id
+    };
+    let write_result = {
+        let mut stdin = runtime.stdin.lock().await;
+        codex_write_json(
+            &mut stdin,
+            json!({
+                "method": "account/rateLimits/read",
+                "id": request_id
+            }),
+        )
+        .await
+    };
+    if write_result.is_err() {
+        let mut state = runtime.state.lock().await;
+        if state.pending_rate_limit_request_id == Some(request_id) {
+            state.pending_rate_limit_request_id = None;
+            state.last_rate_limit_request_at = None;
+        }
+    }
+    write_result
 }
 
 struct CodexActiveTurn {
@@ -512,6 +560,8 @@ async fn spawn_warm_codex_runtime(
             alive: true,
             active: None,
             next_request_id,
+            pending_rate_limit_request_id: None,
+            last_rate_limit_request_at: None,
             pending_rotation_marker: rotation_marker,
             injected_memory_context: None,
             last_activity: Instant::now(),
@@ -861,6 +911,7 @@ pub(crate) async fn supervisor_start_codex_streaming_agent(
         &environment_variables,
     )
     .await?;
+    let _ = request_codex_rate_limits(&runtime).await;
 
     {
         let state = runtime.state.lock().await;
@@ -1240,6 +1291,23 @@ async fn handle_codex_warm_stdout_line(
     }
 
     if let Some(response_id) = value.get("id").and_then(Value::as_i64) {
+        let is_rate_limit_response = {
+            let mut state = runtime.state.lock().await;
+            if state.pending_rate_limit_request_id == Some(response_id) {
+                state.pending_rate_limit_request_id = None;
+                true
+            } else {
+                false
+            }
+        };
+        if is_rate_limit_response {
+            if codex_request_error(&value).is_none() {
+                if let Some(snapshot) = codex_subscription_status_from_response(&value) {
+                    persist_agent_subscription_status(pool, agent_id, &snapshot).await?;
+                }
+            }
+            return Ok(());
+        }
         let matched = {
             let mut state = runtime.state.lock().await;
             let Some(active) = state.active.as_mut() else {
@@ -1313,6 +1381,9 @@ async fn handle_codex_warm_stdout_line(
     }
 
     match value.get("method").and_then(Value::as_str) {
+        Some("account/rateLimits/updated") => {
+            request_codex_rate_limits(runtime).await?;
+        }
         Some("turn/started") => {
             if value.pointer("/params/threadId").and_then(Value::as_str)
                 != Some(runtime.thread_id.as_str())
@@ -1670,6 +1741,8 @@ mod tests {
                     interrupt_request_id: None,
                 }),
                 next_request_id: 2,
+                pending_rate_limit_request_id: None,
+                last_rate_limit_request_at: None,
                 pending_rotation_marker: None,
                 injected_memory_context: None,
                 last_activity: Instant::now(),
@@ -1695,6 +1768,8 @@ mod tests {
                 alive: true,
                 active: None,
                 next_request_id: 1,
+                pending_rate_limit_request_id: None,
+                last_rate_limit_request_at: None,
                 pending_rotation_marker: None,
                 injected_memory_context: None,
                 last_activity: Instant::now(),

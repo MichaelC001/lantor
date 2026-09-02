@@ -34,6 +34,24 @@ pub(crate) struct Agent {
     pub(crate) workspace_memory_exists: bool,
     pub(crate) workspace_entries: Vec<AgentWorkspaceEntry>,
     pub(crate) daily_budget_micros: i64,
+    pub(crate) subscription_status: Option<AgentSubscriptionStatus>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AgentSubscriptionStatus {
+    pub(crate) provider: String,
+    pub(crate) plan: Option<String>,
+    pub(crate) status: String,
+    pub(crate) windows: Vec<AgentSubscriptionWindow>,
+    pub(crate) observed_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+pub(crate) struct AgentSubscriptionWindow {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) used_percent: f64,
+    pub(crate) resets_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]

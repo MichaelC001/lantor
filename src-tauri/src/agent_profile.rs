@@ -9,7 +9,7 @@ use crate::{
     attachments::remove_attachment_files,
     db::expand_home_path,
     events::activity::record_agent_activity,
-    models::{Agent, OwnerProfile},
+    models::{Agent, AgentSubscriptionStatus, AgentSubscriptionWindow, OwnerProfile},
     prompts::ensure_agent_workspace,
 };
 
@@ -170,6 +170,16 @@ pub(crate) async fn create_agent_in_pool(
     let service_tier = normalize_service_tier(runtime, service_tier.as_deref())?;
     let environment_variables =
         normalize_agent_environment_variables(environment_variables.as_deref())?;
+    let existing_subscription_scope =
+        sqlx::query("select runtime, environment_variables from agents where handle = $1")
+            .bind(normalized_handle)
+            .fetch_optional(pool)
+            .await
+            .map_err(to_string)?;
+    let subscription_scope_changed = existing_subscription_scope.is_some_and(|row| {
+        row.get::<String, _>("runtime") != runtime
+            || row.get::<String, _>("environment_variables") != environment_variables
+    });
 
     let mut transaction = pool.begin().await.map_err(to_string)?;
     let agent_id: Uuid = sqlx::query_scalar(
@@ -212,6 +222,13 @@ pub(crate) async fn create_agent_in_pool(
     .fetch_one(&mut *transaction)
     .await
     .map_err(to_string)?;
+    if subscription_scope_changed {
+        sqlx::query("delete from agent_subscription_status where agent_id = $1")
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(to_string)?;
+    }
     enqueue_ui_event_in_tx(
         &mut transaction,
         &UiEvent::Refresh {
@@ -288,6 +305,16 @@ pub(crate) async fn update_agent_in_pool(
     let service_tier = normalize_service_tier(runtime, service_tier.as_deref())?;
     let environment_variables =
         normalize_agent_environment_variables(environment_variables.as_deref())?;
+    let existing_subscription_scope =
+        sqlx::query("select runtime, environment_variables from agents where id = $1")
+            .bind(agent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(to_string)?;
+    let subscription_scope_changed = existing_subscription_scope.is_some_and(|row| {
+        row.get::<String, _>("runtime") != runtime
+            || row.get::<String, _>("environment_variables") != environment_variables
+    });
 
     let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(
@@ -326,6 +353,13 @@ pub(crate) async fn update_agent_in_pool(
     .execute(&mut *transaction)
     .await
     .map_err(to_string)?;
+    if subscription_scope_changed {
+        sqlx::query("delete from agent_subscription_status where agent_id = $1")
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(to_string)?;
+    }
     enqueue_ui_event_in_tx(
         &mut transaction,
         &UiEvent::Refresh {
@@ -456,11 +490,11 @@ pub(crate) async fn load_agents(pool: &SqlitePool) -> CommandResult<Vec<Agent>> 
     let rows = sqlx::query(
         r#"
         select
-            id,
+            a.id,
             handle,
             display_name,
             role,
-            status,
+            a.status,
             runtime,
             model,
             reasoning_effort,
@@ -470,8 +504,14 @@ pub(crate) async fn load_agents(pool: &SqlitePool) -> CommandResult<Vec<Agent>> 
             launch_command,
             environment_variables,
             working_directory,
-            daily_budget_micros
-        from agents
+            daily_budget_micros,
+            subscription.provider as subscription_provider,
+            subscription.plan as subscription_plan,
+            subscription.status as subscription_status,
+            subscription.windows_json as subscription_windows_json,
+            subscription.observed_at as subscription_observed_at
+        from agents a
+        left join agent_subscription_status subscription on subscription.agent_id = a.id
         order by case when handle = 'Hancock' then 0 else 1 end, display_name
         "#,
     )
@@ -484,6 +524,29 @@ pub(crate) async fn load_agents(pool: &SqlitePool) -> CommandResult<Vec<Agent>> 
         .map(|row| {
             let working_directory: String = row.get("working_directory");
             let workspace = load_agent_workspace_summary(&working_directory);
+            let subscription_provider = row.get::<Option<String>, _>("subscription_provider");
+            let subscription_status = subscription_provider.and_then(|provider| {
+                let runtime = row.get::<String, _>("runtime");
+                if !provider.eq_ignore_ascii_case(&runtime) {
+                    return None;
+                }
+                let windows_json = row
+                    .get::<Option<String>, _>("subscription_windows_json")
+                    .unwrap_or_else(|| "[]".to_owned());
+                let windows = serde_json::from_str::<Vec<AgentSubscriptionWindow>>(&windows_json)
+                    .unwrap_or_default();
+                Some(AgentSubscriptionStatus {
+                    provider,
+                    plan: row.get("subscription_plan"),
+                    status: row
+                        .get::<Option<String>, _>("subscription_status")
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                    windows,
+                    observed_at: row
+                        .get::<Option<String>, _>("subscription_observed_at")
+                        .unwrap_or_default(),
+                })
+            });
             Agent {
                 id: row.get("id"),
                 handle: row.get("handle"),
@@ -504,6 +567,7 @@ pub(crate) async fn load_agents(pool: &SqlitePool) -> CommandResult<Vec<Agent>> 
                 workspace_memory_exists: workspace.memory_exists,
                 workspace_entries: workspace.entries,
                 daily_budget_micros: row.get("daily_budget_micros"),
+                subscription_status,
             }
         })
         .collect())

@@ -12,7 +12,8 @@ use crate::agent_inbox_wake::sync_inbox_for_work_item;
 use crate::app::{to_string, AppState, CommandResult};
 use crate::message_store::load_message_patch_in_tx;
 use crate::models::{
-    AgentActivity, AgentRunPatch, AgentWorkItemPatch, Artifact, ChannelMember, Message,
+    AgentActivity, AgentRunPatch, AgentSubscriptionStatus, AgentWorkItemPatch, Artifact,
+    ChannelMember, Message,
 };
 
 const UI_REFRESH_EVENT: &str = "lantor://refresh";
@@ -66,6 +67,11 @@ pub(crate) enum UiEvent<'a> {
     AgentRunUpsert {
         reason: &'a str,
         run: &'a AgentRunPatch,
+    },
+    AgentSubscriptionStatusUpsert {
+        reason: &'a str,
+        agent_id: Uuid,
+        subscription_status: &'a AgentSubscriptionStatus,
     },
     WorkItemUpsert {
         reason: &'a str,

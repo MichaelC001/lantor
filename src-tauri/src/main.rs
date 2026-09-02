@@ -29,6 +29,7 @@ mod models;
 mod owner_inbox;
 mod prompts;
 mod runtime;
+mod subscription_status;
 mod system_commands;
 mod task_messages;
 mod task_store;

@@ -21,6 +21,21 @@ export type AgentWorkspaceFile = {
   truncated: boolean;
 };
 
+export type AgentSubscriptionWindow = {
+  id: string;
+  label: string;
+  used_percent: number;
+  resets_at: number | null;
+};
+
+export type AgentSubscriptionStatus = {
+  provider: string;
+  plan: string | null;
+  status: string;
+  windows: AgentSubscriptionWindow[];
+  observed_at: string;
+};
+
 export type Agent = {
   id: string;
   handle: string;
@@ -41,6 +56,7 @@ export type Agent = {
   workspace_memory_exists: boolean;
   workspace_entries: AgentWorkspaceEntry[];
   daily_budget_micros: number;
+  subscription_status: AgentSubscriptionStatus | null;
 };
 
 export type OwnerProfile = {

@@ -298,6 +298,16 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         )
         "#,
         r#"
+        create table if not exists agent_subscription_status (
+            agent_id blob primary key not null references agents(id) on delete cascade,
+            provider text not null,
+            plan text,
+            status text not null,
+            windows_json text not null default '[]',
+            observed_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
+        )
+        "#,
+        r#"
         create table if not exists channels (
             id blob primary key not null default (randomblob(16)),
             name text not null unique,

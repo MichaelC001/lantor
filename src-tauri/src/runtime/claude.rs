@@ -27,6 +27,9 @@ use crate::runtime::{
         append_streaming_agent_message, ensure_streaming_agent_message, streaming_message_exists,
     },
 };
+use crate::subscription_status::{
+    claude_subscription_status_from_event, persist_agent_subscription_status,
+};
 use crate::ui_notifications::{
     enqueue_ui_agent_run_changed_in_tx, enqueue_ui_work_item_changed_in_tx, notify_supervisor_wake,
     reconcile_work_item_change,
@@ -643,6 +646,10 @@ async fn handle_claude_warm_stdout_line(
         append_run_log(pool, run_id, format!("[claude] {line}\n")).await?;
     }
     let value: Value = serde_json::from_str(line).map_err(to_string)?;
+
+    if let Some(snapshot) = claude_subscription_status_from_event(&value) {
+        persist_agent_subscription_status(pool, agent_id, &snapshot).await?;
+    }
 
     if let (Some(run_id), Some((input_tokens, output_tokens))) =
         (active_run_id, usage_from_runtime_event(&value))

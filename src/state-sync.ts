@@ -1,6 +1,7 @@
 import type {
   AgentActivity,
   AgentRun,
+  AgentSubscriptionStatus,
   AgentWorkItem,
   Artifact,
   Bootstrap,
@@ -30,6 +31,12 @@ export type UiBackendEvent =
       type: "agent_run_upsert";
       reason?: string;
       run: Omit<AgentRun, "log"> & { log?: string };
+    }
+  | {
+      type: "agent_subscription_status_upsert";
+      reason?: string;
+      agent_id: string;
+      subscription_status: AgentSubscriptionStatus;
     }
   | {
       type: "work_item_upsert";
@@ -652,6 +659,21 @@ export function applyBackendEvent(
     return transition({
       ...current,
       agent_runs: agentRuns.slice(0, 30),
+    });
+  }
+
+  if (event.type === "agent_subscription_status_upsert") {
+    const existingIndex = current.agents.findIndex(
+      (agent) => agent.id === event.agent_id,
+    );
+    if (existingIndex < 0) return transition(current, true);
+    return transition({
+      ...current,
+      agents: current.agents.map((agent, index) =>
+        index === existingIndex
+          ? { ...agent, subscription_status: event.subscription_status }
+          : agent,
+      ),
     });
   }
 

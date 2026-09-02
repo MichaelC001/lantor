@@ -12,6 +12,7 @@ import {
   type SnapshotApplyOptions,
 } from "../src/state-sync";
 import type {
+  Agent,
   Bootstrap,
   Channel,
   ChannelMember,
@@ -59,6 +60,32 @@ function message(
     artifacts: [],
     created_at: NOW,
     updated_at: NOW,
+    ...overrides,
+  };
+}
+
+function agent(id: string, overrides: Partial<Agent> = {}): Agent {
+  return {
+    id,
+    handle: id,
+    display_name: id,
+    role: "agent",
+    status: "idle",
+    runtime: "codex",
+    model: "gpt-5.6-sol",
+    reasoning_effort: "medium",
+    service_tier: "",
+    avatar: "",
+    description: "",
+    launch_command: "",
+    environment_variables: "",
+    working_directory: "",
+    workspace_exists: false,
+    workspace_memory_path: "",
+    workspace_memory_exists: false,
+    workspace_entries: [],
+    daily_budget_micros: 0,
+    subscription_status: null,
     ...overrides,
   };
 }
@@ -365,6 +392,38 @@ test("message upsert, delta, and root delete form a deterministic event sequence
   assert.deepEqual(result.data?.messages, []);
   assert.deepEqual(result.deletedMessageIds, [root.id, reply.id]);
   assert.equal(result.needsRefresh, false);
+});
+
+test("subscription status upsert updates only its agent without a bootstrap", () => {
+  const codexAgent = agent("codex-agent");
+  const otherAgent = agent("other-agent");
+  const subscriptionStatus = {
+    provider: "codex",
+    plan: "pro",
+    status: "available",
+    windows: [
+      {
+        id: "codex:primary",
+        label: "5-hour",
+        used_percent: 24,
+        resets_at: 1_788_348_600,
+      },
+    ],
+    observed_at: NOW,
+  };
+
+  const result = applyBackendEvent(
+    bootstrap({ agents: [codexAgent, otherAgent] }),
+    {
+      type: "agent_subscription_status_upsert",
+      agent_id: codexAgent.id,
+      subscription_status: subscriptionStatus,
+    },
+  );
+
+  assert.equal(result.needsRefresh, false);
+  assert.deepEqual(result.data?.agents[0].subscription_status, subscriptionStatus);
+  assert.strictEqual(result.data?.agents[1], otherAgent);
 });
 
 test("a delta for an unknown message requests authoritative refresh", () => {
