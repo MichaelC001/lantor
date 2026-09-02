@@ -605,7 +605,8 @@ export const RUNTIME_PRESETS: Record<string, { label: string; defaultModel: stri
 };
 
 const MODEL_LABELS: Record<string, string> = {
-  fable: "Claude Fable 5",
+  fable: "Claude Fable 5.1",
+  "claude-fable-5-1": "Claude Fable 5.1",
   "gpt-5.6-sol": "GPT-5.6 Sol",
   "gpt-5.6-terra": "GPT-5.6 Terra",
   "gpt-5.6-luna": "GPT-5.6 Luna",

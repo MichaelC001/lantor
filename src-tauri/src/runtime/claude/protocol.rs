@@ -273,6 +273,12 @@ mod tests {
     }
 
     #[test]
+    fn claude_streaming_command_supports_fable_5_1() {
+        let command = claude_streaming_command_text("claude-fable-5-1", "max");
+        assert!(command.contains("claude --model claude-fable-5-1 --effort max"));
+    }
+
+    #[test]
     fn claude_surface_boundary_only_appears_when_surface_changes() {
         let channel_id = Uuid::new_v4();
         let thread_a = Uuid::new_v4();

@@ -265,7 +265,7 @@ mod tests {
             60_000_000
         );
         assert_eq!(
-            model_cost_micros("claude", "claude-fable-5", 1_000_000, 1_000_000),
+            model_cost_micros("claude", "claude-fable-5-1", 1_000_000, 1_000_000),
             60_000_000
         );
     }
