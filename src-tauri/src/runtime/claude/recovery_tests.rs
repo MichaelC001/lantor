@@ -79,6 +79,47 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn activity_only_result_removes_placeholder_after_processing_controls() {
+    let f = Fixture::new().await;
+    let progress = "LANTOR_EVENT {\"type\":\"activity\",\"kind\":\"command\",\"title\":\"Checking the build\"}";
+    f.stream(progress).await;
+    f.assistant("progress", progress).await;
+    assert_eq!(
+        f.body().await,
+        "",
+        "keep the placeholder while tools can still run"
+    );
+    f.result(progress).await;
+    // A repeated provider result must not recreate an empty bubble or duplicate controls.
+    f.result(progress).await;
+    let messages: i64 = sqlx::query_scalar("select count(*) from messages where stream_key=$1")
+        .bind(&f.key)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(messages, 0);
+    let activities: i64 = sqlx::query_scalar(
+        "select count(*) from agent_activities where run_id=$1 and title='Checking the build'",
+    )
+    .bind(f.run)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(activities, 1);
+    let deletes: i64 = sqlx::query_scalar("select count(*) from ui_events where json_extract(event_json, '$.reason')='empty_stream_finished'")
+        .fetch_one(&f.pool).await.unwrap();
+    assert_eq!(deletes, 1);
+    let run_status: String = sqlx::query_scalar("select status from agent_runs where id=$1")
+        .bind(f.run)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(run_status, "exited");
+    assert!(f.runtime.state.lock().await.active.is_none());
+    f.close().await;
+}
+
+#[tokio::test]
 async fn result_only_recovers_missing_final_after_progress() {
     let f = Fixture::new().await;
     f.stream("Reading papers.").await;

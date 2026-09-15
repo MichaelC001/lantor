@@ -173,6 +173,11 @@ or hand off a thread, Lantor records a work item and wakes the agent with
 scoped inbox context. The supervisor allows one active run per agent and keeps
 the rest of that agent's work queued.
 
+Claude Code's `result` event completes a Lantor request. Native background
+Bash/subagent tasks, Monitor, and Claude cron are disabled so later provider
+notifications cannot outlive the request's channel/thread ownership. Agents
+wait or poll with tools during the current turn; future follow-ups use Lantor reminders.
+
 Agents talk back in two channels:
 
 - **Normal assistant text** is routed into the right channel, DM, or thread.

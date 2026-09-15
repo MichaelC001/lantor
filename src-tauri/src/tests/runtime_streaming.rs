@@ -16,6 +16,64 @@ use sqlx::Row;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn terminal_empty_placeholders_preserve_attached_content_and_threads() {
+    let (pool, database) = test_pool().await.expect("isolated database");
+    let agent = insert_test_agent(&pool, "empty-streamer").await.unwrap();
+    let channel = insert_test_channel(&pool, "empty-streaming").await.unwrap();
+    for terminal_state in ["complete", "error"] {
+        for content in ["none", "reply", "attachment", "task"] {
+            let key = format!("empty-{terminal_state}-{content}");
+            let id = ensure_streaming_agent_message(&pool, agent, channel, None, &key)
+                .await
+                .unwrap();
+            match content {
+                "reply" => {
+                    sqlx::query("insert into messages (channel_id, thread_root_id, sender_name, body) values ($1, $2, 'owner', 'Keep this reply')")
+                        .bind(channel).bind(id).execute(&pool).await.unwrap();
+                }
+                "attachment" => {
+                    sqlx::query("insert into message_attachments (message_id, original_name, mime_type, size_bytes, storage_path) values ($1, 'result.txt', 'text/plain', 3, '/fixture/result.txt')")
+                        .bind(id).execute(&pool).await.unwrap();
+                }
+                "task" => {
+                    sqlx::query("update messages set is_task=true where id=$1")
+                        .bind(id)
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+            finish_streaming_agent_message(&pool, &key, terminal_state)
+                .await
+                .unwrap();
+            let state: Option<String> =
+                sqlx::query_scalar("select delivery_state from messages where id=$1")
+                    .bind(id)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+            if content == "none" {
+                assert_eq!(state, None);
+            } else {
+                assert_eq!(state.as_deref(), Some(terminal_state));
+            }
+        }
+    }
+    let replies: i64 =
+        sqlx::query_scalar("select count(*) from messages where body='Keep this reply'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let attachments: i64 = sqlx::query_scalar("select count(*) from message_attachments")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((replies, attachments), (2, 2));
+    drop_test_schema(pool, database).await;
+}
+
+#[tokio::test]
 async fn streaming_placeholders_handle_concurrent_starts() {
     let (pool, schema) = crate::test_support::test_pool_with_connections(8)
         .await
@@ -350,7 +408,7 @@ async fn completed_deferred_final_reply_survives_later_turn_error() {
 }
 
 #[tokio::test]
-async fn activity_only_streaming_reply_keeps_status_message() {
+async fn activity_only_streaming_reply_removes_empty_terminal_message() {
     let Some((pool, schema)) = test_pool().await else {
         return;
     };
@@ -387,13 +445,12 @@ async fn activity_only_streaming_reply_keeps_status_message() {
         .await?;
         finish_streaming_agent_message(&pool, &stream_key, "complete").await?;
 
-        let row = sqlx::query("select body, delivery_state from messages where id = $1")
+        let remaining: i64 = sqlx::query_scalar("select count(*) from messages where id = $1")
             .bind(message_id)
             .fetch_one(&pool)
             .await
             .map_err(|err| err.to_string())?;
-        assert_eq!(row.get::<String, _>("body"), "");
-        assert_eq!(row.get::<String, _>("delivery_state"), "complete");
+        assert_eq!(remaining, 0);
 
         let activity_count: i64 = sqlx::query_scalar(
             "select count(*) from agent_activities where run_id = $1 and title = 'Checking source'",
@@ -464,12 +521,12 @@ async fn streaming_control_event_split_after_marker_is_consumed() {
         .await?;
         finish_streaming_agent_message(&pool, &stream_key, "complete").await?;
 
-        let body: String = sqlx::query_scalar("select body from messages where id = $1")
+        let remaining: i64 = sqlx::query_scalar("select count(*) from messages where id = $1")
             .bind(message_id)
             .fetch_one(&pool)
             .await
             .map_err(|err| err.to_string())?;
-        assert_eq!(body, "");
+        assert_eq!(remaining, 0);
 
         let activity_count: i64 = sqlx::query_scalar(
             "select count(*) from agent_activities where run_id = $1 and title = 'Split marker'",
@@ -1126,7 +1183,7 @@ async fn streaming_finish_consumes_channel_create_control_line() {
 }
 
 #[tokio::test]
-async fn streaming_unsupported_artifact_control_line_keeps_status_message() {
+async fn streaming_unsupported_artifact_control_line_removes_empty_terminal_message() {
     let Some((pool, schema)) = test_pool().await else {
         return;
     };
@@ -1175,12 +1232,12 @@ async fn streaming_unsupported_artifact_control_line_keeps_status_message() {
         assert_eq!(raw_remaining, 1);
 
         finish_streaming_agent_message(&pool, stream_key, "complete").await?;
-        let raw_body: String = sqlx::query_scalar("select body from messages where id = $1")
+        let remaining: i64 = sqlx::query_scalar("select count(*) from messages where id = $1")
             .bind(raw_control_message_id)
             .fetch_one(&pool)
             .await
             .map_err(|err| err.to_string())?;
-        assert_eq!(raw_body, "");
+        assert_eq!(remaining, 0);
 
         let artifact_count: i64 =
             sqlx::query_scalar("select count(*) from artifacts where channel_id = $1")

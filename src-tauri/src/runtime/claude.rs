@@ -51,13 +51,29 @@ use protocol::{
     claude_message_text_blocks, claude_result_error, claude_result_text, claude_session_id,
     claude_stream_event_activity, claude_stream_key, claude_streaming_command_text,
     claude_surface_boundary_marker, claude_text_delta, claude_user_input, claude_write_input,
-    CLAUDE_MAX_RETRIES_ENV, DEFAULT_CLAUDE_MAX_RETRIES,
+    CLAUDE_DISABLE_BACKGROUND_TASKS_ENV, CLAUDE_DISABLE_CRON_ENV, CLAUDE_MAX_RETRIES_ENV,
+    DEFAULT_CLAUDE_MAX_RETRIES,
 };
 use reaper::claude_warm_idle_reaper;
 use turn::finish_warm_claude_active_turn;
 
 const CLAUDE_DISABLE_AUTO_MEMORY_ENV: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
 const CLAUDE_DISABLE_AUTO_MEMORY_VALUE: &str = "1";
+
+fn configure_claude_process_environment(command: &mut Command) {
+    // A provider result releases the Lantor run and its channel/thread ownership.
+    // Native background tasks can start another provider turn after that boundary,
+    // with no Lantor request to receive it (or while another target owns the session).
+    // Apply these invariants after agent-configured environment overrides.
+    command
+        .env(CLAUDE_DISABLE_BACKGROUND_TASKS_ENV, "1")
+        .env(CLAUDE_DISABLE_CRON_ENV, "1")
+        .env(
+            CLAUDE_DISABLE_AUTO_MEMORY_ENV,
+            CLAUDE_DISABLE_AUTO_MEMORY_VALUE,
+        )
+        .env(CLAUDE_MAX_RETRIES_ENV, DEFAULT_CLAUDE_MAX_RETRIES);
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct WarmClaudeRegistry {
@@ -242,13 +258,13 @@ async fn spawn_warm_claude_runtime(
         .arg("stream-json")
         .arg("--include-partial-messages")
         .arg("--verbose")
+        // Monitor has its own enablement gate in Claude Code, independent of
+        // CLAUDE_CODE_DISABLE_BACKGROUND_TASKS. It can also emit unsolicited turns.
+        .arg("--disallowedTools")
+        .arg("Monitor")
         .arg("--permission-mode")
-        .arg("bypassPermissions")
-        .env(
-            CLAUDE_DISABLE_AUTO_MEMORY_ENV,
-            CLAUDE_DISABLE_AUTO_MEMORY_VALUE,
-        )
-        .env(CLAUDE_MAX_RETRIES_ENV, DEFAULT_CLAUDE_MAX_RETRIES);
+        .arg("bypassPermissions");
+    configure_claude_process_environment(&mut command);
     configure_agent_identity_env(&mut command, agent_id, config.handle);
     configure_agent_context_tool_env(&mut command);
     #[cfg(unix)]
@@ -965,19 +981,29 @@ mod tests {
     };
 
     use super::{
-        finish_warm_claude_active_turn, ClaudeActiveTurn, ClaudeTextState, WarmClaudeRuntime,
-        CLAUDE_DISABLE_AUTO_MEMORY_ENV, CLAUDE_DISABLE_AUTO_MEMORY_VALUE,
+        configure_claude_process_environment, finish_warm_claude_active_turn, ClaudeActiveTurn,
+        ClaudeTextState, WarmClaudeRuntime, CLAUDE_DISABLE_AUTO_MEMORY_ENV,
+        CLAUDE_DISABLE_BACKGROUND_TASKS_ENV, CLAUDE_DISABLE_CRON_ENV, CLAUDE_MAX_RETRIES_ENV,
     };
 
-    #[test]
-    fn claude_process_disables_provider_auto_memory() {
-        assert_eq!(
-            (
-                CLAUDE_DISABLE_AUTO_MEMORY_ENV,
-                CLAUDE_DISABLE_AUTO_MEMORY_VALUE
-            ),
-            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+    #[tokio::test]
+    async fn claude_child_enforces_turn_boundaries_over_environment_overrides() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(
+            r#"printf '%s\n' "$CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" "$CLAUDE_CODE_DISABLE_CRON" "$CLAUDE_CODE_DISABLE_AUTO_MEMORY" "$ANTHROPIC_MAX_RETRIES""#,
         );
+        for key in [
+            CLAUDE_DISABLE_BACKGROUND_TASKS_ENV,
+            CLAUDE_DISABLE_CRON_ENV,
+            CLAUDE_DISABLE_AUTO_MEMORY_ENV,
+            CLAUDE_MAX_RETRIES_ENV,
+        ] {
+            command.env(key, "0");
+        }
+        configure_claude_process_environment(&mut command);
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"1\n1\n1\n5\n");
     }
 
     pub(super) async fn test_runtime_with_active_turn(

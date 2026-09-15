@@ -828,6 +828,40 @@ async fn finish_streaming_agent_message_inner(
         } else {
             flush_stream_control_buffer(pool, None, stream_key).await?;
         }
+
+        // Activity-only turns can leave a reserved placeholder after all controls
+        // are consumed. Remove it only at the terminal boundary, before freshness
+        // handling can turn an empty body into a held reply. Never cascade-delete
+        // content that a user attached to, or replied to under, the placeholder.
+        let mut transaction = pool.begin().await.map_err(to_string)?;
+        let message_id: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            delete from messages
+            where stream_key = $1 and delivery_state = 'streaming' and body = ''
+              and is_task = false
+              and not exists (select 1 from messages reply where reply.thread_root_id = messages.id)
+              and not exists (select 1 from message_attachments a where a.message_id = messages.id)
+            returning id
+            "#,
+        )
+        .bind(stream_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(to_string)?;
+        if let Some(message_id) = message_id {
+            enqueue_ui_event_in_tx(
+                &mut transaction,
+                &UiEvent::MessageDelete {
+                    reason: "empty_stream_finished",
+                    message_id,
+                },
+            )
+            .await?;
+        }
+        transaction.commit().await.map_err(to_string)?;
+        if message_id.is_some() {
+            return Ok(());
+        }
     }
 
     if delivery_state == "complete" {

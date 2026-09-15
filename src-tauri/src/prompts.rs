@@ -328,7 +328,8 @@ pub(crate) fn codex_developer_instructions(handle: &str) -> String {
 pub(crate) fn claude_system_prompt(handle: &str) -> String {
     build_runtime_standing_prompt(
         handle,
-        "Lantor is connected to Claude through Claude Code stream-json and streams your assistant text into chat automatically.",
+        "Lantor is connected to Claude through Claude Code stream-json and streams your assistant text into chat automatically.\n\
+         Claude turn lifecycle: Lantor completes the current request when Claude Code emits its result event. Native background tasks are disabled: do not use run_in_background, Monitor, or background subagents. Keep commands in the foreground, or explicitly poll work to completion with tools during this turn. Do not end the turn with only an Activity update while required work is still pending; finish verification and deliver the result before returning. A later task-notification is not a new Lantor request and has no guaranteed reply target. Use Lantor reminders for requested future follow-up.",
     )
 }
 
