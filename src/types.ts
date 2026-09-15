@@ -73,6 +73,7 @@ export type Channel = {
   kind: "channel" | "dm";
   dm_agent_id: string | null;
   unread_count: number;
+  agent_unread_count?: number;
   github_unread_count: number;
   github_review_synced_at: string | null;
   latest_message_at?: string | null;
@@ -83,6 +84,8 @@ export type ThreadActivity = {
   thread_root_id: string;
   channel_id: string;
   unread_count: number;
+  agent_unread_count?: number;
+  first_unread_agent_message_id?: string | null;
   latest_message_id: string;
   latest_activity_at: string;
 };
@@ -552,7 +555,7 @@ export type SearchResult = {
   senderRole?: string | null;
 };
 
-export type ActivityFeedKind = "mention" | "dm" | "thread" | "task" | "reminder" | "channel";
+export type ActivityFeedKind = "mention" | "dm" | "thread" | "channel";
 
 export type ActivityFeedItem = {
   id: string;
@@ -569,8 +572,6 @@ export type ActivityFeedItem = {
   channelId: string | null;
   threadId: string | null;
   messageId: string | null;
-  taskId: string | null;
-  reminderId: string | null;
   replyCount: number;
   newCount: number;
 };

@@ -66,6 +66,37 @@ async fn enqueue_channel_member_change_in_tx(
 pub(crate) async fn load_channels(pool: &SqlitePool) -> CommandResult<Vec<Channel>> {
     let rows = sqlx::query(
         r#"
+        with unread_messages as (
+            select c.id as channel_id, m.sender_role
+            from channels c
+            left join channel_read_state r on r.channel_id = c.id
+            join messages m on m.channel_id = c.id
+              and m.seq > coalesce(r.last_read_seq, 0)
+              -- Legacy writers can still insert timestamp-only markers.
+              -- Migrated markers and new mark_read requests use seq only.
+              and (r.last_read_seq is not null or julianday(m.created_at) > julianday(
+                coalesce(r.last_read_at, '0001-01-01T00:00:00+00:00')
+              ))
+              and m.sender_role <> 'owner'
+              and m.delivery_state <> 'streaming'
+              and not (
+                m.sender_role <> 'system'
+                and m.delivery_state = 'complete'
+                and trim(m.body) = ''
+                and m.stream_key glob '????????-????-????-????-????????????:*'
+                and not exists (
+                  select 1 from message_attachments ma where ma.message_id = m.id
+                )
+                and not exists (
+                  select 1 from artifacts ar where ar.message_id = m.id
+                )
+              )
+        ), unread_counts as (
+            select channel_id, count(*) as unread_count,
+                   sum(case when sender_role not in ('owner', 'system') then 1 else 0 end) as agent_unread_count
+            from unread_messages
+            group by channel_id
+        )
         select
             c.id,
             c.name,
@@ -73,30 +104,8 @@ pub(crate) async fn load_channels(pool: &SqlitePool) -> CommandResult<Vec<Channe
             c.kind,
             c.dm_agent_id,
             (select created_at from messages m where m.channel_id = c.id order by m.seq desc limit 1) as latest_message_at,
-            cast((
-                select count(*) from messages m
-                where m.channel_id = c.id
-                  and m.seq > coalesce(r.last_read_seq, 0)
-                  -- Legacy writers can still insert timestamp-only markers.
-                  -- Migrated markers and new mark_read requests use seq only.
-                  and (r.last_read_seq is not null or julianday(m.created_at) > julianday(
-                    coalesce(r.last_read_at, '0001-01-01T00:00:00+00:00')
-                  ))
-                  and m.sender_role <> 'owner'
-                  and m.delivery_state <> 'streaming'
-                  and not (
-                    m.sender_role <> 'system'
-                    and m.delivery_state = 'complete'
-                    and trim(m.body) = ''
-                    and m.stream_key glob '????????-????-????-????-????????????:*'
-                    and not exists (
-                      select 1 from message_attachments ma where ma.message_id = m.id
-                    )
-                    and not exists (
-                      select 1 from artifacts ar where ar.message_id = m.id
-                    )
-                  )
-            ) as integer) as unread_count,
+            coalesce(unread_counts.unread_count, 0) as unread_count,
+            coalesce(unread_counts.agent_unread_count, 0) as agent_unread_count,
             cast((
                 select count(*)
                 from github_review_request_cache review_attention
@@ -110,7 +119,7 @@ pub(crate) async fn load_channels(pool: &SqlitePool) -> CommandResult<Vec<Channe
                 where github_binding.channel_id = c.id
             ) as github_review_synced_at
         from channels c
-        left join channel_read_state r on r.channel_id = c.id
+        left join unread_counts on unread_counts.channel_id = c.id
         order by
           case
             when c.kind = 'channel' and c.name = 'lantor' then 0
@@ -133,6 +142,7 @@ pub(crate) async fn load_channels(pool: &SqlitePool) -> CommandResult<Vec<Channe
             kind: row.get("kind"),
             dm_agent_id: row.get("dm_agent_id"),
             unread_count: row.get("unread_count"),
+            agent_unread_count: row.get("agent_unread_count"),
             github_unread_count: row.get("github_unread_count"),
             github_review_synced_at: row.get("github_review_synced_at"),
             latest_message_at: row.get("latest_message_at"),
@@ -215,6 +225,22 @@ pub(crate) async fn load_channel_thread_activities(
                   ) then 1
                 else 0
             end) as integer) as unread_count,
+            cast(sum(case
+                when reply.sender_role not in ('owner', 'system')
+                  and (read_marker.channel_read_seq is null or reply.seq > read_marker.channel_read_seq)
+                  and julianday(reply.created_at) > julianday(
+                    coalesce(read_marker.read_until, '0001-01-01T00:00:00+00:00')
+                  ) then 1
+                else 0
+            end) as integer) as agent_unread_count,
+            min(case
+                when reply.sender_role not in ('owner', 'system')
+                  and (read_marker.channel_read_seq is null or reply.seq > read_marker.channel_read_seq)
+                  and julianday(reply.created_at) > julianday(
+                    coalesce(read_marker.read_until, '0001-01-01T00:00:00+00:00')
+                  ) then reply.seq
+                else null
+            end) as first_unread_agent_seq,
             root.id as latest_root_id
         from messages root
         join visible_thread_replies reply on reply.thread_root_id = root.id
@@ -223,12 +249,14 @@ pub(crate) async fn load_channel_thread_activities(
         group by root.id, root.channel_id
         )
         select totals.thread_root_id, totals.channel_id, totals.reply_count, totals.unread_count,
+               totals.agent_unread_count, first_unread.id as first_unread_agent_message_id,
                latest.id as latest_message_id, latest.created_at as latest_activity_at
         from totals join messages latest on latest.id = (
             select vr.id from visible_thread_replies vr
             where vr.thread_root_id = totals.latest_root_id
             order by julianday(vr.created_at) desc, vr.created_at desc, vr.id desc limit 1
         )
+        left join messages first_unread on first_unread.seq = totals.first_unread_agent_seq
         order by julianday(latest.created_at) desc, latest.created_at desc, totals.thread_root_id desc
         "#,
     )
@@ -244,6 +272,8 @@ pub(crate) async fn load_channel_thread_activities(
             thread_root_id: row.get("thread_root_id"),
             channel_id: row.get("channel_id"),
             unread_count: row.get("unread_count"),
+            agent_unread_count: row.get("agent_unread_count"),
+            first_unread_agent_message_id: row.get("first_unread_agent_message_id"),
             latest_message_id: row.get("latest_message_id"),
             latest_activity_at: row.get("latest_activity_at"),
         })

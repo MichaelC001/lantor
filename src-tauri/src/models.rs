@@ -96,6 +96,7 @@ pub(crate) struct Channel {
     pub(crate) kind: String,
     pub(crate) dm_agent_id: Option<Uuid>,
     pub(crate) unread_count: i32,
+    pub(crate) agent_unread_count: i32,
     pub(crate) github_unread_count: i32,
     pub(crate) github_review_synced_at: Option<String>,
     pub(crate) latest_message_at: Option<String>,
@@ -107,6 +108,8 @@ pub(crate) struct ThreadActivity {
     pub(crate) thread_root_id: Uuid,
     pub(crate) channel_id: Uuid,
     pub(crate) unread_count: i32,
+    pub(crate) agent_unread_count: i32,
+    pub(crate) first_unread_agent_message_id: Option<Uuid>,
     pub(crate) latest_message_id: Uuid,
     pub(crate) latest_activity_at: DateTime<Utc>,
 }

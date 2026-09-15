@@ -50,6 +50,7 @@ import { ChannelSettingsModal } from "./components/ChannelSettingsModal";
 import { ConfirmModal } from "./components/ConfirmModal";
 import { Conversation } from "./components/Conversation";
 import { CreateChannelModal } from "./components/CreateChannelModal";
+import { buildActivityFeedItems } from "./activity-feed";
 import { ActivityFeedModal } from "./components/ActivityFeedModal";
 import { ArtifactViewerModal } from "./components/ArtifactViewerModal";
 import { OwnerProfileModal, ownerProfileToForm, type OwnerProfileForm } from "./components/OwnerProfileModal";
@@ -695,11 +696,6 @@ function percentile(values: number[], ratio: number) {
   const sorted = [...values].sort((left, right) => left - right);
   const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1);
   return sorted[index];
-}
-
-function messageMentionsOwner(message: Message) {
-  const body = message.body.toLowerCase();
-  return OWNER_MENTION_HANDLES.some((handle) => body.includes(handle.toLowerCase()));
 }
 
 function budgetMicrosFromForm(value: string) {
@@ -2992,205 +2988,14 @@ function App() {
     return new Map((data?.thread_activities ?? []).map((activity) => [activity.thread_root_id, activity]));
   }, [data?.thread_activities]);
 
-  const allThreadRootMessages = useMemo(() => {
-    const latestByRoot = new Map<string, number>();
-    for (const message of visibleMessages) {
-      if (!message.thread_root_id) continue;
-      const timestamp = new Date(message.created_at).getTime();
-      latestByRoot.set(message.thread_root_id, Math.max(latestByRoot.get(message.thread_root_id) ?? 0, timestamp));
-    }
-    for (const activity of data?.thread_activities ?? []) {
-      const timestamp = new Date(activity.latest_activity_at).getTime();
-      if (Number.isFinite(timestamp)) {
-        latestByRoot.set(activity.thread_root_id, Math.max(latestByRoot.get(activity.thread_root_id) ?? 0, timestamp));
-      }
-    }
-    return visibleMessages
-      .filter((message) =>
-        !message.thread_root_id &&
-        latestByRoot.has(message.id) &&
-        (message.thread_followed || (threadUnreadCounts[message.id] ?? 0) > 0) &&
-        !locallyUnfollowedThreadIds.has(message.id))
-      .sort((left, right) => (latestByRoot.get(right.id) ?? 0) - (latestByRoot.get(left.id) ?? 0));
-  }, [data?.thread_activities, visibleMessages, locallyUnfollowedThreadIds, threadUnreadCounts]);
-
-  const allActivityFeedItems = useMemo(() => {
-    if (!data) return [];
-    const channelsById = new Map(data.channels.map((item) => [item.id, item]));
-    const agentsById = new Map(data.agents.map((item) => [item.id, item]));
-    const latestByChannel = new Map<string, Message>();
-    const repliesByRoot = new Map<string, Message[]>();
-
-    for (const message of visibleMessages) {
-      const currentChannelLatest = latestByChannel.get(message.channel_id);
-      if (!currentChannelLatest || new Date(message.created_at) > new Date(currentChannelLatest.created_at)) {
-        latestByChannel.set(message.channel_id, message);
-      }
-      if (message.thread_root_id) {
-        const currentReplies = repliesByRoot.get(message.thread_root_id) ?? [];
-        currentReplies.push(message);
-        repliesByRoot.set(message.thread_root_id, currentReplies);
-      }
-    }
-    for (const replies of repliesByRoot.values()) {
-      replies.sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
-    }
-
-    const channelLabel = (channelId: string | null) => {
-      if (!channelId) return APP_DISPLAY_NAME;
-      const target = channelsById.get(channelId);
-      if (!target) return "Unknown";
-      if (target.kind === "dm") {
-        const agent = target.dm_agent_id ? agentsById.get(target.dm_agent_id) : null;
-        return agent ? `@${agent.handle}` : "Direct message";
-      }
-      return `#${target.name}`;
-    };
-    const timestamp = (value: string | null | undefined) => value || new Date(0).toISOString();
-    const items: ActivityFeedItem[] = [];
-    const threadRootIdsForActivityFeed = new Set(allThreadRootMessages.map((message) => message.id));
-
-    for (const channel of data.channels) {
-      const unread = channel.unread_count > 0 || channelAlertIds.has(channel.id);
-      if (!unread) continue;
-      const latest = latestByChannel.get(channel.id);
-      if (latest?.thread_root_id && threadRootIdsForActivityFeed.has(latest.thread_root_id)) continue;
-      const dmAgent = channel.kind === "dm" && channel.dm_agent_id ? agentsById.get(channel.dm_agent_id) : null;
-      items.push({
-        id: `${channel.kind}:${channel.id}`,
-        dismissId: `${channel.kind}:${channel.id}`,
-        kind: channel.kind === "dm" ? "dm" : "channel",
-        title: channel.kind === "dm" ? `DM with @${dmAgent?.handle ?? "agent"}` : `New activity in #${channel.name}`,
-        excerpt: latest?.body ?? visibleChannelDescription(channel.description),
-        surface: channel.kind === "dm" ? "Direct message" : `#${channel.name}`,
-        actor: latest?.sender_name ?? "",
-        timestamp: timestamp(latest?.created_at),
-        unread: true,
-        actorAgentId: latest?.sender_agent_id ?? dmAgent?.id ?? null,
-        actorRole: latest?.sender_role ?? (channel.kind === "dm" ? "agent" : null),
-        channelId: channel.id,
-        threadId: latest?.thread_root_id ?? null,
-        messageId: latest?.id ?? null,
-        taskId: null,
-        reminderId: null,
-        replyCount: latest?.thread_root_id ? (threadReplyCounts[latest.thread_root_id] ?? 0) : 0,
-        newCount: channel.unread_count,
-      });
-    }
-
-    for (const root of allThreadRootMessages) {
-      const replies = repliesByRoot.get(root.id) ?? [];
-      const threadActivity = threadActivitiesByRoot.get(root.id);
-      const unreadCount = threadUnreadCounts[root.id] ?? threadActivity?.unread_count ?? 0;
-      const latestActivity = threadActivity
-        ? messagesById.get(threadActivity.latest_message_id) ?? replies[replies.length - 1] ?? root
-        : replies[replies.length - 1] ?? root;
-      const unread = unreadCount > 0;
-      // Jump to the first unread reply rather than the latest message —
-      // landing on the newest message is indistinguishable from just opening
-      // the thread at the bottom.
-      const firstUnread = unread && replies.length > 0
-        ? replies[Math.max(0, replies.length - unreadCount)] ?? replies[0]
-        : null;
-      items.push({
-        id: `thread:${root.id}`,
-        dismissId: `thread:${root.id}`,
-        kind: "thread",
-        title: firstLines(latestActivity.body, 1),
-        excerpt: latestActivity.body,
-        surface: channelLabel(root.channel_id),
-        actor: latestActivity.sender_name,
-        timestamp: timestamp(latestActivity.created_at),
-        unread,
-        actorAgentId: latestActivity.sender_agent_id,
-        actorRole: latestActivity.sender_role,
-        channelId: root.channel_id,
-        threadId: root.id,
-        messageId: firstUnread?.id ?? latestActivity.id,
-        taskId: null,
-        reminderId: null,
-        replyCount: threadReplyCounts[root.id] ?? 0,
-        newCount: unreadCount,
-      });
-    }
-
-    visibleMessages
-      .filter((message) => message.sender_role !== "owner" && messageMentionsOwner(message))
-      .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
-      .forEach((message) => {
-        const rootId = message.thread_root_id ?? message.id;
-        items.push({
-          id: `mention:${message.id}`,
-          dismissId: `mention:${message.id}`,
-          kind: "mention",
-          title: firstLines(message.body, 1),
-          excerpt: message.body,
-          surface: channelLabel(message.channel_id),
-          actor: message.sender_name,
-          timestamp: message.created_at,
-          unread: channelAlertIds.has(message.channel_id) || (message.thread_root_id ? (threadUnreadCounts[message.thread_root_id] ?? 0) > 0 : false),
-          actorAgentId: message.sender_agent_id,
-          actorRole: message.sender_role,
-          channelId: message.channel_id,
-          threadId: rootId,
-          messageId: message.id,
-          taskId: null,
-          reminderId: null,
-          replyCount: threadReplyCounts[rootId] ?? 0,
-          newCount: message.thread_root_id ? (threadUnreadCounts[message.thread_root_id] ?? 0) : 0,
-        });
-      });
-
-    data.tasks
-      .filter((task) => task.status !== "done")
-      .forEach((task) => {
-        items.push({
-          id: `task:${task.id}`,
-          dismissId: `task:${task.id}`,
-          kind: "task",
-          title: `Task #${task.number}: ${task.title}`,
-          excerpt: task.assignee_name ? `Assigned to ${task.assignee_name}` : "Unassigned",
-          surface: `#${task.channel_name}`,
-          actor: task.status.replace("_", " "),
-          timestamp: task.updated_at,
-          unread: task.status === "in_review",
-          actorAgentId: task.assignee_id,
-          actorRole: task.assignee_id ? "agent" : null,
-          channelId: task.channel_id,
-          threadId: task.message_id,
-          messageId: task.message_id,
-          taskId: task.id,
-          reminderId: null,
-          replyCount: threadReplyCounts[task.message_id] ?? 0,
-          newCount: 0,
-        });
-      });
-
-    data.reminders
-      .filter((reminder) => reminder.status === "fired")
-      .forEach((reminder) => {
-        items.push({
-          id: `reminder:${reminder.id}`,
-          dismissId: `reminder:${reminder.id}`,
-          kind: "reminder",
-          title: reminder.title,
-          excerpt: reminder.note,
-          surface: reminder.channel_id ? channelLabel(reminder.channel_id) : "Reminder",
-          actor: "Reminder due",
-          timestamp: reminder.fired_at ?? reminder.due_at,
-          unread: true,
-          channelId: reminder.channel_id,
-          threadId: reminder.thread_root_id,
-          messageId: reminder.message_id,
-          taskId: null,
-          reminderId: reminder.id,
-          replyCount: reminder.thread_root_id ? (threadReplyCounts[reminder.thread_root_id] ?? 0) : 0,
-          newCount: 1,
-        });
-      });
-
-    return items;
-  }, [allThreadRootMessages, channelAlertIds, data, messagesById, threadActivitiesByRoot, threadReplyCounts, threadUnreadCounts, visibleMessages]);
+  const allActivityFeedItems = useMemo(() => data ? buildActivityFeedItems({
+    channels: data.channels,
+    agents: data.agents,
+    messages: visibleMessages,
+    threadActivities: data.thread_activities,
+    unfollowedThreadIds: locallyUnfollowedThreadIds,
+    ownerMentionHandles: OWNER_MENTION_HANDLES,
+  }) : [], [data?.channels, data?.agents, data?.thread_activities, visibleMessages, locallyUnfollowedThreadIds]);
 
   const activityFeedItems = useMemo(() => {
     return allActivityFeedItems

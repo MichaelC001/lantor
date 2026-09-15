@@ -244,6 +244,9 @@ pub(crate) async fn load_activity_messages_without_artifact_content(
                 )
               )
         ),
+        agent_messages as (
+            select * from visible_messages where sender_role not in ('owner', 'system')
+        ),
         latest_channel_messages as (
             select ranked.id, ranked.thread_root_id
             from (
@@ -254,7 +257,7 @@ pub(crate) async fn load_activity_messages_without_artifact_content(
                         partition by m.channel_id
                         order by m.seq desc
                     ) as message_rank
-                from visible_messages m
+                from agent_messages m
             ) ranked
             where ranked.message_rank = 1
         ),
@@ -297,7 +300,7 @@ pub(crate) async fn load_activity_messages_without_artifact_content(
                         partition by reply.thread_root_id
                         order by reply.seq desc
                     ) as reply_rank
-                from visible_messages reply
+                from agent_messages reply
                 where reply.thread_root_id is not null
             ) ranked
             where ranked.reply_rank = 1
@@ -315,9 +318,8 @@ pub(crate) async fn load_activity_messages_without_artifact_content(
                 root.thread_followed
                 or exists (
                     select 1
-                    from visible_messages unread_reply
+                    from agent_messages unread_reply
                     where unread_reply.thread_root_id = root.id
-                      and unread_reply.sender_role <> 'owner'
                       and (read_marker.channel_read_seq is null or unread_reply.seq > read_marker.channel_read_seq)
                       and julianday(unread_reply.created_at) > julianday(
                         coalesce(read_marker.read_until, '0001-01-01T00:00:00+00:00')
@@ -329,9 +331,8 @@ pub(crate) async fn load_activity_messages_without_artifact_content(
         ),
         recent_mentions as (
             select m.id, m.thread_root_id
-            from visible_messages m
-            where m.sender_role <> 'owner'
-              and ({mention_predicate})
+            from agent_messages m
+            where ({mention_predicate})
             order by m.seq desc
             limit ?
         ),
@@ -2501,7 +2502,7 @@ mod tests {
                     insert into messages (
                         channel_id, sender_name, sender_role, body, is_task, created_at
                     )
-                    values ($1, 'Dylan', 'owner', $2, false, $3)
+                    values ($1, 'agent', 'agent', $2, false, $3)
                     "#,
                 )
                 .bind(mention_channel_id)
@@ -2532,7 +2533,7 @@ mod tests {
                     created_at
                 )
                 values (
-                    $1, $2, 'agent', 'agent', 'latest followed reply', false,
+                    $1, $2, 'agent', 'Architecture steward', 'latest followed reply', false,
                     '2026-01-01T00:02:01.000+00:00'
                 )
                 returning id
@@ -2544,6 +2545,54 @@ mod tests {
             .await
             .map_err(|err| err.to_string())?;
 
+            // Later task/reminder notifications and owner messages must not
+            // replace the agent preview, mentions, or contribute agent unread counts.
+            let system_reply_id: uuid::Uuid = sqlx::query_scalar(
+                "insert into messages (channel_id, thread_root_id, sender_name, sender_role, body, created_at) values ($1, $2, 'Lantor', 'system', 'Reminder: ping @Dylan', '2026-01-01T00:03:00.000+00:00') returning id",
+            )
+            .bind(other_channel_id)
+            .bind(followed_root_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            sqlx::query(
+                "insert into messages (channel_id, thread_root_id, sender_name, sender_role, body, created_at) values ($1, $2, 'Dylan', 'owner', 'later owner reply', '2026-01-01T00:04:00.000+00:00')",
+            )
+            .bind(other_channel_id)
+            .bind(followed_root_id)
+            .execute(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let system_only_channel_id = insert_test_channel(&pool, "activity-system-only").await?;
+            let system_only_id: uuid::Uuid = sqlx::query_scalar(
+                "insert into messages (channel_id, sender_name, sender_role, body, is_task) values ($1, 'Lantor', 'system', 'Task assigned to @Dylan', true) returning id",
+            )
+            .bind(system_only_channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let channels = crate::channels::load_channels(&pool).await?;
+            let other = channels
+                .iter()
+                .find(|channel| channel.id == other_channel_id)
+                .unwrap();
+            assert_eq!(other.unread_count, 2);
+            assert_eq!(other.agent_unread_count, 1);
+            let system_only = channels
+                .iter()
+                .find(|channel| channel.id == system_only_channel_id)
+                .unwrap();
+            assert_eq!(system_only.unread_count, 1);
+            assert_eq!(system_only.agent_unread_count, 0);
+            let activities = crate::channels::load_thread_activities(&pool).await?;
+            let activity = activities
+                .iter()
+                .find(|activity| activity.thread_root_id == followed_root_id)
+                .unwrap();
+            assert_eq!(activity.unread_count, 2);
+            assert_eq!(activity.agent_unread_count, 1);
+            assert_eq!(activity.first_unread_agent_message_id, Some(followed_reply_id));
+
             let messages = load_activity_messages_without_artifact_content(
                 &pool,
                 &["@Dylan".to_owned()],
@@ -2553,6 +2602,9 @@ mod tests {
                 .iter()
                 .map(|message| message.id)
                 .collect::<std::collections::HashSet<_>>();
+            assert!(!ids.contains(&system_reply_id));
+            assert!(!ids.contains(&system_only_id));
+            assert!(!messages.iter().any(|message| message.body == "later owner reply"));
             assert!(ids.contains(&mention_root_id));
             assert!(ids.contains(&mention_id));
             assert!(ids.contains(&followed_root_id));

@@ -1,5 +1,5 @@
 import { DialogSurface } from "./DialogSurface";
-import { ArrowUp, Bell, Check, Hash, Inbox, MessageSquare, UserRound, X } from "lucide-react";
+import { ArrowUp, Check, Hash, Inbox, MessageSquare, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent } from "react";
 import type { Agent, ActivityFeedItem, ActivityFeedKind, OwnerProfile } from "../types";
@@ -28,8 +28,6 @@ const FILTERS: { value: ActivityFeedFilter; label: string }[] = [
   { value: "mention", label: "Mentions" },
   { value: "dm", label: "DMs" },
   { value: "thread", label: "Threads" },
-  { value: "task", label: "Tasks" },
-  { value: "reminder", label: "Reminders" },
 ];
 
 const SWIPE_DISMISS_THRESHOLD_PX = 86;
@@ -38,7 +36,6 @@ const ACTIVITY_FEED_INITIAL_VISIBLE = 30;
 const ACTIVITY_FEED_LOAD_MORE_STEP = 30;
 
 function iconFor(kind: ActivityFeedKind) {
-  if (kind === "reminder") return Bell;
   if (kind === "dm") return UserRound;
   if (kind === "thread" || kind === "mention") return MessageSquare;
   return Hash;
@@ -273,7 +270,7 @@ export function ActivityFeedModal({
             <div className="search-empty">
               <Inbox size={34} />
               <h3>No activity</h3>
-              <p>Mentions, DMs, followed thread updates, active tasks, and due reminders will appear here.</p>
+              <p>Agent messages from mentions, DMs, channels, and threads will appear here.</p>
             </div>
           )}
 
