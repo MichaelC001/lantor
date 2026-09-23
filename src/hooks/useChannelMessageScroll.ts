@@ -50,6 +50,7 @@ export function useChannelMessageScroll(options: Options) {
     let focusId: string | null = null, lastFocusId: string | null = null;
     let lastReported: ChannelReadLocation | null = null;
     let failedRestore = false;
+    let writtenTop = -1;
     let preserveSavedPosition = false;
     let metrics = { top: 0, height: 0, clientHeight: 0 };
     setRestoring(true);
@@ -147,12 +148,12 @@ export function useChannelMessageScroll(options: Options) {
         // Read live geometry at the write boundary: cached ResizeObserver
         // height can still belong to the preview or pre-hydration layout.
         const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-        if (Math.abs(viewport.scrollTop - bottom) > 0.5) viewport.scrollTop = bottom;
+        if (Math.abs(viewport.scrollTop - bottom) > 0.5) { viewport.scrollTop = bottom; writtenTop = viewport.scrollTop; }
       } else if (anchor) {
         const target = row(anchor.messageId);
         if (target) {
           const delta = target.getBoundingClientRect().top - viewport.getBoundingClientRect().top - anchor.offset;
-          if (Math.abs(delta) > 0.5) viewport.scrollTop += delta;
+          if (Math.abs(delta) > 0.5) { viewport.scrollTop += delta; writtenTop = viewport.scrollTop; }
         }
       }
       cancelAnimationFrame(settleFrame);
@@ -198,7 +199,15 @@ export function useChannelMessageScroll(options: Options) {
     controller.current = {
       viewport, changed, userScroll, resize: schedule,
       scroll() {
-        if (!isLive() || initial || placing || !latest.current.ready) return;
+        if (!isLive() || initial || !latest.current.ready) return;
+        if (placing) {
+          // Placement writes emit scroll events too; ignore only those. Other
+          // movement (touch momentum, scrollbar, keys) supersedes placement.
+          // Settling against an anchor captured before it pulls the viewport
+          // back by one frame of scrolling on every frame.
+          if (Math.abs(viewport.scrollTop - writtenTop) <= 1) return;
+          cancelAnimationFrame(settleFrame); settleFrame = 0; placing = false;
+        }
         const movedUp = viewport.scrollTop < metrics.top - 0.5 && viewport.scrollHeight === metrics.height
           && viewport.clientHeight === metrics.clientHeight;
         follow = distance() < 32;
