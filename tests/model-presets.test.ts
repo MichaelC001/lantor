@@ -38,13 +38,10 @@ test("GPT-6 Sol and Luna presets follow the Codex app-server effort ranges", () 
   assert.equal(normalizeCodexReasoningEffortForModel("gpt-6-luna", "ultra"), "max");
 });
 
-test("Claude Opus 5.5 is selectable alongside the rolling opus alias", () => {
+test("Claude picker exposes only rolling aliases; opus tracks the latest Opus release", () => {
   const models = modelOptionsForRuntime("claude");
-  assert.ok(models.includes("claude-opus-5-5"));
-  assert.ok(models.includes("claude-opus-5-5[1m]"));
-  assert.ok(models.includes("opus"));
-  assert.equal(modelLabel("claude-opus-5-5"), "Claude Opus 5.5");
-  assert.equal(modelLabel("claude-opus-5-5[1m]"), "Claude Opus 5.5 (1M context)");
+  assert.deepEqual(models, ["fable", "opus", "sonnet", "haiku"]);
+  assert.ok(!models.some((model) => model.startsWith("claude-opus-")));
   assert.equal(modelLabel("opus"), "Claude Opus (latest)");
 });
 

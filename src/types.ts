@@ -631,15 +631,13 @@ export const RUNTIME_PRESETS: Record<string, { label: string; defaultModel: stri
     label: "Claude",
     defaultModel: "sonnet",
     commandName: "claude",
-    models: ["fable", "claude-opus-5-5", "claude-opus-5-5[1m]", "opus", "sonnet", "haiku"],
+    models: ["fable", "opus", "sonnet", "haiku"],
   },
 };
 
 const MODEL_LABELS: Record<string, string> = {
   fable: "Claude Fable 5.1",
   "claude-fable-5-1": "Claude Fable 5.1",
-  "claude-opus-5-5": "Claude Opus 5.5",
-  "claude-opus-5-5[1m]": "Claude Opus 5.5 (1M context)",
   opus: "Claude Opus (latest)",
   sonnet: "Claude Sonnet (latest)",
   haiku: "Claude Haiku (latest)",
