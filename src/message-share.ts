@@ -13,13 +13,6 @@ function artifactLines(message: Message) {
   ));
 }
 
-export function messageShareLink(message: Message, baseUrl?: string | null) {
-  const base = (baseUrl && baseUrl.trim()) || window.location.origin;
-  const url = new URL(base, window.location.href);
-  url.hash = `/message/${message.id}`;
-  return url.toString();
-}
-
 export function messageToMarkdown(message: Message, surfaceLabel: string) {
   const lines = [
     `### ${message.sender_name} - ${formatTime(message.created_at)}`,

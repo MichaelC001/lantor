@@ -28,7 +28,7 @@ import { copyText } from "../clipboard";
 import { APP_DISPLAY_NAME } from "../branding";
 import { useChannelMessageScroll, type ChannelReadLocation } from "../hooks/useChannelMessageScroll";
 import { isCompactFollowupMessage } from "../message-grouping";
-import { messageShareLink, messageToMarkdown } from "../message-share";
+import { messageToMarkdown } from "../message-share";
 import { appendMessageReferenceToken, messageReferenceToken, parseMessageReferences, removeMessageReferenceToken, withoutMessageReferenceTokens, type MessageReferenceKind, type ResolvedMessageReference } from "../message-references";
 import { Agent, AgentActivity, AgentRun, AgentWorkItem, Artifact, Channel, DraftAttachment, GithubIssueTaskResult, GithubReviewTaskResult, Message, OwnerProfile, Task, ThreadReplySummary } from "../types";
 import { formatTime, isSameCalendarDay, visibleAgentDescription, visibleChannelDescription } from "../ui-utils";
@@ -96,7 +96,6 @@ type ConversationProps = {
   loadActivityHistory?: (agentIds: string[]) => Promise<unknown>;
   onReferenceMessageJump: (originMessageId: string, targetMessageId: string) => void;
   onReferenceThreadJump: (originMessageId: string, threadId: string) => void;
-  shareBaseUrl: string | null;
   savedMessageIds: Set<string>;
   focusedMessageId: string | null;
   showImageThumbnails: boolean;
@@ -170,7 +169,6 @@ export function Conversation({
   loadActivityHistory,
   onReferenceMessageJump,
   onReferenceThreadJump,
-  shareBaseUrl,
   savedMessageIds,
   focusedMessageId,
   showImageThumbnails,
@@ -344,10 +342,6 @@ export function Conversation({
     setMessageMenu(null);
   }
 
-  async function copyMessageLink(message: Message) {
-    await copyText(messageShareLink(message, shareBaseUrl));
-    setMessageMenu(null);
-  }
 
   function toggleChannelMessageExpanded(messageId: string) {
     setExpandedChannelMessageIds((current) => {
@@ -602,12 +596,8 @@ export function Conversation({
               x={messageMenu.x}
               y={messageMenu.y}
               isSaved={savedMessageIds.has(messageMenu.message.id)}
-              onCopyLink={() => copyMessageLink(messageMenu.message)}
               onCopyMarkdown={() => copyMessageMarkdown(messageMenu.message)}
-              onCopyReferenceMessage={() => copyMessageReference(messageMenu.message, "message")}
-              onCopyReferenceThread={() => copyMessageReference(messageMenu.message, "thread")}
-              onReferenceMessage={() => insertMessageReference(messageMenu.message, "message")}
-              onReferenceThread={() => insertMessageReference(messageMenu.message, "thread")}
+              onCopyThreadReference={() => copyMessageReference(messageMenu.message, "thread")}
               onToggleSaved={() => {
                 onToggleMessageSaved(messageMenu.message, !savedMessageIds.has(messageMenu.message.id));
                 setMessageMenu(null);

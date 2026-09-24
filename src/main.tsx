@@ -3107,11 +3107,6 @@ function App() {
     if (hasData) setAppBadge(needsYou.count);
   }, [hasData, needsYou.count]);
 
-  const shareBaseUrl = useMemo(() => {
-    if (!data) return window.location.origin;
-    return isTauriRuntime() ? data.web_base_url ?? window.location.origin : window.location.origin;
-  }, [data?.web_base_url]);
-
   const visibleTasks = useMemo(() => {
     if (!data || !channel) return [];
     if (channel.kind === "dm") return [];
@@ -5258,7 +5253,6 @@ function App() {
         loadActivityHistory={loadAgentActivityHistory}
         onReferenceMessageJump={openReferencedMessage}
         onReferenceThreadJump={openReferencedThread}
-        shareBaseUrl={shareBaseUrl}
         savedMessageIds={savedMessageIds}
         focusedMessageId={focusedMessageId}
         showImageThumbnails={showImageThumbnails}
@@ -5331,7 +5325,6 @@ function App() {
           onReferenceThreadJump={openReferencedThread}
           messages={data.messages}
           onLocateRoot={revealThreadRootInChannel}
-          shareBaseUrl={shareBaseUrl}
           savedMessageIds={savedMessageIds}
           focusedMessageId={focusedMessageId}
           showImageThumbnails={showImageThumbnails}
