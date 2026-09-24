@@ -81,6 +81,10 @@ try {
       await page.locator(".thread").waitFor();
     };
     await openThread();
+    const threadHeader = page.locator(".thread header");
+    for (const name of ["Expand all messages in this thread", "Fold all messages in this thread", "Reference this thread"]) {
+      assert.equal(await threadHeader.getByRole("button", { name, exact: true }).count(), 0);
+    }
     await page.getByRole("button", { name: "Open DM with @Hancock", exact: true }).click();
     await page.locator(".dm-conversation").waitFor();
     await page.locator('.sidebar .channel').filter({ hasText: "ui-review" }).click();
@@ -172,10 +176,17 @@ try {
     await capture("thread-mobile-before-reference");
     await page.getByRole("button", { name: "Thread actions", exact: true }).click();
     await capture("thread-mobile-menu");
-    await page.getByRole("menuitem", { name: "Reference thread", exact: true }).click();
+    assert.equal(await page.getByRole("menuitem", { name: "Export as SVG", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("menuitem", { name: "Locate in channel", exact: true }).count(), 1);
+    for (const name of ["Expand all messages", "Fold all messages", "Reference thread"]) {
+      assert.equal(await page.getByRole("menuitem", { name, exact: true }).count(), 0);
+    }
+    await page.getByRole("button", { name: "Thread actions", exact: true }).click();
+    await page.locator(".reply-composer textarea").fill(`[[thread:${root.id}]]`);
     await page.waitForTimeout(200);
     assert.equal(await page.locator(".thread").count(), 1, "reference kind must not become another fullscreen panel");
     const preview = page.locator(".reply-composer .message-reference-stack");
+    await preview.waitFor();
     const referenceGeometry = await preview.evaluate(e => {
       const rect = e.getBoundingClientRect(), composer = e.closest(".reply-composer").getBoundingClientRect();
       const token = document.querySelector(".reply-composer .composer-reference-token");
@@ -210,7 +221,7 @@ try {
     assert.equal(await page.locator(".thread").count(), 1);
     assert.ok(await inline.evaluate(e => e.getBoundingClientRect().height < 80 && getComputedStyle(e).position !== "fixed"));
     assert.deepEqual(errors, []);
-    console.log(`${name}: empty/restored/closed/mobile thread, DM composer, wrapping task titles at 1440/1024/390, status groups/filters/edit/reopen, app modal layering/history/focus, mobile bottom navigation, thread reference insert/remove/paste/inline layout passed`);
+    console.log(`${name}: empty/restored/closed/mobile thread, DM composer, wrapping task titles at 1440/1024/390, status groups/filters/edit/reopen, app modal layering/history/focus, mobile bottom navigation, thread reference entry/remove/paste/inline layout passed`);
     await browser.close(); browser = null;
   }
 } finally { await browser?.close(); for (const client of clients) client.end(); api.closeAllConnections(); await new Promise(done => api.close(done)); }

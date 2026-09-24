@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowLeft, CheckCircle2, Crosshair, FileImage, Hash, Maximize2, MessageSquare, Minimize2, MoreHorizontal, Paperclip, Quote, RotateCcw, Send, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, CheckCircle2, Crosshair, FileImage, Hash, MessageSquare, MoreHorizontal, Paperclip, RotateCcw, Send, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type TextareaHTMLAttributes, type WheelEvent as ReactWheelEvent } from "react";
 import { useEventCallback } from "../hooks/useEventCallback";
 import { useMessageRows } from "../hooks/useMessageRows";
@@ -348,12 +348,6 @@ export function ThreadPanel({
       .filter((message) => message.delivery_state !== "streaming" && shouldCollapseThreadMessage(message.body))
       .map((message) => message.id);
   }, [activeRoot, replies]);
-  const hasCollapsibleThreadMessages = collapsibleThreadMessageIds.length > 0;
-  const areAllThreadMessagesExpanded = hasCollapsibleThreadMessages
-    && collapsibleThreadMessageIds.every((messageId) => expandedThreadMessageIds.has(messageId));
-  const areAllThreadMessagesFolded = hasCollapsibleThreadMessages
-    && collapsibleThreadMessageIds.every((messageId) => !expandedThreadMessageIds.has(messageId));
-
   function isThreadScrollAtBottom(element: HTMLDivElement) {
     return threadScrollDistanceFromBottom(element) < 32;
   }
@@ -692,20 +686,6 @@ export function ThreadPanel({
     });
   }
 
-  function expandAllThreadMessages() {
-    if (!hasCollapsibleThreadMessages || areAllThreadMessagesExpanded) return;
-    stopFollowingThread();
-    setPendingCollapsedThreadMessageId(null);
-    setActiveThreadExpandedMessageIds(new Set(collapsibleThreadMessageIds));
-  }
-
-  function foldAllThreadMessages() {
-    if (!hasCollapsibleThreadMessages || areAllThreadMessagesFolded) return;
-    stopFollowingThread();
-    setPendingCollapsedThreadMessageId(null);
-    setActiveThreadExpandedMessageIds(new Set());
-  }
-
   async function exportThreadVectorImage() {
     const threadPanel = threadPanelRef.current;
     if (!activeRoot || !threadPanel) return;
@@ -801,30 +781,6 @@ export function ThreadPanel({
               <button
                 type="button"
                 role="menuitem"
-                disabled={!hasCollapsibleThreadMessages || areAllThreadMessagesExpanded}
-                onClick={() => {
-                  setShowMobileThreadActions(false);
-                  expandAllThreadMessages();
-                }}
-              >
-                <Maximize2 size={18} />
-                <span>Expand all messages</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!hasCollapsibleThreadMessages || areAllThreadMessagesFolded}
-                onClick={() => {
-                  setShowMobileThreadActions(false);
-                  foldAllThreadMessages();
-                }}
-              >
-                <Minimize2 size={18} />
-                <span>Fold all messages</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
                 disabled={!activeRoot}
                 onClick={() => {
                   setShowMobileThreadActions(false);
@@ -833,18 +789,6 @@ export function ThreadPanel({
               >
                 <Crosshair size={18} />
                 <span>{isDm ? "Locate in DM" : "Locate in channel"}</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!activeRoot}
-                onClick={() => {
-                  setShowMobileThreadActions(false);
-                  if (activeRoot) insertMessageReference(activeRoot, "thread");
-                }}
-              >
-                <Quote size={18} />
-                <span>Reference thread</span>
               </button>
             </span>
           )}
@@ -863,28 +807,6 @@ export function ThreadPanel({
           </button>
           <button
             type="button"
-            className="thread-expand-all"
-            onClick={expandAllThreadMessages}
-            aria-disabled={!hasCollapsibleThreadMessages || areAllThreadMessagesExpanded}
-            data-tooltip="Expand all messages in this thread"
-            title="Expand all messages in this thread"
-            aria-label="Expand all messages in this thread"
-          >
-            <Maximize2 size={18} />
-          </button>
-          <button
-            type="button"
-            className="thread-fold-all"
-            onClick={foldAllThreadMessages}
-            aria-disabled={!hasCollapsibleThreadMessages || areAllThreadMessagesFolded}
-            data-tooltip="Fold all messages in this thread"
-            title="Fold all messages in this thread"
-            aria-label="Fold all messages in this thread"
-          >
-            <Minimize2 size={18} />
-          </button>
-          <button
-            type="button"
             className="thread-locate-root"
             onClick={() => {
               if (activeRoot) onLocateRoot(activeRoot);
@@ -894,18 +816,6 @@ export function ThreadPanel({
             aria-label={isDm ? "Locate this thread in the DM" : "Locate this thread in the channel"}
           >
             <Crosshair size={18} />
-          </button>
-          <button
-            type="button"
-            className="thread-locate-root"
-            onClick={() => {
-              if (activeRoot) insertMessageReference(activeRoot, "thread");
-            }}
-            disabled={!activeRoot}
-            data-tooltip="Reference this thread"
-            aria-label="Reference this thread"
-          >
-            <Quote size={18} />
           </button>
           <button type="button" className="thread-close" onClick={onClose} aria-label="Close thread panel"><X size={18} /></button>
         </span>
