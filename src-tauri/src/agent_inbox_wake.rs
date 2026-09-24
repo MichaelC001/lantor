@@ -810,6 +810,10 @@ pub(crate) async fn sync_inbox_for_work_item(
     .execute(pool)
     .await
     .map_err(to_string)?;
+    if matches!(status.as_str(), "done" | "silent") {
+        crate::domain::reminders::complete_successful_agent_reminders(pool, Some(work_item_id))
+            .await?;
+    }
     if source_kind == "inbox_wake"
         && matches!(status.as_str(), "done" | "failed" | "cancelled" | "held")
     {

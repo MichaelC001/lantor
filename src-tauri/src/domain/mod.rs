@@ -11,6 +11,9 @@ pub(crate) mod schedules;
 
 pub(crate) fn spawn_reminder_worker(pool: SqlitePool) {
     tauri::async_runtime::spawn(async move {
+        if let Err(err) = reminders::complete_successful_agent_reminders(&pool, None).await {
+            eprintln!("Lantor reminder reconciliation failed: {err}");
+        }
         loop {
             if let Err(err) = reminders::process_due_reminders(&pool).await {
                 eprintln!("Lantor reminder worker failed: {err}");

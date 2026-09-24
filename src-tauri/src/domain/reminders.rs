@@ -132,6 +132,77 @@ pub(super) async fn process_due_reminders(pool: &SqlitePool) -> CommandResult<()
     Ok(())
 }
 
+/// A one-shot reminder stays due until its agent follow-up has finished.
+/// Also reconciles reminders fired before this lifecycle transition existed.
+pub(crate) async fn complete_successful_agent_reminders(
+    pool: &SqlitePool,
+    work_item_id: Option<Uuid>,
+) -> CommandResult<()> {
+    let mut transaction = pool.begin().await.map_err(to_string)?;
+    let rows = sqlx::query(
+        r#"
+        select r.id, max(w.completed_at) as work_completed_at
+        from reminders r
+        join agent_inbox_items i
+          on i.agent_id = r.creator_agent_id
+         and i.kind = 'reminder_due'
+         and replace(json_extract(i.payload, '$.reminder_id'), '-', '') = lower(hex(r.id))
+        join agent_work_items w on w.id = i.work_item_id
+        where r.status = 'fired'
+          and r.recurrence = 'none'
+          and w.status in ('done', 'silent')
+          and ($1 is null or w.id = $1)
+        group by r.id
+        "#,
+    )
+    .bind(work_item_id)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(to_string)?;
+
+    let mut changed = false;
+    for row in rows {
+        let reminder_id: Uuid = row.get("id");
+        let completed_at: Option<String> = row.get("work_completed_at");
+        let updated = sqlx::query(
+            r#"
+            update reminders
+            set status = 'done',
+                completed_at = coalesce($2, strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
+                updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+            where id = $1 and status = 'fired' and recurrence = 'none'
+            "#,
+        )
+        .bind(reminder_id)
+        .bind(completed_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(to_string)?;
+        if updated.rows_affected() == 0 {
+            continue;
+        }
+        insert_reminder_event(
+            &mut *transaction,
+            reminder_id,
+            "completed",
+            "agent follow-up succeeded",
+        )
+        .await?;
+        changed = true;
+    }
+    if changed {
+        enqueue_ui_event_in_tx(
+            &mut transaction,
+            &UiEvent::Refresh {
+                reason: "reminder_completed",
+            },
+        )
+        .await?;
+    }
+    transaction.commit().await.map_err(to_string)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_due_reminder_to_agent(
     pool: &SqlitePool,
@@ -502,11 +573,122 @@ pub(crate) async fn load_reminders(pool: &SqlitePool) -> CommandResult<Vec<Remin
 mod tests {
     use std::fs as std_fs;
 
+    use serde_json::json;
     use sqlx::SqlitePool;
     use uuid::Uuid;
 
-    use super::process_due_reminders;
+    use super::{complete_successful_agent_reminders, process_due_reminders};
+    use crate::agent_inbox_wake::sync_inbox_for_work_item;
     use crate::db::{db_connect_with_url, migrate};
+    use crate::test_support::insert_test_agent;
+
+    #[tokio::test]
+    async fn successful_agent_follow_up_completes_only_its_one_shot_reminders() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "reminder-agent").await?;
+            let mut cases = Vec::new();
+            for (title, work_status, recurrence) in [
+                ("finished", "done", "none"),
+                ("quietly finished", "silent", "none"),
+                ("failed", "failed", "none"),
+                ("recurring", "done", "daily"),
+            ] {
+                let reminder_id: Uuid = sqlx::query_scalar(
+                    r#"
+                    insert into reminders
+                        (creator_agent_id, title, due_at, fired_at, recurrence, status)
+                    values ($1, $2, '2026-01-01T00:00:00+00:00',
+                            '2026-01-01T00:00:01+00:00', $3, 'fired')
+                    returning id
+                    "#,
+                )
+                .bind(agent_id)
+                .bind(title)
+                .bind(recurrence)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+                let work_item_id: Uuid = sqlx::query_scalar(
+                    r#"
+                    insert into agent_work_items (agent_id, title, status, completed_at)
+                    values ($1, $2, $3, '2026-01-01T00:00:02+00:00')
+                    returning id
+                    "#,
+                )
+                .bind(agent_id)
+                .bind(title)
+                .bind(work_status)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+                sqlx::query(
+                    r#"
+                    insert into agent_inbox_items
+                        (agent_id, kind, title, payload, work_item_id)
+                    values ($1, 'reminder_due', $2, $3, $4)
+                    "#,
+                )
+                .bind(agent_id)
+                .bind(title)
+                .bind(json!({"reminder_id": reminder_id}))
+                .bind(work_item_id)
+                .execute(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+                cases.push((reminder_id, work_item_id));
+            }
+
+            sync_inbox_for_work_item(&pool, cases[0].1).await?;
+            sync_inbox_for_work_item(&pool, cases[2].1).await?;
+            let status: String = sqlx::query_scalar("select status from reminders where id = $1")
+                .bind(cases[0].0)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            assert_eq!(status, "done");
+            let failed_status: String =
+                sqlx::query_scalar("select status from reminders where id = $1")
+                    .bind(cases[2].0)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert_eq!(failed_status, "fired");
+
+            complete_successful_agent_reminders(&pool, None).await?;
+            complete_successful_agent_reminders(&pool, None).await?;
+            for (index, (reminder_id, _)) in cases.iter().enumerate() {
+                let (status, completed_at): (String, Option<String>) = sqlx::query_as(
+                    "select status, completed_at from reminders where id = $1",
+                )
+                .bind(reminder_id)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+                if index < 2 {
+                    assert_eq!(status, "done");
+                    assert_eq!(completed_at.as_deref(), Some("2026-01-01T00:00:02+00:00"));
+                    let count: i64 = sqlx::query_scalar(
+                        "select count(*) from reminder_events where reminder_id = $1 and event_type = 'completed'",
+                    )
+                    .bind(reminder_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                    assert_eq!(count, 1);
+                } else {
+                    assert_eq!(status, "fired");
+                    assert!(completed_at.is_none());
+                }
+            }
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
 
     #[tokio::test]
     async fn due_reminder_fires_system_message() {
