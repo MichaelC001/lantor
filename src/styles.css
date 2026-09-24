@@ -4426,6 +4426,21 @@ mark {
   scroll-padding-top: 8px;
 }
 
+.activity-progress-history-empty {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--activity-progress-border);
+  border-radius: var(--radius-md);
+  background: var(--activity-progress-bg);
+  box-shadow: var(--activity-progress-shadow);
+  color: var(--ink-muted);
+  font-size: var(--type-size-meta);
+}
+
 .activity-progress-history .activity-run-step {
   grid-template-columns: clamp(50px, 14%, 66px) 12px minmax(0, 1fr);
   gap: 6px;

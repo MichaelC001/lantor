@@ -101,6 +101,7 @@ type ThreadPanelProps = {
   openAgentDetail: (agent: Agent) => void;
   openArtifact: (artifact: Artifact) => void;
   openWorkItem?: (item: AgentWorkItem, focusedMessageIdOverride?: string | null) => void;
+  loadActivityHistory?: (agentIds: string[]) => Promise<unknown>;
   onReferenceMessageJump: (originMessageId: string, targetMessageId: string) => void;
   onReferenceThreadJump: (originMessageId: string, threadId: string) => void;
   messages: Message[];
@@ -189,6 +190,7 @@ export function ThreadPanel({
   openAgentDetail,
   openArtifact,
   openWorkItem,
+  loadActivityHistory,
   onReferenceMessageJump,
   onReferenceThreadJump,
   messages,
@@ -918,7 +920,7 @@ export function ThreadPanel({
       <section className="thread-focus">
         <div className="thread-scroll-shell">
           <div className="thread-progress-layer">
-            <ActivityProgressDock progress={progress} onOpenWorkItem={openWorkItem} />
+            <ActivityProgressDock progress={progress} onOpenWorkItem={openWorkItem} onLoadActivityHistory={loadActivityHistory} />
           </div>
           <div
             ref={threadScrollRef}

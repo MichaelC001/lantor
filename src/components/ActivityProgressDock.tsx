@@ -19,16 +19,21 @@ import {
   Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { ACTIVE_RUN_STATUSES } from "../types";
 import type { Agent, AgentActivity, AgentRun, AgentWorkItem, Message } from "../types";
 import { messageHasVisibleContent, messageRunId } from "../message-grouping";
 import { formatClockTime } from "../ui-utils";
+import { useEventCallback } from "../hooks/useEventCallback";
 import { AgentAvatar } from "./AgentAvatar";
+
+const MISSING_HISTORY_GRACE_MS = 4_000;
 
 type ActivityProgressDockProps = {
   progress: ActiveAgentProgress[];
   onOpenWorkItem?: (item: AgentWorkItem, focusedMessageIdOverride?: string | null) => void;
+  /** Loads the given agents' recent activity when this client has none for a live run. */
+  onLoadActivityHistory?: (agentIds: string[]) => Promise<unknown>;
 };
 
 export type SourceKindMeta = {
@@ -476,8 +481,42 @@ export function activeProgressByAgent(
     .sort((left, right) => right.latestAt - left.latestAt);
 }
 
-function ActivityProgressDockContent({ progress, onOpenWorkItem }: ActivityProgressDockProps) {
+function progressAgentIds(progress: ActiveAgentProgress[]) {
+  return [...new Set(progress.flatMap((item) => [item.agent.id, item.workItem?.agent_id]
+    .filter((id): id is string => Boolean(id))))];
+}
+
+function ActivityProgressDockContent({ progress, onOpenWorkItem, onLoadActivityHistory }: ActivityProgressDockProps) {
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoad, setHistoryLoad] = useState<"idle" | "loading" | "done">("idle");
+  // One recovery attempt per set of live runs; the live stream fills in the rest.
+  const recoveredRunsRef = useRef("");
+  const missingHistoryRuns = progress
+    .filter((item) => item.state === "working" && item.history.length === 0)
+    .map((item) => item.workItem?.run_id ?? item.key)
+    .join("|");
+  const missingHistoryAgents = progressAgentIds(progress.filter((item) => item.state === "working" && item.history.length === 0));
+  const missingHistoryAgentKey = missingHistoryAgents.join("|");
+
+  // A client can hold a live run without its activity: a resumed phone whose
+  // event stream died, or a bootstrap trimmed to a few rows per agent. Load the
+  // agents' recent activity once per set of runs instead of showing a bare
+  // "Working"; the grace period leaves normal run start-up to the live stream.
+  const loadMissingHistory = useEventCallback(() => {
+    if (!onLoadActivityHistory || !missingHistoryRuns || missingHistoryAgents.length === 0) return;
+    if (recoveredRunsRef.current === missingHistoryRuns) return;
+    recoveredRunsRef.current = missingHistoryRuns;
+    setHistoryLoad("loading");
+    void onLoadActivityHistory(missingHistoryAgents)
+      .catch(() => undefined)
+      .finally(() => setHistoryLoad("done"));
+  });
+  useEffect(() => {
+    if (!missingHistoryRuns || !missingHistoryAgentKey) return;
+    const timer = window.setTimeout(loadMissingHistory, MISSING_HISTORY_GRACE_MS);
+    return () => window.clearTimeout(timer);
+  }, [missingHistoryRuns, missingHistoryAgentKey, loadMissingHistory]);
+
   if (progress.length === 0) return null;
 
   const workingCount = progress.filter((item) => item.state === "working").length;
@@ -556,11 +595,14 @@ function ActivityProgressDockContent({ progress, onOpenWorkItem }: ActivityProgr
             <span className="activity-progress-jump-arrow" aria-hidden="true">→</span>
           )}
         </button>
-        {history.length > 0 && (
+        {(history.length > 0 || latestWorking) && (
           <button
             type="button"
             className="activity-progress-toggle"
-            onClick={() => setHistoryOpen((current) => !current)}
+            onClick={() => {
+              if (!historyOpen && history.length === 0) loadMissingHistory();
+              setHistoryOpen((current) => !current);
+            }}
             aria-expanded={historyOpen}
             aria-label={historyOpen ? "Hide activity history" : "Show activity history"}
           >
@@ -572,6 +614,11 @@ function ActivityProgressDockContent({ progress, onOpenWorkItem }: ActivityProgr
           </button>
         )}
       </div>
+      {historyOpen && history.length === 0 && (
+        <p className="activity-progress-history-empty" role="status">
+          {historyLoad === "loading" ? "Loading activity…" : "No activity recorded for this run yet."}
+        </p>
+      )}
       {historyOpen && history.length > 0 && (
         <ol className="activity-progress-history">
           {history.map(({ activity, agent, workItem }) => {

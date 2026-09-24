@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { eventRetryDelay, subscribeWebEvents, type EventReplay } from "../src/web-event-stream";
+import { eventRetryDelay, STALE_EVENT_STREAM_MS, subscribeWebEvents, type EventReplay } from "../src/web-event-stream";
 
 test("SSE backoff grows, caps at 30s and includes bounded jitter", () => {
   assert.deepEqual([0, 1, 2, 3, 4, 5, 12].map((n) => eventRetryDelay(n, 1)), [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
@@ -77,4 +77,49 @@ test("replay gaps can reset a cursor after database replacement and disposed rep
   finish({ cursor: 4, replayGap: false, events: [{ cursor: 4, event: '{"type":"late"}' }] });
   await late;
   assert.equal(events.length, 1);
+});
+
+test("replay that recovers events an idle open stream missed replaces the dead stream", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  const sources: StaleSource[] = [];
+  class StaleSource extends EventTarget {
+    closed = false;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor(public url: string) { super(); sources.push(this); }
+    close() { this.closed = true; }
+    send(id: number, data: string) { this.dispatchEvent(new MessageEvent("lantor", { lastEventId: String(id), data })); }
+  }
+  const original = globalThis.EventSource;
+  globalThis.EventSource = StaleSource as unknown as typeof EventSource;
+  t.after(() => { globalThis.EventSource = original; });
+  const values: string[] = [];
+  let replayed: EventReplay = { cursor: 10, replayGap: false, events: [] };
+  const subscription = subscribeWebEvents((value) => values.push(value), { cursor: 10 }, async () => replayed);
+  t.after(subscription);
+  sources[0].onopen?.();
+  sources[0].send(11, "live");
+
+  // A healthy stream that races replay by a few milliseconds is kept.
+  replayed = { cursor: 12, replayGap: false, events: [{ cursor: 12, event: "raced" }] };
+  t.mock.timers.tick(1_000);
+  await subscription.reconcile();
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].closed, false);
+
+  // Silent for longer than the stale window while events kept happening.
+  t.mock.timers.tick(STALE_EVENT_STREAM_MS + 1);
+  replayed = { cursor: 14, replayGap: false, events: [{ cursor: 13, event: "missed-1" }, { cursor: 14, event: "missed-2" }] };
+  await subscription.reconcile();
+  assert.equal(sources[0].closed, true, "the silent stream is closed");
+  assert.equal(sources.length, 2);
+  assert.match(sources[1].url, /cursor=14$/, "the new stream resumes after recovered events");
+  assert.deepEqual(values, ["live", "raced", "missed-1", "missed-2"]);
+
+  // An idle stream with nothing to recover is left alone.
+  t.mock.timers.tick(STALE_EVENT_STREAM_MS + 1);
+  replayed = { cursor: 14, replayGap: false, events: [] };
+  await subscription.reconcile();
+  assert.equal(sources.length, 2);
+  assert.equal(sources[1].closed, false);
 });

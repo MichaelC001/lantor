@@ -5,6 +5,11 @@ export type EventReplay = {
 };
 export type EventSubscription = (() => void) & { reconcile: () => Promise<void> };
 
+/** A stream that has delivered nothing for this long while replay recovers
+ * events it missed is treated as dead. iOS can resume a suspended Home Screen
+ * app with an EventSource that still reports open but never delivers again. */
+export const STALE_EVENT_STREAM_MS = 15_000;
+
 export function eventRetryDelay(attempt: number, random = Math.random()): number {
   return Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5)) * (0.8 + 0.2 * random);
 }
@@ -24,19 +29,23 @@ export function subscribeWebEvents(
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let stableTimer: ReturnType<typeof setTimeout> | null = null;
   let reconciliation: Promise<void> | null = null;
+  let lastStreamActivityAt = 0;
 
   function deliver(next: number, payload: string, gap = false) {
-    if (disposed || (gap ? next === cursor : next <= cursor)) return;
+    if (disposed || (gap ? next === cursor : next <= cursor)) return false;
     handler(payload);
     cursor = next;
     options.onCursor?.(cursor);
+    return true;
   }
   function connect() {
     if (disposed || source) return;
     const connection = new EventSource(`/api/events?cursor=${cursor}`);
     source = connection;
+    lastStreamActivityAt = Date.now();
     connection.addEventListener("lantor", (event) => {
       if (source !== connection || disposed) return;
+      lastStreamActivityAt = Date.now();
       const message = event as MessageEvent<string>;
       // Legacy unnumbered events remain compatible with older backends.
       if (!message.lastEventId) { handler(message.data); return; }
@@ -48,6 +57,7 @@ export function subscribeWebEvents(
     });
     connection.onopen = () => {
       if (source !== connection || disposed) return;
+      lastStreamActivityAt = Date.now();
       // A server that opens then immediately fails must still back off.
       stableTimer = setTimeout(() => { attempt = 0; stableTimer = null; }, 10_000);
     };
@@ -78,13 +88,26 @@ export function subscribeWebEvents(
       connect();
     }
     const requestedCursor = cursor;
+    const streamAtRequest = source;
     reconciliation = replay(requestedCursor).then((result) => {
       if (disposed) return;
+      let recovered = false;
       if (result.replayGap) {
         // An SSE gap/reconnect may already have recovered this request's cursor.
-        if (cursor === requestedCursor) deliver(result.cursor, JSON.stringify({ type: "refresh", reason: "event_replay_gap" }), true);
+        if (cursor === requestedCursor) recovered = deliver(result.cursor, JSON.stringify({ type: "refresh", reason: "event_replay_gap" }), true);
       } else {
-        for (const item of result.events) deliver(item.cursor, item.event);
+        for (const item of result.events) recovered = deliver(item.cursor, item.event) || recovered;
+      }
+      // Replay found events that an idle "open" stream never delivered, so the
+      // connection is silently dead: replace it instead of waiting for an error
+      // that a half-open socket never raises.
+      if (recovered && source && source === streamAtRequest
+        && Date.now() - lastStreamActivityAt > STALE_EVENT_STREAM_MS) {
+        source.close();
+        source = null;
+        if (stableTimer !== null) clearTimeout(stableTimer);
+        stableTimer = null;
+        connect();
       }
     }).finally(() => { reconciliation = null; });
     return reconciliation;

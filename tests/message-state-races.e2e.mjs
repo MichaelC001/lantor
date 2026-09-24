@@ -32,6 +32,8 @@ const state = { db_url: "synthetic://message-state-races", web_base_url: null,
   agent_work_items: [], agent_activities: [], supervisor: { pid: null, status: "stopped", updated_at: null },
   launch_agent: { label: "", plist_path: "", installed: false, loaded: false }, ui_event_cursor: 0 };
 const clients = new Set(), events = [], requests = [], pendingSends = [];
+// Activity only the server knows about: this client never received it live.
+let detailActivities = [];
 let heldAgentRead = null;
 const publish = event => {
   const delivery = { cursor: events.length + 1, event: JSON.stringify(event) };
@@ -69,6 +71,7 @@ const api = createServer(async (req, res) => {
     case "/api/load_thread_messages": result = state.messages.filter(m => m.id === args.threadRootId || m.thread_root_id === args.threadRootId); break;
     case "/api/load_message": result = state.messages.find(m => m.id === args.messageId); break;
     case "/api/load_ui_state": result = Object.fromEntries(args.scopes.map(scope => [scope, state[scope]])); break;
+    case "/api/load_agent_detail": result = { agent, agent_activities: detailActivities, agent_work_items: state.agent_work_items }; break;
     case "/api/replay_ui_events": result = { cursor: events.length, replayGap: false, events: events.filter(e => e.cursor > args.cursor) }; break;
     case "/api/send_message": {
       const row = message(args.body, { ...(args.messageId ? { id: args.messageId } : {}), thread_root_id: args.threadRootId ?? null });
@@ -252,6 +255,43 @@ try {
         publish({ type: "work_item_upsert", work_item: item });
       }
     }
+    // A resumed phone can hold a live run whose activity it never received.
+    // The toggle still shows, and opening it loads the agent's history.
+    {
+      const runId = id(++seq);
+      const liveRun = run("running", { id: runId });
+      const item = { id: id(++seq), agent_id: agentId, agent_handle: agent.handle, channel_id: channelId,
+        channel_name: "race-test", thread_root_id: root.id, source_message_id: root.id,
+        task_id: null, task_number: null, source_kind: "mention", title: "Missing history fixture", context: "",
+        status: "running", run_id: runId, created_at: now, updated_at: now, completed_at: null };
+      detailActivities = [{ id: id(++seq), agent_id: agentId, agent_handle: agent.handle, run_id: runId,
+        kind: "thinking", phase: "thinking", status: "active", title: "Recovered step",
+        summary: "Recovered step", detail: "loaded from agent detail", metadata: {}, created_at: new Date().toISOString() }];
+      agent.status = "running";
+      state.agent_runs.push(liveRun); state.agent_work_items.push(item);
+      publish({ type: "agent_run_upsert", reason: "run_running", run: liveRun });
+      publish({ type: "work_item_upsert", work_item: item });
+      const summary = page.locator(`.thread .activity-progress-summary[data-state="working"]`);
+      await summary.waitFor();
+      const detailReads = count("load_agent_detail");
+      const toggle = page.locator(".thread .activity-progress-toggle");
+      assert.equal(await toggle.count(), 1, "a working run offers history even before any activity arrives");
+      await toggle.click();
+      await page.locator(".thread .activity-progress-history .activity-run-step").filter({ hasText: "Recovered step" }).waitFor();
+      assert.match(await summary.innerText(), /Recovered step/);
+      assert.equal(count("load_agent_detail"), detailReads + 1);
+      await page.waitForTimeout(4500);
+      assert.equal(count("load_agent_detail"), detailReads + 1, "one recovery per run set");
+      await toggle.click();
+      agent.status = "idle";
+      Object.assign(liveRun, { status: "exited", stopped_at: new Date().toISOString() });
+      publish({ type: "agent_run_upsert", reason: "run_finished", run: liveRun });
+      item.status = "done"; item.updated_at = new Date().toISOString();
+      publish({ type: "work_item_upsert", work_item: item });
+      await page.waitForFunction(() => !document.querySelector(".thread .activity-progress-dock"), null, { polling: 20 });
+      console.log("PASS: live run without local activity shows the toggle and loads history once");
+    }
+
     // An old run may fall outside the bootstrap's 30-row history. Idle profiles
     // still suppress its empty stream after a reload, using the sender's ID.
     state.agent_runs = []; state.agent_work_items = [];

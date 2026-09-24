@@ -3911,6 +3911,12 @@ function App() {
   const openReferencedThread = useCallback((originMessageId: string, threadId: string) => {
     navigateToReferencedThreadRef.current(originMessageId, threadId);
   }, []);
+  const hydrateAgentDetailRef = useRef(hydrateAgentDetail);
+  useLayoutEffect(() => {
+    hydrateAgentDetailRef.current = hydrateAgentDetail;
+  });
+  const loadAgentActivityHistory = useCallback((agentIds: string[]) =>
+    Promise.all(agentIds.map((agentId) => hydrateAgentDetailRef.current(agentId))), []);
 
   function openMobileSidebarFromContent() {
     setMobileSidebarFocus("home");
@@ -5242,6 +5248,7 @@ function App() {
         openAgentDetail={openAgentDetail}
         openArtifact={openArtifact}
         openWorkItem={openWorkItem}
+        loadActivityHistory={loadAgentActivityHistory}
         onReferenceMessageJump={openReferencedMessage}
         onReferenceThreadJump={openReferencedThread}
         shareBaseUrl={shareBaseUrl}
@@ -5312,6 +5319,7 @@ function App() {
           openAgentDetail={openAgentDetail}
           openArtifact={openArtifact}
           openWorkItem={openWorkItem}
+          loadActivityHistory={loadAgentActivityHistory}
           onReferenceMessageJump={openReferencedMessage}
           onReferenceThreadJump={openReferencedThread}
           messages={data.messages}

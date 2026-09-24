@@ -93,6 +93,7 @@ type ConversationProps = {
   openAgentDetail: (agent: Agent) => void;
   openArtifact: (artifact: Artifact) => void;
   openWorkItem?: (item: AgentWorkItem, focusedMessageIdOverride?: string | null) => void;
+  loadActivityHistory?: (agentIds: string[]) => Promise<unknown>;
   onReferenceMessageJump: (originMessageId: string, targetMessageId: string) => void;
   onReferenceThreadJump: (originMessageId: string, threadId: string) => void;
   shareBaseUrl: string | null;
@@ -166,6 +167,7 @@ export function Conversation({
   openAgentDetail,
   openArtifact,
   openWorkItem,
+  loadActivityHistory,
   onReferenceMessageJump,
   onReferenceThreadJump,
   shareBaseUrl,
@@ -518,7 +520,7 @@ export function Conversation({
       {activeTab === "chat" ? (
         <div className="message-list-shell">
           <div className="message-progress-layer">
-            <ActivityProgressDock progress={progressState.dock} onOpenWorkItem={openWorkItem} />
+            <ActivityProgressDock progress={progressState.dock} onOpenWorkItem={openWorkItem} onLoadActivityHistory={loadActivityHistory} />
           </div>
           <div
             key={channelId}
