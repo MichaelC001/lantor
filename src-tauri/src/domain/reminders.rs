@@ -141,18 +141,31 @@ pub(crate) async fn complete_successful_agent_reminders(
     let mut transaction = pool.begin().await.map_err(to_string)?;
     let rows = sqlx::query(
         r#"
-        select r.id, max(w.completed_at) as work_completed_at
-        from reminders r
-        join agent_inbox_items i
-          on i.agent_id = r.creator_agent_id
-         and i.kind = 'reminder_due'
-         and replace(json_extract(i.payload, '$.reminder_id'), '-', '') = lower(hex(r.id))
-        join agent_work_items w on w.id = i.work_item_id
-        where r.status = 'fired'
-          and r.recurrence = 'none'
-          and w.status in ('done', 'silent')
-          and ($1 is null or w.id = $1)
-        group by r.id
+        with completed_work as materialized (
+            select r.id as reminder_id, max(w.completed_at) as completed_at
+            from reminders r
+            join agent_inbox_items i
+              on i.agent_id = r.creator_agent_id
+             and i.kind = 'reminder_due'
+             and replace(json_extract(i.payload, '$.reminder_id'), '-', '') = lower(hex(r.id))
+            join agent_work_items w on w.id = i.work_item_id
+            where r.status = 'fired'
+              and r.recurrence = 'none'
+              and w.status in ('done', 'silent')
+              and ($1 is null or w.id = $1)
+            group by r.id
+        )
+        update reminders
+        set status = 'done',
+            completed_at = coalesce(
+                (select completed_at from completed_work where reminder_id = reminders.id),
+                strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+            ),
+            updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+        where id in (select reminder_id from completed_work)
+          and status = 'fired'
+          and recurrence = 'none'
+        returning id
         "#,
     )
     .bind(work_item_id)
@@ -160,27 +173,8 @@ pub(crate) async fn complete_successful_agent_reminders(
     .await
     .map_err(to_string)?;
 
-    let mut changed = false;
-    for row in rows {
+    for row in &rows {
         let reminder_id: Uuid = row.get("id");
-        let completed_at: Option<String> = row.get("work_completed_at");
-        let updated = sqlx::query(
-            r#"
-            update reminders
-            set status = 'done',
-                completed_at = coalesce($2, strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
-                updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
-            where id = $1 and status = 'fired' and recurrence = 'none'
-            "#,
-        )
-        .bind(reminder_id)
-        .bind(completed_at)
-        .execute(&mut *transaction)
-        .await
-        .map_err(to_string)?;
-        if updated.rows_affected() == 0 {
-            continue;
-        }
         insert_reminder_event(
             &mut *transaction,
             reminder_id,
@@ -188,9 +182,8 @@ pub(crate) async fn complete_successful_agent_reminders(
             "agent follow-up succeeded",
         )
         .await?;
-        changed = true;
     }
-    if changed {
+    if !rows.is_empty() {
         enqueue_ui_event_in_tx(
             &mut transaction,
             &UiEvent::Refresh {
