@@ -45,6 +45,8 @@ const api = createServer(async (req, res) => {
   }
   let raw = ""; for await (const chunk of req) raw += chunk;
   const args = raw ? JSON.parse(raw) : {}; requests.push({ path: url.pathname, args });
+  // A slow commit proves the Needs you row hides before the server answers.
+  if (url.pathname === "/api/update_task_status" && args.taskId === id(901)) await new Promise(done => setTimeout(done, 600));
   let result = { ok: true };
   switch (url.pathname) {
     case "/api/bootstrap": result = { ...state, ui_event_cursor: cursor }; break;
@@ -148,6 +150,15 @@ try {
     const needsDialog = page.getByRole("dialog", { name: "Needs you", exact: true });
     await needsDialog.waitFor();
     assert.equal(await needsDialog.locator(".mobile-bottom-nav").count(), 1, "mobile navigation stays inside the active dialog");
+    const doneButtons = needsDialog.locator(".needs-you-task-done"), reviewCount = await doneButtons.count(), marked = requests.length;
+    await needsDialog.getByRole("button", { name: "Mark task #2 done", exact: true }).click();
+    assert.equal(await doneButtons.count(), reviewCount - 1, "Done hides the row before the server answers");
+    await page.waitForTimeout(900);
+    assert.equal(await doneButtons.count(), reviewCount - 1, "the row stays hidden once the task reloads as done");
+    const afterDone = requests.slice(marked);
+    assert.ok(afterDone.some(r => r.path === "/api/update_task_status" && r.args.taskId === id(901) && r.args.status === "done"));
+    assert.ok(afterDone.some(r => r.path === "/api/load_ui_state" && r.args.scopes.includes("tasks")));
+    assert.ok(!afterDone.some(r => r.path === "/api/load_ui_state" && r.args.scopes.includes("thread_activities")), "a status change does not reload thread activities");
     await mobileNav.getByRole("button", { name: /Activity/ }).click();
     await page.getByRole("dialog", { name: "Activity", exact: true }).waitFor();
     await needsDialog.waitFor({ state: "detached" });

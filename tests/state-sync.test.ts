@@ -639,7 +639,8 @@ test("scoped state patches preserve history, project task status and remove dele
   assert.equal(updated.messages[1], current.messages[1], "loaded history keeps object identity");
   assert.equal(updated.agent_activities, current.agent_activities);
   assert.deepEqual(scopesForRefresh("channel_read"), ["channels"]);
-  assert.ok(scopesForRefresh("task_status_updated")?.includes("tasks"));
+  assert.deepEqual(scopesForRefresh("task_status_updated"), ["tasks"]);
+  assert.ok(scopesForRefresh("task_create")?.includes("thread_activities"));
   assert.equal(scopesForRefresh("event_replay_gap"), null);
   assert.equal(scopesForRefresh("future_unknown_event"), null);
 });

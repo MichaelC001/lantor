@@ -17,6 +17,8 @@ export function scopesForRefresh(reason?: string): UiStateScope[] | null {
   if (reason === "owner_profile_updated") return ["owner_profile"];
   if (reason.startsWith("owner_inbox_")) return ["dismissed_inbox_items", "read_inbox_items", "channels", "thread_activities"];
   if (reason === "inbox_read" || reason === "inbox_archived") return ["agents"];
+  // These only touch the tasks table; thread_activities is a full-history aggregate.
+  if (reason === "task_status_updated" || reason === "task_title_updated" || reason === "task_claimed" || reason === "task_ready_for_review") return ["tasks"];
   if (reason.startsWith("task_") || /^github_(issue|review)_task_/.test(reason)) return ["tasks", "channels", "thread_activities"];
   if (reason.startsWith("github_")) return ["channels"];
   if (reason.startsWith("agent_schedule_")) return ["agent_schedules"];

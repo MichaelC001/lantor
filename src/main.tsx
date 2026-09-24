@@ -4526,6 +4526,8 @@ function App() {
 
   async function updateTaskStatus(task: Task, status: string) {
     await mutate("update_task_status", { taskId: task.id, status });
+    // Read back now rather than after the event round trip and sync throttle.
+    await reloadUiState(["tasks"]);
   }
 
   async function saveTaskTitle(task: Task) {
@@ -5167,7 +5169,7 @@ function App() {
         agents={data.agents}
         onOpenDecision={openDecision}
         onOpenTask={openNeedsYouTask}
-        onMarkTaskDone={(task) => void updateTaskStatus(task, "done")}
+        onMarkTaskDone={(task) => updateTaskStatus(task, "done")}
         onClose={() => closeAppModal("needs", () => setShowNeedsYouModal(false))}
       />
 

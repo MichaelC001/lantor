@@ -1,5 +1,5 @@
 import { CheckCircle2, ClipboardCheck, Hand, Hourglass, MessageSquare, X } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { formatIdle, type NeedsYou, type NeedsYouTask } from "../decisions";
 import type { Agent, Decision, Task } from "../types";
 import { formatTime } from "../ui-utils";
@@ -15,7 +15,7 @@ type NeedsYouModalProps = {
   agents: Agent[];
   onOpenDecision: (decision: Decision) => void;
   onOpenTask: (task: Task) => void;
-  onMarkTaskDone: (task: Task) => void;
+  onMarkTaskDone: (task: Task) => Promise<void>;
   onClose: () => void;
 };
 
@@ -85,8 +85,21 @@ export function NeedsYouModal({
   onMarkTaskDone,
   onClose,
 }: NeedsYouModalProps) {
+  // Hide a row as soon as Done is clicked; the row returns if the update fails.
+  const [completing, setCompleting] = useState<ReadonlySet<string>>(() => new Set());
   if (!open) return null;
-  const { decisions, reviews, stalled } = needsYou;
+  const markDone = (task: Task) => {
+    setCompleting((current) => new Set(current).add(task.id));
+    void onMarkTaskDone(task).catch(() => undefined).finally(() => {
+      setCompleting((current) => {
+        const next = new Set(current);
+        next.delete(task.id);
+        return next;
+      });
+    });
+  };
+  const { decisions, stalled } = needsYou;
+  const reviews = needsYou.reviews.filter((item) => !completing.has(item.task.id));
   const empty = decisions.length + reviews.length + stalled.length === 0;
   const summary = [
     decisions.length ? `${decisions.length} ${decisions.length === 1 ? "decision" : "decisions"}` : null,
@@ -137,7 +150,7 @@ export function NeedsYouModal({
 
         <Section icon={<ClipboardCheck size={16} />} title="Awaiting your review" hint="Agents marked these ready" count={reviews.length}>
           {reviews.map((item) => (
-            <TaskRow key={item.task.id} item={item} agents={agents} onOpen={onOpenTask} onDone={onMarkTaskDone} />
+            <TaskRow key={item.task.id} item={item} agents={agents} onOpen={onOpenTask} onDone={markDone} />
           ))}
         </Section>
 
