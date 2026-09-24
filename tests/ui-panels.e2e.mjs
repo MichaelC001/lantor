@@ -143,6 +143,20 @@ try {
     await page.getByRole("button", { name: "Tasks", exact: true }).click(); await capture("tasks-desktop-dark");
     await page.getByRole("button", { name: "Chat", exact: true }).click();
     await page.setViewportSize({ width: 390, height: 844 });
+    const mobileNav = page.getByRole("navigation", { name: "Primary mobile navigation" });
+    await mobileNav.getByRole("button", { name: /Needs you/ }).click();
+    const needsDialog = page.getByRole("dialog", { name: "Needs you", exact: true });
+    await needsDialog.waitFor();
+    assert.equal(await needsDialog.locator(".mobile-bottom-nav").count(), 1, "mobile navigation stays inside the active dialog");
+    await mobileNav.getByRole("button", { name: /Activity/ }).click();
+    await page.getByRole("dialog", { name: "Activity", exact: true }).waitFor();
+    await needsDialog.waitFor({ state: "detached" });
+    await mobileNav.getByRole("button", { name: "Search", exact: true }).click();
+    const mobileSearch = page.getByRole("dialog", { name: "Search", exact: true });
+    await mobileSearch.waitFor();
+    await mobileNav.getByRole("button", { name: "Home", exact: true }).click();
+    await mobileSearch.waitFor({ state: "detached" });
+    await page.locator('.sidebar .channel').filter({ hasText: "ui-review" }).click();
     await openThread();
     await capture("thread-mobile-before-reference");
     await page.getByRole("button", { name: "Thread actions", exact: true }).click();
@@ -185,7 +199,7 @@ try {
     assert.equal(await page.locator(".thread").count(), 1);
     assert.ok(await inline.evaluate(e => e.getBoundingClientRect().height < 80 && getComputedStyle(e).position !== "fixed"));
     assert.deepEqual(errors, []);
-    console.log(`${name}: empty/restored/closed/mobile thread, DM composer, wrapping task titles at 1440/1024/390, status groups/filters/edit/reopen, app modal layering/history/focus, mobile thread reference insert/remove/paste/inline layout passed`);
+    console.log(`${name}: empty/restored/closed/mobile thread, DM composer, wrapping task titles at 1440/1024/390, status groups/filters/edit/reopen, app modal layering/history/focus, mobile bottom navigation, thread reference insert/remove/paste/inline layout passed`);
     await browser.close(); browser = null;
   }
 } finally { await browser?.close(); for (const client of clients) client.end(); api.closeAllConnections(); await new Promise(done => api.close(done)); }

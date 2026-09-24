@@ -1,6 +1,6 @@
 import { DialogSurface } from "./DialogSurface";
 import { Activity, ArrowLeft, BookOpen, Bot, CalendarDays, ChevronDown, FileText, Hash, LayoutList, MessageSquare, Search, X } from "lucide-react";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import type { Agent, OwnerProfile, SearchResult, SearchScope, SearchTimeRange } from "../types";
 import { APP_DISPLAY_NAME } from "../branding";
 import { ownerAsAvatarAgent } from "../ui-utils";
@@ -8,6 +8,7 @@ import { AgentAvatar } from "./AgentAvatar";
 
 type SearchModalProps = {
   open: boolean;
+  mobileNavigation?: ReactNode;
   loading: boolean;
   query: string;
   scope: SearchScope;
@@ -87,6 +88,7 @@ function resultAvatarAgent(result: SearchResult, agents: Agent[], ownerProfile: 
 
 export function SearchModal({
   open,
+  mobileNavigation,
   loading,
   query,
   scope,
@@ -223,6 +225,7 @@ export function SearchModal({
             );
           })}
         </div>
+      {mobileNavigation}
     </DialogSurface>
   );
 }

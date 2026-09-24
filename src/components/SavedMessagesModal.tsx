@@ -1,11 +1,13 @@
 import { DialogSurface } from "./DialogSurface";
 import { Bookmark, Hash, MessageSquare, X } from "lucide-react";
+import type { ReactNode } from "react";
 import type { Agent, OwnerProfile, SavedMessage } from "../types";
 import { firstLines, formatTime, ownerAsAvatarAgent } from "../ui-utils";
 import { AgentAvatar } from "./AgentAvatar";
 
 type SavedMessagesModalProps = {
   open: boolean;
+  mobileNavigation?: ReactNode;
   items: SavedMessage[];
   agents: Agent[];
   ownerProfile: OwnerProfile;
@@ -16,6 +18,7 @@ type SavedMessagesModalProps = {
 
 export function SavedMessagesModal({
   open,
+  mobileNavigation,
   items,
   agents,
   ownerProfile,
@@ -97,6 +100,7 @@ export function SavedMessagesModal({
             );
           })}
         </div>
+      {mobileNavigation}
     </DialogSurface>
   );
 }

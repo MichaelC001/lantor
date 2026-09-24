@@ -5008,6 +5008,35 @@ function App() {
     );
   }
 
+  // Full-screen mobile panels make the app root inert. Keep navigation inside
+  // the active dialog so its buttons remain available while the panel is open.
+  const mobileBottomNavigation = (
+    <nav className="mobile-bottom-nav" aria-label="Primary mobile navigation">
+      <button type="button" className={showMobileSidebar && mobileSidebarFocus === "home" ? "active" : ""} onClick={openMobileHome}>
+        <Home size={20} />
+        <span>Home</span>
+      </button>
+      <button type="button" className={`${showActivityFeedModal ? "active" : ""} ${activityFeedUnreadCount ? "has-unread" : ""}`} onClick={openActivityFeedModal}>
+        <span className="mobile-bottom-nav-icon">
+          <Inbox size={20} />
+          {activityFeedUnreadCount > 0 && <UnreadBadge value={activityFeedUnreadCount} />}
+        </span>
+        <span>Activity</span>
+      </button>
+      <button type="button" className={`${showNeedsYouModal ? "active" : ""} ${needsYou.count ? "has-unread" : ""}`} onClick={openNeedsYouModal}>
+        <span className="mobile-bottom-nav-icon">
+          <Hand size={20} />
+          {needsYou.count > 0 && <UnreadBadge value={needsYou.count} />}
+        </span>
+        <span>Needs you</span>
+      </button>
+      <button type="button" className={showSearchModal ? "active" : ""} onClick={openSearchModal}>
+        <Search size={20} />
+        <span>Search</span>
+      </button>
+    </nav>
+  );
+
   return (
     <DecisionStoreContext.Provider value={decisionStore}>
     <main
@@ -5081,6 +5110,7 @@ function App() {
       />
       <SearchModal
         open={showSearchModal}
+        mobileNavigation={mobileBottomNavigation}
         loading={messageSearchLoading}
         query={searchQuery}
         scope={searchScope}
@@ -5098,6 +5128,7 @@ function App() {
 
       <ActivityFeedModal
         open={showActivityFeedModal}
+        mobileNavigation={mobileBottomNavigation}
         items={activityFeedItems}
         snapshotVersion={activityFeedSnapshotVersion}
         agents={data.agents}
@@ -5112,6 +5143,7 @@ function App() {
 
       <SavedMessagesModal
         open={showSavedModal}
+        mobileNavigation={mobileBottomNavigation}
         items={data.saved_messages}
         agents={data.agents}
         ownerProfile={data.owner_profile}
@@ -5122,6 +5154,7 @@ function App() {
 
       <NeedsYouModal
         open={showNeedsYouModal}
+        mobileNavigation={mobileBottomNavigation}
         needsYou={needsYou}
         agents={data.agents}
         onOpenDecision={openDecision}
@@ -5292,46 +5325,7 @@ function App() {
         />
       )}
 
-      <nav className="mobile-bottom-nav" aria-label="Primary mobile navigation">
-        <button
-          type="button"
-          className={showMobileSidebar && mobileSidebarFocus === "home" ? "active" : ""}
-          onClick={openMobileHome}
-        >
-          <Home size={20} />
-          <span>Home</span>
-        </button>
-        <button
-          type="button"
-          className={`${showActivityFeedModal ? "active" : ""} ${activityFeedUnreadCount ? "has-unread" : ""}`}
-          onClick={openActivityFeedModal}
-        >
-          <span className="mobile-bottom-nav-icon">
-            <Inbox size={20} />
-            {activityFeedUnreadCount > 0 && <UnreadBadge value={activityFeedUnreadCount} />}
-          </span>
-          <span>Activity</span>
-        </button>
-        <button
-          type="button"
-          className={`${showNeedsYouModal ? "active" : ""} ${needsYou.count ? "has-unread" : ""}`}
-          onClick={openNeedsYouModal}
-        >
-          <span className="mobile-bottom-nav-icon">
-            <Hand size={20} />
-            {needsYou.count > 0 && <UnreadBadge value={needsYou.count} />}
-          </span>
-          <span>Needs you</span>
-        </button>
-        <button
-          type="button"
-          className={showSearchModal ? "active" : ""}
-          onClick={openSearchModal}
-        >
-          <Search size={20} />
-          <span>Search</span>
-        </button>
-      </nav>
+      {!activeAppModal && mobileBottomNavigation}
 
       {appError && <AppToast message={appError} onDismiss={() => setAppError(null)} />}
 

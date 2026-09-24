@@ -1,7 +1,7 @@
 import { DialogSurface } from "./DialogSurface";
 import { ArrowUp, Check, Hash, Inbox, MessageSquare, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent } from "react";
+import type { CSSProperties, PointerEvent, ReactNode } from "react";
 import type { Agent, ActivityFeedItem, ActivityFeedKind, OwnerProfile } from "../types";
 import { firstLines, formatTime, ownerAsAvatarAgent } from "../ui-utils";
 import { AgentAvatar } from "./AgentAvatar";
@@ -10,6 +10,7 @@ type ActivityFeedFilter = "all" | "unread" | ActivityFeedKind;
 
 type ActivityFeedModalProps = {
   open: boolean;
+  mobileNavigation?: ReactNode;
   items: ActivityFeedItem[];
   snapshotVersion: number;
   agents: Agent[];
@@ -65,6 +66,7 @@ function sortActivityFeedItems(items: ActivityFeedItem[]) {
 
 export function ActivityFeedModal({
   open,
+  mobileNavigation,
   items,
   snapshotVersion,
   agents,
@@ -374,6 +376,7 @@ export function ActivityFeedModal({
             </div>
           )}
         </div>
+      {mobileNavigation}
     </DialogSurface>
   );
 }

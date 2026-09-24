@@ -10,6 +10,7 @@ import { PushNotificationsRow } from "./PushNotificationsRow";
 
 type NeedsYouModalProps = {
   open: boolean;
+  mobileNavigation?: ReactNode;
   needsYou: NeedsYou;
   agents: Agent[];
   onOpenDecision: (decision: Decision) => void;
@@ -76,6 +77,7 @@ function TaskRow({ item, agents, onOpen, onDone }: {
 
 export function NeedsYouModal({
   open,
+  mobileNavigation,
   needsYou,
   agents,
   onOpenDecision,
@@ -145,6 +147,7 @@ export function NeedsYouModal({
           ))}
         </Section>
       </div>
+      {mobileNavigation}
     </DialogSurface>
   );
 }
