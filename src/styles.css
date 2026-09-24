@@ -13523,6 +13523,41 @@ body.resizing-column * {
   overflow-wrap: anywhere;
 }
 
+.decision-card-expand {
+  display: inline-flex;
+  justify-self: start;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 2px 6px;
+  margin: -4px 0 -4px -6px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 0.86em;
+  font-weight: 600;
+}
+
+.decision-card-expand:hover {
+  background: var(--surface-control);
+  color: var(--ink-secondary);
+}
+
+.decision-card-expand svg {
+  transition: transform 120ms ease;
+}
+
+.decision-card-expand svg[data-open="true"] {
+  transform: rotate(180deg);
+}
+
+.decision-card.status-answered:not(.compact),
+.decision-card.status-dismissed:not(.compact),
+.decision-card.status-withdrawn:not(.compact) {
+  gap: 8px;
+  padding: 10px 12px;
+}
+
 .decision-card-note svg {
   flex: none;
   margin-top: 3px;

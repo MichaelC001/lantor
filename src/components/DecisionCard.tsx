@@ -1,4 +1,4 @@
-import { Check, CheckCircle2, Hand, MessageSquareText, Star, X } from "lucide-react";
+import { Check, CheckCircle2, ChevronDown, Hand, MessageSquareText, Star, X } from "lucide-react";
 import { useState } from "react";
 import { decisionStatusLabel, useDecisionActions } from "../decisions";
 import type { Decision } from "../types";
@@ -28,7 +28,15 @@ export function DecisionCard({ decision, compact = false }: DecisionCardProps) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const open = decision.status === "open" && actions !== null;
+  // Resolved cards stay short in the conversation: the chosen option (or just
+  // the title) plus the note. The full question is one click away.
+  const resolved = decision.status !== "open";
+  const showFull = !resolved || expanded;
+  const chosenOption = decision.options.find((option) => option.id === decision.answer_option_id) ?? null;
+  const visibleOptions = showFull ? decision.options : chosenOption ? [chosenOption] : [];
+  const hiddenOptionCount = decision.options.length - visibleOptions.length;
   const composing = open && (selected !== null || noteOpen);
   const selectedIndex = decision.options.findIndex((option) => option.id === selected);
   const selectedOption = selectedIndex >= 0 ? decision.options[selectedIndex] : null;
@@ -71,13 +79,14 @@ export function DecisionCard({ decision, compact = false }: DecisionCardProps) {
         </span>
         <strong className="decision-card-title">{decision.title}</strong>
       </div>
-      {decision.context && (
+      {showFull && decision.context && (
         <div className="decision-card-context">
           <MessageMarkdown body={decision.context} scrollKey={`decision:${decision.id}`} />
         </div>
       )}
-      <div className="decision-options" role={open ? "radiogroup" : "list"} aria-label="Options">
-        {decision.options.map((option, index) => {
+      {visibleOptions.length > 0 && <div className="decision-options" role={open ? "radiogroup" : "list"} aria-label="Options">
+        {visibleOptions.map((option) => {
+          const index = decision.options.indexOf(option);
           const chosen = decision.answer_option_id === option.id;
           const isSelected = selected === option.id;
           return (
@@ -101,19 +110,26 @@ export function DecisionCard({ decision, compact = false }: DecisionCardProps) {
               <span className="decision-option-text">
                 <strong>
                   {option.label}
-                  {option.recommended && <em><Star size={11} /> Recommended</em>}
+                  {showFull && option.recommended && <em><Star size={11} /> Recommended</em>}
                 </strong>
-                {option.detail && <small>{option.detail}</small>}
+                {showFull && option.detail && <small>{option.detail}</small>}
               </span>
             </button>
           );
         })}
-      </div>
-      {decision.status !== "open" && decision.answer_note && (
+      </div>}
+      {resolved && decision.answer_note && (
         <p className="decision-card-note">
           <MessageSquareText size={14} />
           <span>{decision.answer_note}</span>
         </p>
+      )}
+      {resolved && (hiddenOptionCount > 0 || expanded) && (
+        <button type="button" className="decision-card-expand" aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}>
+          <ChevronDown size={14} data-open={expanded ? "true" : "false"} />
+          {expanded ? "Hide options" : `Show all ${decision.options.length} options`}
+        </button>
       )}
       {open && (
         <div className="decision-card-actions">

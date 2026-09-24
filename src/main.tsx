@@ -2928,9 +2928,16 @@ function App() {
   // A streaming reply only gets a row once visible text has landed; the empty
   // placeholder reserved at run start stays out of the list (the progress dock
   // already shows that the agent is working).
+  // A card its agent withdrew no longer matters, so it leaves the thread.
+  // Root-level cards stay (collapsed) because they may anchor replies.
+  // Read markers keep using visibleMessages, so hidden cards still count as read.
+  const withdrawnDecisionReplyIds = useMemo(() => new Set((data?.decisions ?? [])
+    .filter((decision) => decision.status === "withdrawn" && decision.thread_root_id)
+    .map((decision) => decision.message_id)), [data?.decisions]);
   const conversationMessages = useMemo(() => (data?.messages ?? []).filter((message) =>
-    (message.delivery_state === "streaming" && messageHasVisibleContent(message))
-    || !isProgressOnlyMessage(message)), [data?.messages]);
+    !withdrawnDecisionReplyIds.has(message.id)
+    && ((message.delivery_state === "streaming" && messageHasVisibleContent(message))
+      || !isProgressOnlyMessage(message))), [data?.messages, withdrawnDecisionReplyIds]);
   const rootMessages = useMemo(() => {
     if (!channel) return [];
     return conversationMessages.filter((m) => m.channel_id === channel.id && !m.thread_root_id);
