@@ -105,8 +105,8 @@ self.addEventListener("push", (event) => {
   const shown = self.registration.showNotification(text(payload.title, "Lantor"), {
     body: text(payload.body, ""),
     tag: text(payload.tag, undefined),
-    icon: "/lantor-icon-192.png",
-    badge: "/lantor-icon-192.png",
+    icon: "/lantor-icon-192-v2.png",
+    badge: "/lantor-badge-v2.png",
     data: { target: payload.target ?? null },
   });
   const badge = Number.isInteger(payload.badge) && self.navigator.setAppBadge
