@@ -1,10 +1,12 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Download, FileText, RotateCcw, Share, X } from "lucide-react";
-import { attachmentAssetUrl, downloadAttachment, saveTextDownload } from "../apiClient";
+import { attachmentAssetUrl, downloadAttachment, revealInFileManager, saveTextDownload } from "../apiClient";
 import {
   attachmentPreviewKind,
   attachmentSheetDelivery,
   closeAttachmentSheet,
+  displaySavedPath,
+  revealActionLabel,
   triggerBrowserDownload,
   useOpenAttachmentSheetItem,
   type AttachmentSheetDelivery,
@@ -20,7 +22,7 @@ type LoadState =
   | { status: "ready"; file: File; url: string; text: string | null }
   | { status: "error"; message: string };
 
-type SheetNotice = { kind: "success" | "error"; message: string };
+type SheetNotice = { kind: "success" | "error"; message: string; savedPath?: string };
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error || "Unknown error");
@@ -46,10 +48,6 @@ async function fetchStoredFile(attachment: MessageAttachment, signal: AbortSigna
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const blob = await response.blob();
   return new File([blob], attachment.original_name, { type: attachment.mime_type || blob.type });
-}
-
-function savedFileName(path: string, fallback: string) {
-  return path.split(/[\\/]/).pop() || fallback;
 }
 
 /** Mounted once per app. Only one file is open at a time. */
@@ -105,11 +103,19 @@ function AttachmentSheet({ item, onClose }: { item: AttachmentSheetItem; onClose
       const path = item.kind === "stored"
         ? await downloadAttachment(item.attachment.storage_path, info.name)
         : await saveTextDownload(info.name, await file.text());
-      setNotice({ kind: "success", message: `Saved to Downloads: ${savedFileName(path, info.name)}` });
+      setNotice({ kind: "success", message: `Saved to ${displaySavedPath(path)}`, savedPath: path });
     } catch (error) {
       setNotice({ kind: "error", message: `Save failed: ${errorMessage(error)}` });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function revealSavedFile(path: string) {
+    try {
+      await revealInFileManager(path);
+    } catch (error) {
+      setNotice({ kind: "error", message: `Could not show the file: ${errorMessage(error)}` });
     }
   }
 
@@ -130,6 +136,7 @@ function AttachmentSheet({ item, onClose }: { item: AttachmentSheetItem; onClose
     });
   }
 
+  const savedPath = notice?.savedPath;
   return <DialogSurface label={info.name} labelledBy={titleId} className="modal-card attachment-sheet"
     onClose={onClose}>
     <header className="modal-head attachment-sheet-head">
@@ -149,7 +156,11 @@ function AttachmentSheet({ item, onClose }: { item: AttachmentSheetItem; onClose
     </header>
     <div className="modal-body attachment-sheet-body">
       {notice && <p className={notice.kind === "error" ? "attachment-sheet-error" : "attachment-sheet-notice"}
-        role={notice.kind === "error" ? "alert" : "status"}>{notice.message}</p>}
+        role={notice.kind === "error" ? "alert" : "status"}>
+        <span>{notice.message}</span>
+        {savedPath && <button type="button" className="attachment-sheet-reveal"
+          onClick={() => void revealSavedFile(savedPath)}>{revealActionLabel()}</button>}
+      </p>}
       {state.status === "loading" && <p className="attachment-sheet-status" role="status">Loading…</p>}
       {state.status === "error" && <div className="attachment-sheet-status" role="alert">
         <p>Could not load this file: {state.message}</p>

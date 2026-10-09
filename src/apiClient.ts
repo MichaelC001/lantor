@@ -45,6 +45,14 @@ export async function saveTextDownload(fileName: string, contents: string): Prom
   return tauriInvoke<string>("save_text_download", { fileName, contents });
 }
 
+/** Desktop only: shows a saved download in Finder with the file selected. */
+export async function revealInFileManager(path: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("revealInFileManager is only available in the desktop app");
+  }
+  await tauriInvoke("reveal_in_file_manager", { path });
+}
+
 export async function completeStartupSplash(): Promise<void> {
   if (!isTauriRuntime()) return;
   await tauriInvoke("complete_startup_splash");

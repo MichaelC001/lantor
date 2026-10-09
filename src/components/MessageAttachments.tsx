@@ -2,8 +2,14 @@ import { AppToast } from "./AppToast";
 import { ImageLightbox } from "./ImageLightbox";
 import { type MouseEvent, type PointerEvent, useEffect, useState } from "react";
 import { Download, FileText, Image } from "lucide-react";
-import { attachmentAssetUrl, downloadAttachment, isTauriRuntime, openExternalUrl } from "../apiClient";
-import { openAttachmentSheet, triggerBrowserDownload, usesAttachmentSheet } from "../attachment-sheet";
+import { attachmentAssetUrl, downloadAttachment, isTauriRuntime, openExternalUrl, revealInFileManager } from "../apiClient";
+import {
+  displaySavedPath,
+  openAttachmentSheet,
+  revealActionLabel,
+  triggerBrowserDownload,
+  usesAttachmentSheet,
+} from "../attachment-sheet";
 import { useSentImagePreview } from "../sent-image-previews";
 import { MessageAttachment } from "../types";
 import { formatByteSize } from "../ui-utils";
@@ -23,12 +29,9 @@ type DownloadNotice = {
   id: number;
   kind: "success" | "error";
   message: string;
+  // Where a desktop save landed, so the toast can reveal it.
+  savedPath?: string;
 };
-
-function filenameFromPath(path: string, fallback: string) {
-  const normalized = path.replace(/\\/g, "/");
-  return normalized.split("/").pop() || fallback;
-}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error || "Unknown error");
@@ -61,11 +64,8 @@ async function downloadStoredAttachment(
 
   if (!attachment.local_url && isTauriRuntime()) {
     try {
-      const targetPath = await downloadAttachment(attachment.storage_path, attachment.original_name);
-      onNotice({
-        kind: "success",
-        message: `Saved to Downloads: ${filenameFromPath(targetPath, attachment.original_name)}`,
-      });
+      const savedPath = await downloadAttachment(attachment.storage_path, attachment.original_name);
+      onNotice({ kind: "success", message: `Saved to ${displaySavedPath(savedPath)}`, savedPath });
     } catch (error) {
       console.error("Failed to download attachment", error);
       onNotice({
@@ -108,15 +108,26 @@ export function MessageAttachments({ attachments, showImageThumbnails }: Message
     });
   }
 
+  async function revealSavedFile(path: string) {
+    setDownloadNotice(null);
+    try {
+      await revealInFileManager(path);
+    } catch (error) {
+      showDownloadNotice({ kind: "error", message: `Could not show the file: ${errorMessage(error)}` });
+    }
+  }
+
   useEffect(() => {
     if (!downloadNotice) return;
     const timeout = window.setTimeout(() => {
       setDownloadNotice((current) => current?.id === downloadNotice.id ? null : current);
-    }, downloadNotice.kind === "error" ? 6000 : 3600);
+    // A save stays up long enough to reach "Show in Finder".
+    }, downloadNotice.savedPath ? 8000 : 6000);
     return () => window.clearTimeout(timeout);
   }, [downloadNotice]);
 
   if (attachments.length === 0) return null;
+  const savedPath = downloadNotice?.savedPath;
 
   return (
     <>
@@ -231,7 +242,8 @@ export function MessageAttachments({ attachments, showImageThumbnails }: Message
           )} />
       )}
       {downloadNotice && <AppToast message={downloadNotice.message} kind={downloadNotice.kind}
-        className="attachment-download-toast" onDismiss={() => setDownloadNotice(null)} />}
+        className="attachment-download-toast" onDismiss={() => setDownloadNotice(null)}
+        action={savedPath ? { label: revealActionLabel(), onClick: () => void revealSavedFile(savedPath) } : undefined} />}
     </>
   );
 }

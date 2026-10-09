@@ -3956,8 +3956,36 @@ mark {
 }
 
 .attachment-sheet-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
   margin: 0 0 12px;
   color: var(--status-success);
+}
+
+.attachment-sheet-notice span {
+  overflow-wrap: anywhere;
+}
+
+.attachment-sheet-reveal,
+.app-toast button.app-toast-action {
+  background: var(--accent-soft);
+  color: var(--accent-soft-ink);
+}
+
+.attachment-sheet-reveal {
+  min-height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  font-size: var(--type-size-meta);
+  font-weight: var(--type-weight-semibold);
+}
+
+.attachment-sheet-reveal:hover,
+.app-toast button.app-toast-action:hover {
+  background: var(--accent-soft-hover);
+  color: var(--accent-soft-hover-ink);
 }
 
 .attachment-sheet-media {

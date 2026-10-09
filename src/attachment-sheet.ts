@@ -114,3 +114,16 @@ export function triggerBrowserDownload(url: string, filename: string) {
   link.click();
   link.remove();
 }
+
+/** The full saved location, with the home folder shortened to "~". */
+export function displaySavedPath(path: string) {
+  return path
+    .replace(/^\/(?:Users|home)\/[^/]+(?=\/)/, "~")
+    .replace(/^[A-Za-z]:\\Users\\[^\\]+(?=\\)/, "~");
+}
+
+export function revealActionLabel(userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent) {
+  if (/Macintosh|Mac OS X/.test(userAgent)) return "Show in Finder";
+  if (/Windows/.test(userAgent)) return "Show in Explorer";
+  return "Show in folder";
+}

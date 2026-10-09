@@ -465,6 +465,60 @@ fn write_text_download(
     Ok(target.to_string_lossy().to_string())
 }
 
+/// Shows a saved download in Finder (or the platform file manager) with the file
+/// selected, so a one-click save to Downloads is easy to find.
+#[tauri::command]
+pub(crate) async fn reveal_in_file_manager(path: String) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = revealable_path(&path)?;
+        reveal_with_system(&path)
+    })
+    .await
+    .map_err(to_string)?
+}
+
+fn revealable_path(path: &str) -> CommandResult<PathBuf> {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() || !path.exists() {
+        return Err(format!("saved file no longer exists: {}", path.display()));
+    }
+    Ok(path)
+}
+
+fn reveal_with_system(path: &Path) -> CommandResult<()> {
+    #[cfg(target_os = "macos")]
+    let status = StdCommand::new("open")
+        .arg("-R")
+        .arg(path)
+        .status()
+        .map_err(to_string)?;
+
+    // explorer.exe exits non-zero even when it opens the window.
+    #[cfg(target_os = "windows")]
+    return StdCommand::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .map(|_| ())
+        .map_err(to_string);
+
+    // xdg-open has no portable "select this file", so open its folder.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = StdCommand::new("xdg-open")
+        .arg(path.parent().unwrap_or(path))
+        .status()
+        .map_err(to_string)?;
+
+    #[cfg(not(target_os = "windows"))]
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to show {} in file manager: {status}",
+            path.display()
+        ))
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn complete_startup_splash(app: tauri::AppHandle) -> CommandResult<()> {
     if let Some(window) = app.get_webview_window("main") {
@@ -532,7 +586,17 @@ pub(crate) async fn check_runtime_in_env(runtime: String) -> CommandResult<Runti
 mod tests {
     use uuid::Uuid;
 
-    use super::{normalize_open_link_target, write_text_download, OpenLinkTarget};
+    use super::{normalize_open_link_target, revealable_path, write_text_download, OpenLinkTarget};
+
+    #[test]
+    fn reveal_accepts_only_existing_absolute_paths() {
+        let dir = std::env::temp_dir().join(format!("lantor-reveal-test-{}", Uuid::new_v4()));
+        let saved = write_text_download(&dir, "report.svg", "<svg/>").unwrap();
+        assert_eq!(revealable_path(&saved).unwrap().to_string_lossy(), saved);
+        assert!(revealable_path("report.svg").is_err());
+        assert!(revealable_path(&dir.join("deleted.svg").to_string_lossy()).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn text_downloads_get_safe_unique_names_and_exact_contents() {

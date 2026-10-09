@@ -15,7 +15,11 @@ const exportedSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height=
 const desktopApp = `
   window.__invoked = [];
   window.__TAURI_INTERNALS__ = {
-    invoke: async (cmd, args) => { window.__invoked.push({ cmd, args }); return "/Users/me/Downloads/thread-ui-review (1).svg"; },
+    invoke: async (cmd, args) => {
+      window.__invoked.push({ cmd, args });
+      return { download_attachment: "/Users/me/Downloads/report (1).pdf",
+        save_text_download: "/Users/me/Downloads/thread-ui-review (1).svg" }[cmd] ?? null;
+    },
     convertFileSrc: (path, protocol = "asset") => \`\${protocol}://localhost\${path}\`,
     transformCallback: () => 0,
   };`;
@@ -175,11 +179,36 @@ try {
       const exported = sheet(page, "thread-ui-review.svg");
       await exported.locator("img.attachment-sheet-media").waitFor();
       await exported.getByRole("button", { name: "Download" }).click();
-      await exported.getByText("Saved to Downloads: thread-ui-review (1).svg").waitFor();
-      const invoked = await page.evaluate(() => window.__invoked.filter((call) => call.cmd === "save_text_download"));
-      assert.deepEqual(invoked, [{ cmd: "save_text_download", args: { fileName: "thread-ui-review.svg", contents: exportedSvg } }]);
+      // The notice names the full location and can reveal the file.
+      await exported.getByText("Saved to ~/Downloads/thread-ui-review (1).svg").waitFor();
+      await exported.getByRole("button", { name: /^Show in / }).click();
+      const invoked = await page.evaluate(() => window.__invoked);
+      assert.deepEqual(invoked, [
+        { cmd: "save_text_download", args: { fileName: "thread-ui-review.svg", contents: exportedSvg } },
+        { cmd: "reveal_in_file_manager", args: { path: "/Users/me/Downloads/thread-ui-review (1).svg" } },
+      ]);
       await exported.getByRole("button", { name: "Close", exact: true }).click();
       await exported.waitFor({ state: "detached" });
+      // Message attachments save directly; the toast offers the same reveal.
+      await page.getByRole("button", { name: "Download report.pdf", exact: true }).click();
+      const toast = page.locator(".attachment-download-toast");
+      await toast.getByText("Saved to ~/Downloads/report (1).pdf").waitFor();
+      await toast.getByRole("button", { name: /^Show in / }).click();
+      await toast.waitFor({ state: "detached" });
+      assert.deepEqual((await page.evaluate(() => window.__invoked)).slice(2), [
+        { cmd: "download_attachment", args: { storagePath: "/fixture/pdf", originalName: "report.pdf" } },
+        { cmd: "reveal_in_file_manager", args: { path: "/Users/me/Downloads/report (1).pdf" } },
+      ]);
+      // Saving from the image lightbox shows the toast above the dialog.
+      await page.getByRole("button", { name: "Preview chart.svg", exact: true }).click();
+      const lightbox = page.getByRole("dialog", { name: "Image preview" });
+      await lightbox.getByRole("button", { name: "Download chart.svg", exact: true }).click();
+      await lightbox.locator(".attachment-download-toast").getByRole("button", { name: /^Show in / }).waitFor();
+      if (process.env.LANTOR_UI_SCREENSHOTS) {
+        await page.screenshot({ path: join(process.env.LANTOR_UI_SCREENSHOTS, `desktop-lightbox-saved-${name}.png`) });
+      }
+      await lightbox.getByRole("button", { name: "Close image preview" }).click();
+      await lightbox.waitFor({ state: "detached" });
       assert.deepEqual(leaks, []);
       assert.deepEqual(errors, []);
       await context.close();
