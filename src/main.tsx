@@ -35,7 +35,7 @@ import { streamingMessages, type StreamingMessageSnapshot } from "./streaming-me
 import { mergeHydratedRows, mergeThreadActivities } from "./bootstrap-hydration";
 import type { EventSubscription } from "./web-event-stream";
 import { APP_DISPLAY_NAME } from "./branding";
-import startupLogo from "../public/lantor-icon.png";
+import startupLogo from "../public/lantor-icon-v2.png";
 import "../public/startup.css";
 import {
   resolveAppModalHistoryPop,
