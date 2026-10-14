@@ -459,30 +459,6 @@
       "n": 0
     },
     {
-      "selector": ".code-block-shell button",
-      "prop": "background",
-      "literal": "rgba(255, 255, 255, 0.1)",
-      "n": 0
-    },
-    {
-      "selector": ".code-block-shell button",
-      "prop": "border",
-      "literal": "rgba(255, 255, 255, 0.16)",
-      "n": 0
-    },
-    {
-      "selector": ".code-block-shell button",
-      "prop": "color",
-      "literal": "#f7f7f8",
-      "n": 0
-    },
-    {
-      "selector": ".code-block-shell button:hover",
-      "prop": "background",
-      "literal": "rgba(255, 255, 255, 0.18)",
-      "n": 0
-    },
-    {
       "selector": ".composer textarea:focus, .reply-composer textarea:focus",
       "prop": "border-color",
       "literal": "rgba(10, 132, 255, 0.42)",

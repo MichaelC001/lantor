@@ -27,6 +27,7 @@ Use these groups before adding component-specific tokens:
 - `--surface-composer`: message composer surfaces.
 - `--surface-control-*`: buttons, segmented controls, tabs, and option rows.
 - `--surface-code`: pre/code blocks.
+- `--shiki-*`, `--code-gutter-ink`, `--code-diff-*`: syntax, line-number and diff colors on the code surface (dark in both themes, so defined once).
 
 ## Migration Rules
 

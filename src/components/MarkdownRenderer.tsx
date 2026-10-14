@@ -1,8 +1,6 @@
 import { reportUiError } from "../ui-notice";
 import {
-  Children,
   ReactNode,
-  isValidElement,
   type MouseEvent,
   type PointerEvent,
   type UIEvent,
@@ -10,14 +8,12 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
-  useState,
 } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { PluggableList } from "unified";
 import { attachmentAssetUrl, isTauriRuntime, openExternalUrl } from "../apiClient";
 import { openAttachmentSheet, usesAttachmentSheet } from "../attachment-sheet";
-import { copyText } from "../clipboard";
 import {
   MESSAGE_REFERENCE_PATTERN,
   type ResolvedMessageReference,
@@ -27,6 +23,7 @@ import type { Channel, Message, MessageAttachment } from "../types";
 import type { MessageReferenceStore } from "../message-reference-store";
 import { StreamingReferenceCard } from "./StreamingReferenceCard";
 import { MessageReferenceCard } from "./MessageReferenceCard";
+import { CodeBlock } from "./CodeBlock";
 
 export type MessageMarkdownProps = {
   body: string;
@@ -41,6 +38,8 @@ export type MessageMarkdownProps = {
   enableLantorLinks?: boolean;
   /** Attachments of the message; local file links resolve to their snapshots. */
   attachments?: MessageAttachment[];
+  /** The message is still streaming: code blocks defer highlighting and collapsing. */
+  streaming?: boolean;
 };
 
 const INLINE_CODE_SPLIT = /(`[^`\n]*(?:`|$))/g;
@@ -96,31 +95,31 @@ function messageReferenceMarkdown(body: string) {
   ));
 }
 
-function textFromNode(node: ReactNode): string {
-  if (typeof node === "string" || typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(textFromNode).join("");
-  if (isValidElement<{ children?: ReactNode }>(node)) return textFromNode(node.props.children);
-  return "";
+type HastNode = {
+  type: string;
+  tagName?: string;
+  value?: string;
+  properties?: { className?: unknown };
+  data?: { meta?: unknown };
+  children?: HastNode[];
+};
+
+function hastText(node: HastNode): string {
+  if (node.type === "text") return node.value ?? "";
+  return node.children?.map(hastText).join("") ?? "";
 }
 
-function CopyableCodeBlock({ children }: { children?: ReactNode }) {
-  const [copied, setCopied] = useState(false);
-  const text = textFromNode(children).replace(/\n$/, "");
-
-  async function handleCopy() {
-    await copyText(text);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
-  }
-
-  return (
-    <div className="code-block-shell">
-      <button type="button" onClick={handleCopy} aria-label="Copy code block">
-        {copied ? "Copied" : "Copy"}
-      </button>
-      <pre>{children}</pre>
-    </div>
-  );
+function codeFence(pre: HastNode | undefined) {
+  const code = pre?.children?.find((child) => child.type === "element" && child.tagName === "code");
+  if (!code) return null;
+  const classes = Array.isArray(code.properties?.className) ? code.properties.className : [];
+  const languageClass = classes.find((name): name is string => typeof name === "string" && name.startsWith("language-"));
+  return {
+    // mdast-util-to-hast appends the newline that ends the fence body.
+    code: hastText(code).replace(/\n$/, ""),
+    lang: languageClass?.slice("language-".length) ?? null,
+    meta: typeof code.data?.meta === "string" ? code.data.meta : null,
+  };
 }
 
 function isolateLinkEvent(event: MouseEvent<HTMLAnchorElement> | PointerEvent<HTMLAnchorElement>) {
@@ -265,6 +264,7 @@ export function MarkdownRenderer({
   scrollKey,
   enableLantorLinks = true,
   attachments,
+  streaming = false,
   remarkPlugins = defaultRemarkPlugins,
   rehypePlugins,
 }: MessageMarkdownProps & { remarkPlugins?: PluggableList; rehypePlugins?: PluggableList }) {
@@ -274,6 +274,8 @@ export function MarkdownRenderer({
   );
   const tableIndexRef = useRef(0);
   tableIndexRef.current = 0;
+  const codeIndexRef = useRef(0);
+  codeIndexRef.current = 0;
   const handleOpenReference = useCallback((reference: ResolvedMessageReference) => {
     if (!sourceMessageId) return;
     onOpenReference?.(sourceMessageId, reference);
@@ -316,15 +318,19 @@ export function MarkdownRenderer({
         </a>
       );
     },
-    pre: ({ children }) => (
-      <CopyableCodeBlock>{Children.toArray(children)}</CopyableCodeBlock>
-    ),
+    pre: ({ children, node }) => {
+      const fence = codeFence(node as HastNode | undefined);
+      if (!fence) return <pre>{children}</pre>;
+      const stateKey = scrollKey ? `${scrollKey}:code:${codeIndexRef.current}` : undefined;
+      codeIndexRef.current += 1;
+      return <CodeBlock {...fence} streaming={streaming} stateKey={stateKey} />;
+    },
     table: ({ children }) => {
       const tableScrollKey = scrollKey ? `${scrollKey}:table:${tableIndexRef.current}` : undefined;
       tableIndexRef.current += 1;
       return <MarkdownTableScroll scrollKey={tableScrollKey}>{children}</MarkdownTableScroll>;
     },
-  }), [streamingReferenceStore, references, channels, handleOpenReference, messages, onLocalAgentLink, onOpenReference, scrollKey, sourceMessageId, attachments]);
+  }), [streamingReferenceStore, references, channels, handleOpenReference, messages, onLocalAgentLink, onOpenReference, scrollKey, sourceMessageId, attachments, streaming]);
 
   return (
     <div className="markdown-body">

@@ -18,6 +18,7 @@
     "test:web-sync": "node tests/web-sync.e2e.mjs",
     "test:message-state-races": "node tests/message-state-races.e2e.mjs",
     "test:web-math": "node tests/web-math.e2e.mjs",
+    "test:code-blocks": "node tests/code-blocks.e2e.mjs",
     "test:message-rows": "node tests/message-rows.e2e.mjs",
     "test:channel-reading": "node tests/channel-reading-position.e2e.mjs",
     "test:mobile-performance": "node tests/mobile-performance.e2e.mjs",
@@ -58,6 +59,7 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
+    "shiki": "^4.5.0",
     "typescript": "^5.8.3"
   },
   "devDependencies": {

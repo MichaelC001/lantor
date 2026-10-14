@@ -72,6 +72,14 @@ existing `$$...$$` / `math` fenced-code syntax; single-dollar prices stay plain
 text. While the math chunk loads (or if it fails), the message remains readable
 as ordinary Markdown.
 
+Code blocks are highlighted on demand with Shiki (JavaScript regex engine; one
+lazy chunk per grammar, colors from the `--shiki-*` tokens). The fence info
+string adds a header and line numbers: `rust path=src/lib.rs#L42` (also
+`:42-50`, `start=42`, `title="…"`, or a GitHub permalink). `diff rust` (or a
+`path=` with a known extension) renders unified diffs with old/new line numbers
+from `@@` hunk headers and highlights the changed code. Completed blocks over 30
+lines collapse to 20; streaming blocks stay plain and expanded.
+
 ## Browser tests
 
 The `tests/*.e2e.mjs` suites run the built app from `dist/` in Playwright
@@ -80,6 +88,8 @@ against a synthetic API, so they never read or change your workspace. Run
 installed. Each suite has an npm script, for example:
 
 - `npm run test:web-math` checks the math bundle graph and rendering.
+- `npm run test:code-blocks` checks the highlighter bundle graph and code block
+  rendering (header, line numbers, diff rows, collapse, failed chunk).
 - `npm run test:avatar-cache` checks avatar memoization, warm-remount first
   frames, stale asynchronous requests and formatter reuse with React's
   profiling build and test-only counters. It builds a synthetic fixture in a

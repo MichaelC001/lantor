@@ -80,8 +80,8 @@ context, tasks track execution, and decisions come back to you.
 
 ### Share files and rich content
 
-- Markdown with tables, code, and math; image previews with pinch and wheel
-  zoom; attachments up to 64 MiB.
+- Markdown with tables, highlighted code and diffs, and math; image previews
+  with pinch and wheel zoom; attachments up to 64 MiB.
 - Files that agents link from their workspace are saved with the message, so
   the link keeps working on your phone.
 - Export a thread as an image (SVG) to share it outside Lantor.

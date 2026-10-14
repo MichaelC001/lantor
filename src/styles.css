@@ -202,6 +202,28 @@ button,
   --ink-on-control: var(--ink-control);
   --ink-on-accent: var(--accent-ink);
   --ink-on-code: #f7f7f8;
+  /* Syntax and diff colors for the always-dark code surface (Shiki css-variables theme). */
+  --shiki-foreground: var(--ink-on-code);
+  --shiki-background: transparent;
+  --shiki-token-keyword: #ff7b72;
+  --shiki-token-string: #a5d6ff;
+  --shiki-token-string-expression: #7ee787;
+  --shiki-token-comment: #8b949e;
+  --shiki-token-constant: #79c0ff;
+  --shiki-token-function: #d2a8ff;
+  --shiki-token-parameter: #ffa657;
+  --shiki-token-punctuation: #c9d1d9;
+  --shiki-token-link: #a5d6ff;
+  --shiki-token-inserted: #7ee787;
+  --shiki-token-deleted: #ffa198;
+  --shiki-token-changed: #ffa657;
+  --code-gutter-ink: #6e7681;
+  --code-diff-add-bg: rgba(46, 160, 67, 0.18);
+  --code-diff-add-ink: #3fb950;
+  --code-diff-del-bg: rgba(248, 81, 73, 0.16);
+  --code-diff-del-ink: #f85149;
+  --code-diff-hunk-bg: rgba(56, 139, 253, 0.12);
+  --code-diff-hunk-ink: #79c0ff;
   --ink-on-tooltip: #ffffff;
   --border-default: var(--border-subtle);
   --border-emphasis: var(--border-strong);
@@ -4569,33 +4591,131 @@ mark {
   min-width: 0;
 }
 
-.code-block-shell button {
+.code-block-copy {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--ink-on-code) 16%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--ink-on-code) 10%, transparent);
+  color: var(--ink-on-code);
+  font-family: inherit;
+  font-size: var(--type-size-caption);
+  font-weight: var(--type-weight-semibold);
+  transition: opacity 0.16s ease, background 0.16s ease;
+}
+
+.code-block-copy.floating {
   position: absolute;
   top: 8px;
   right: 8px;
   z-index: 1;
-  height: 24px;
-  padding: 0 8px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #f7f7f8;
-  font-size: var(--type-size-caption);
-  font-weight: var(--type-weight-semibold);
   opacity: 0;
-  transition: opacity 0.16s ease, background 0.16s ease;
 }
 
-.code-block-shell:hover button,
-.code-block-shell button:focus-visible {
+.code-block-shell:hover .code-block-copy.floating,
+.code-block-copy.floating:focus-visible {
   opacity: 1;
 }
 
-.code-block-shell button:hover {
-  background: rgba(255, 255, 255, 0.18);
+.code-block-copy:hover {
+  background: color-mix(in srgb, var(--ink-on-code) 18%, transparent);
+}
+
+.code-block-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 4px;
+  padding: 4px 6px 4px 12px;
+  border: 1px solid var(--line);
+  border-bottom-color: color-mix(in srgb, var(--ink-on-code) 10%, transparent);
+  border-radius: 12px 12px 0 0;
+  background: color-mix(in srgb, var(--ink-on-code) 6%, var(--surface-code));
+  color: color-mix(in srgb, var(--ink-on-code) 64%, transparent);
+  font-family: var(--font-mono);
+  font-size: var(--type-size-caption);
+}
+
+.code-block-location {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin-right: auto;
+}
+
+.code-block-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-on-code);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+a.code-block-title {
+  color: var(--shiki-token-link);
+  text-decoration: none;
+}
+
+a.code-block-title:hover {
+  text-decoration: underline;
+}
+
+.code-block-range,
+.code-block-language {
+  flex: none;
+  white-space: nowrap;
+}
+
+.code-block-header .code-block-copy {
+  height: 22px;
+}
+
+.code-block-shell.has-header pre {
+  margin-top: 0;
+  padding-right: 12px;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.code-block-shell.expandable pre {
+  margin-bottom: 0;
+  border-bottom-color: color-mix(in srgb, var(--ink-on-code) 10%, transparent);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.code-block-expand {
+  display: block;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 12px 12px;
+  background: color-mix(in srgb, var(--ink-on-code) 6%, var(--surface-code));
+  color: color-mix(in srgb, var(--ink-on-code) 72%, transparent);
+  font-size: var(--type-size-caption);
+  font-weight: var(--type-weight-semibold);
+  text-align: left;
+}
+
+.code-block-expand:hover {
+  color: var(--ink-on-code);
+}
+
+.code-block-shell.collapsed pre code {
+  max-height: calc(var(--code-collapsed-lines) * var(--code-line-height) * 1em);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, currentColor calc(100% - 2.5em), transparent);
+  mask-image: linear-gradient(to bottom, currentColor calc(100% - 2.5em), transparent);
 }
 
 .markdown-body pre {
+  --code-line-height: 1.5;
+  --code-collapsed-lines: 20;
   overflow: auto;
   margin: 4px 0;
   padding: 10px 56px 10px 12px;
@@ -4608,11 +4728,123 @@ mark {
 }
 
 .markdown-body pre code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
   padding: 0;
   background: transparent;
   color: inherit;
+  line-height: var(--code-line-height);
   overflow-wrap: normal;
   word-break: normal;
+}
+
+.markdown-body pre.is-diff,
+.markdown-body pre.has-gutter {
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.markdown-body pre.is-diff .code-line,
+.markdown-body pre.has-gutter .code-line {
+  display: inline-block;
+  box-sizing: border-box;
+  min-width: 100%;
+  padding: 0 16px 0 12px;
+  vertical-align: top;
+}
+
+.markdown-body pre.has-gutter .code-line {
+  padding-left: 0;
+}
+
+.code-gutter {
+  position: sticky;
+  left: 0;
+  display: inline-block;
+  box-sizing: content-box;
+  width: calc(var(--code-gutter-digits) * 1ch);
+  margin-right: 10px;
+  padding: 0 10px 0 8px;
+  background: var(--surface-code);
+  color: var(--code-gutter-ink);
+  text-align: right;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.code-gutter::before {
+  content: attr(data-line);
+}
+
+.code-gutter-diff {
+  width: calc(var(--code-gutter-digits) * 2ch + 1ch);
+}
+
+.code-gutter-diff::before,
+.code-gutter-diff::after {
+  display: inline-block;
+  width: calc(var(--code-gutter-digits) * 1ch);
+}
+
+.code-gutter-diff::before {
+  content: attr(data-old);
+}
+
+.code-gutter-diff::after {
+  margin-left: 1ch;
+  content: attr(data-new);
+}
+
+.code-diff-marker {
+  display: inline-block;
+  width: 2ch;
+}
+
+.code-line.diff-add {
+  background: var(--code-diff-add-bg);
+}
+
+.code-line.diff-del {
+  background: var(--code-diff-del-bg);
+}
+
+.code-line.diff-add .code-gutter {
+  background: color-mix(in srgb, var(--code-diff-add-ink) 16%, var(--surface-code));
+}
+
+.code-line.diff-del .code-gutter {
+  background: color-mix(in srgb, var(--code-diff-del-ink) 16%, var(--surface-code));
+}
+
+.code-line.diff-add .code-diff-marker {
+  color: var(--code-diff-add-ink);
+}
+
+.code-line.diff-del .code-diff-marker {
+  color: var(--code-diff-del-ink);
+}
+
+.markdown-body pre.is-diff:not(.is-highlighted) .code-line.diff-add {
+  color: var(--shiki-token-inserted);
+}
+
+.markdown-body pre.is-diff:not(.is-highlighted) .code-line.diff-del {
+  color: var(--shiki-token-deleted);
+}
+
+.code-line.diff-hunk {
+  background: var(--code-diff-hunk-bg);
+  color: var(--code-diff-hunk-ink);
+}
+
+.code-line.diff-hunk .code-gutter {
+  background: color-mix(in srgb, var(--code-diff-hunk-ink) 10%, var(--surface-code));
+}
+
+.code-line.diff-meta {
+  color: var(--code-gutter-ink);
+  font-weight: var(--type-weight-semibold);
 }
 
 .markdown-body blockquote {
@@ -4756,6 +4988,10 @@ mark {
 
 :root[data-theme="dark"] .markdown-body code {
   background: rgba(226, 232, 240, 0.12);
+}
+
+:root[data-theme="dark"] .markdown-body pre code {
+  background: transparent;
 }
 
 :root[data-theme="dark"] .markdown-body pre,
