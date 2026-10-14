@@ -18,6 +18,9 @@ use crate::{
 
 mod comparisons;
 mod pull_requests;
+mod references;
+
+pub(crate) use references::{load_github_references, set_github_reference_alias, GithubReferences};
 
 pub(crate) use comparisons::{
     load_github_commits_ahead, load_github_review_comparisons, GithubReviewComparisons,

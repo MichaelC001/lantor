@@ -3,6 +3,7 @@ import { Bookmark, Hash, MessageSquare, X } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Agent, OwnerProfile, SavedMessage } from "../types";
 import { firstLines, formatTime, ownerAsAvatarAgent } from "../ui-utils";
+import { markdownPreviewText } from "../markdown-preview";
 import { AgentAvatar } from "./AgentAvatar";
 
 type SavedMessagesModalProps = {
@@ -83,7 +84,7 @@ export function SavedMessagesModal({
                     <Icon size={18} />
                     {item.sender_name || "Saved message"}
                   </h3>
-                  <p>{firstLines(item.body, 3) || "Empty message"}</p>
+                  <p>{firstLines(markdownPreviewText(item.body), 3) || "Empty message"}</p>
                   <small>Open source</small>
                 </div>
                 <button

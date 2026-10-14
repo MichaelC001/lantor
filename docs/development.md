@@ -80,6 +80,16 @@ string adds a header and line numbers: `rust path=src/lib.rs#L42` (also
 from `@@` hunk headers and highlights the changed code. Completed blocks over 30
 lines collapse to 20; streaming blocks stay plain and expanded.
 
+Message text links GitHub references: `#123` resolves to the repository bound to
+the message's channel, `short-name#123` to the binding with that short name
+(set in the GitHub binding dialog; hyphenated repository names also get their
+initials, e.g. `iceberg-rust` → `ir`), and `owner/repo#123` to any repository.
+PRs and issues already in the synced GitHub queues show their state and CI;
+others are plain links. Absolute UTC times (`2026-10-13T19:00:00+00:00`,
+`07:46Z`) are shown in local time with the UTC value as a tooltip. Code spans
+and existing links are left alone. List previews (Activity, Saved, threads,
+search, reference chips) show the Markdown as plain text.
+
 ## Browser tests
 
 The `tests/*.e2e.mjs` suites run the built app from `dist/` in Playwright
@@ -90,6 +100,8 @@ installed. Each suite has an npm script, for example:
 - `npm run test:web-math` checks the math bundle graph and rendering.
 - `npm run test:code-blocks` checks the highlighter bundle graph and code block
   rendering (header, line numbers, diff rows, collapse, failed chunk).
+- `npm run test:message-text` checks GitHub references, local times and
+  Markdown-free previews.
 - `npm run test:avatar-cache` checks avatar memoization, warm-remount first
   frames, stale asynchronous requests and formatter reuse with React's
   profiling build and test-only counters. It builds a synthetic fixture in a

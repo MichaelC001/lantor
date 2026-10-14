@@ -327,6 +327,30 @@ export type GithubIssueDetail = {
   updated_at: string;
 };
 
+export type GithubReferenceRepository = {
+  channel_id: string;
+  name_with_owner: string;
+  url: string;
+  reference_alias: string;
+};
+
+export type GithubReferenceItem = {
+  name_with_owner: string;
+  number: number;
+  kind: "pull" | "issue";
+  title: string;
+  url: string;
+  state: string;
+  is_draft: boolean;
+  checks_status: string;
+  updated_at: string;
+};
+
+export type GithubReferences = {
+  repositories: GithubReferenceRepository[];
+  items: GithubReferenceItem[];
+};
+
 export type GithubReviewComparisons = {
   repository_id: string;
   comparisons: {

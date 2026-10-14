@@ -18,6 +18,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { apiInvoke, openExternalUrl } from "../apiClient";
 import { githubComparisonRequestKey, mergeGithubReviewComparisons } from "../github-review";
 import { formatRelativeTime } from "../ui-utils";
+import {
+  derivedReferenceAlias,
+  getGithubReferenceIndex,
+  loadGithubReferences,
+  setGithubReferences,
+} from "../github-references";
 import type {
   Agent,
   Channel,
@@ -177,6 +183,7 @@ export function GithubPanel({
   const [showBindingModal, setShowBindingModal] = useState(false);
   const [repositoryDraft, setRepositoryDraft] = useState("");
   const [localPathDraft, setLocalPathDraft] = useState("");
+  const [aliasDraft, setAliasDraft] = useState("");
   const [reviewLoginDraft, setReviewLoginDraft] = useState("");
   const [bindingBusy, setBindingBusy] = useState(false);
   const [bindingError, setBindingError] = useState<string | null>(null);
@@ -314,6 +321,7 @@ export function GithubPanel({
   function openBindingModal() {
     setRepositoryDraft(overview?.binding?.name_with_owner ?? "");
     setLocalPathDraft(overview?.binding?.local_path ?? "");
+    setAliasDraft(getGithubReferenceIndex().aliasByChannel.get(channel.id) ?? "");
     setReviewLoginDraft(overview?.binding?.review_login ?? overview?.account.login ?? "");
     setBindingError(null);
     setShowBindingModal(true);
@@ -331,6 +339,12 @@ export function GithubPanel({
         localPath: localPathDraft.trim() || null,
         reviewLogin: reviewLoginDraft.trim() || null,
       });
+      const alias = aliasDraft.trim();
+      if (alias !== (getGithubReferenceIndex().aliasByChannel.get(channel.id) ?? "")) {
+        setGithubReferences(await apiInvoke("set_github_reference_alias", { channelId: channel.id, alias }));
+      } else {
+        void loadGithubReferences();
+      }
       setShowBindingModal(false);
       githubOverviewCache.delete(channel.id);
       await loadOverview();
@@ -1021,6 +1035,7 @@ export function GithubPanel({
       )}
 
       <GithubIssueDrawer
+        channelId={channel.id}
         issue={drawerIssue}
         detail={issueDetail}
         loading={issueDetailLoading}
@@ -1066,6 +1081,14 @@ export function GithubPanel({
             />
           </label>
           <label>
+            <span>Short name for references (optional)</span>
+            <input
+              value={aliasDraft}
+              onChange={(event) => setAliasDraft(event.target.value)}
+              placeholder={derivedReferenceAlias(repositoryDraft.split("/").pop() ?? "") || "e.g. rw"}
+            />
+          </label>
+          <label>
             <span>Local checkout (optional)</span>
             <input
               value={localPathDraft}
@@ -1076,7 +1099,8 @@ export function GithubPanel({
           <p className="github-modal-note">
             Authentication uses the active <code>gh</code> account @{overview.account.login}.
             This identity filters review requests and related issues. The local checkout is
-            included in Agent tasks.
+            included in Agent tasks. Messages link <code>#123</code> in this channel, and
+            <code>short-name#123</code> anywhere, to this repository.
           </p>
           {bindingError && <div className="github-inline-error" role="alert">{bindingError}</div>}
           <div className="modal-actions">

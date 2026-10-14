@@ -75,6 +75,7 @@ export const MessageRow = memo(function MessageRow({
     onOpenReference={actions.onReference}
     onLocalAgentLink={actions.onAgent}
     scrollKey={`message:${message.id}`}
+    channelId={message.channel_id}
     attachments={message.attachments}
     streaming={message.delivery_state === "streaming"}
   /> : null;

@@ -43,7 +43,7 @@ use crate::application::{
     github::{
         self as github_commands, BindGithubRepositoryRequest, CreateGithubIssueTaskRequest,
         CreateGithubReviewTaskRequest, GithubChannelRequest, GithubIssueRequest,
-        RereviewGithubPullRequestRequest,
+        RereviewGithubPullRequestRequest, SetGithubReferenceAliasRequest,
     },
     inbox::{self as inbox_commands, InboxItemsRequest, MarkChannelReadRequest},
     messages::{
@@ -261,6 +261,14 @@ fn web_router(state: Arc<WebState>, dist_dir: PathBuf) -> Router {
         .route(
             "/api/load_github_review_queue",
             post(api_load_github_review_queue),
+        )
+        .route(
+            "/api/load_github_references",
+            post(api_load_github_references),
+        )
+        .route(
+            "/api/set_github_reference_alias",
+            post(api_set_github_reference_alias),
         )
         .route(
             "/api/refresh_github_review_queue",
@@ -659,6 +667,25 @@ async fn api_load_github_review_comparisons(
     Json(request): Json<GithubChannelRequest>,
 ) -> Result<impl IntoResponse, Response> {
     github_commands::load_github_review_comparisons(&state.pool, request)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_load_github_references(
+    State(state): State<Arc<WebState>>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::load_github_references(&state.pool)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+async fn api_set_github_reference_alias(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<SetGithubReferenceAliasRequest>,
+) -> Result<impl IntoResponse, Response> {
+    github_commands::set_github_reference_alias(&state.pool, request)
         .await
         .map(Json)
         .map_err(api_error)

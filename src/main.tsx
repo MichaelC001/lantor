@@ -105,6 +105,8 @@ import {
   ThreadReplySummary,
 } from "./types";
 import { agentRequestSourceLabel, buildPresetCommand, firstLines, formatTime, visibleChannelDescription } from "./ui-utils";
+import { markdownPreviewText } from "./markdown-preview";
+import { loadGithubReferences } from "./github-references";
 import {
   createPerfDraft,
   initPerfTelemetry,
@@ -2178,6 +2180,16 @@ function App() {
     };
   }, [bootReady, data?.channels]);
 
+  // Reload `#123` reference data whenever a channel's GitHub queue syncs.
+  const githubSyncStamp = useMemo(
+    () => data?.channels.map((channel) => `${channel.id}:${channel.github_review_synced_at ?? ""}`).join("|") ?? "",
+    [data?.channels],
+  );
+  useEffect(() => {
+    if (!bootReady) return;
+    void loadGithubReferences();
+  }, [bootReady, githubSyncStamp]);
+
   useEffect(() => {
     const requestId = messageSearchRequestRef.current + 1;
     messageSearchRequestRef.current = requestId;
@@ -3326,7 +3338,7 @@ function App() {
         kind: item.thread_root_id ? "reply" : "message",
         title: item.sender_name,
         detail: `${channelLabel(item.channel_id)} · ${item.thread_root_id ? "thread reply" : "message"} · ${formatTime(item.created_at)}`,
-        excerpt: firstLines(item.body, 2),
+        excerpt: firstLines(markdownPreviewText(item.body), 2),
         createdAt: item.created_at,
         channelId: item.channel_id,
         threadId: item.thread_root_id ?? item.id,
@@ -3346,7 +3358,7 @@ function App() {
         kind: "artifact",
         title: item.title,
         detail: `${item.kind} · ${channelLabel(item.channel_id)} · ${formatTime(item.created_at)}`,
-        excerpt: firstLines(item.summary || item.content, 2),
+        excerpt: firstLines(markdownPreviewText(item.summary || item.content), 2),
         createdAt: item.created_at,
         channelId: item.channel_id,
         threadId: item.thread_root_id ?? item.message_id,
@@ -3415,7 +3427,7 @@ function App() {
           kind: "wiki",
           title: item.channel_kind === "dm" ? "DM wiki" : `#${item.channel_name} wiki`,
           detail: `rev ${item.rev_short_id} · ${item.author} · ${formatTime(item.updated_at)}`,
-          excerpt: item.snippet,
+          excerpt: markdownPreviewText(item.snippet),
           createdAt: item.updated_at,
           channelId: item.channel_id,
           threadId: null,

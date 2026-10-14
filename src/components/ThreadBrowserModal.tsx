@@ -3,6 +3,7 @@ import { Check, MessageSquare, X } from "lucide-react";
 import { type MouseEvent as ReactMouseEvent } from "react";
 import { Channel, Message } from "../types";
 import { firstLines, formatTime } from "../ui-utils";
+import { markdownPreviewText } from "../markdown-preview";
 
 type ThreadBrowserModalProps = {
   open: boolean;
@@ -86,7 +87,7 @@ export function ThreadBrowserModal({
                     <strong>{thread.sender_name}</strong>
                     <time>{formatTime(thread.created_at)}</time>
                   </div>
-                  <p>{firstLines(thread.body, 2)}</p>
+                  <p>{firstLines(markdownPreviewText(thread.body), 2)}</p>
                   <small>
                     {replies} {replies === 1 ? "reply" : "replies"}
                     {unread > 0 ? ` · ${unread} new` : ""}

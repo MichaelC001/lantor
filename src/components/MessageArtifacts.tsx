@@ -92,7 +92,7 @@ function ArtifactContent({ artifact }: { artifact: Artifact }) {
   if (artifact.kind === "markdown") {
     return (
       <div className="artifact-markdown-content">
-        <MessageMarkdown body={artifact.content} scrollKey={`artifact:${artifact.id}`} />
+        <MessageMarkdown body={artifact.content} scrollKey={`artifact:${artifact.id}`} channelId={artifact.channel_id} />
       </div>
     );
   }

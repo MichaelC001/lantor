@@ -46,6 +46,7 @@ export function ArtifactViewerModal({
               <MessageMarkdown
                 body={artifact.content}
                 scrollKey={`artifact-viewer:${artifact.id}`}
+                channelId={artifact.channel_id}
               />
             </div>
           ) : (

@@ -4566,6 +4566,58 @@ mark {
   font-weight: var(--type-weight-semibold);
 }
 
+/* `#123` / `rw#123` references; queued PRs and issues show state and CI. */
+.markdown-body a.github-reference {
+  white-space: nowrap;
+}
+
+.github-reference-icon,
+.github-reference-checks {
+  display: inline-block;
+  vertical-align: -1px;
+}
+
+.github-reference-icon {
+  margin-right: 2px;
+  color: var(--status-success);
+}
+
+.github-reference[data-status="draft"] .github-reference-icon {
+  color: var(--muted);
+}
+
+.github-reference[data-status="merged"] .github-reference-icon {
+  color: var(--badge-phase-file-ink);
+}
+
+.github-reference[data-status="closed"] .github-reference-icon {
+  color: var(--status-danger);
+}
+
+.github-reference-checks {
+  margin-left: 2px;
+}
+
+.github-reference-checks.success {
+  color: var(--status-success);
+}
+
+.github-reference-checks.failure {
+  color: var(--status-danger);
+}
+
+.github-reference-checks.pending {
+  color: var(--status-warning);
+}
+
+/* UTC times rewritten to local time; the tooltip keeps the UTC value. */
+.markdown-body time.lantor-time {
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 2px;
+  cursor: help;
+}
+
 .markdown-body .katex {
   max-width: 100%;
   color: var(--ink);

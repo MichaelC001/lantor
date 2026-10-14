@@ -8,6 +8,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useSyncExternalStore,
 } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -24,6 +25,15 @@ import type { MessageReferenceStore } from "../message-reference-store";
 import { StreamingReferenceCard } from "./StreamingReferenceCard";
 import { MessageReferenceCard } from "./MessageReferenceCard";
 import { CodeBlock } from "./CodeBlock";
+import { GithubReferenceLink } from "./GithubReferenceLink";
+import {
+  getGithubReferenceIndex,
+  githubReferenceUrl,
+  parseGithubIssueUrl,
+  resolveGithubRepository,
+  subscribeGithubReferences,
+} from "../github-references";
+import { remarkInlineEnrichment } from "../markdown-inline";
 
 export type MessageMarkdownProps = {
   body: string;
@@ -40,6 +50,8 @@ export type MessageMarkdownProps = {
   attachments?: MessageAttachment[];
   /** The message is still streaming: code blocks defer highlighting and collapsing. */
   streaming?: boolean;
+  /** Channel whose bound GitHub repository resolves bare `#123` references. */
+  channelId?: string;
 };
 
 const INLINE_CODE_SPLIT = /(`[^`\n]*(?:`|$))/g;
@@ -267,11 +279,22 @@ export function MarkdownRenderer({
   streaming = false,
   remarkPlugins = defaultRemarkPlugins,
   rehypePlugins,
+  channelId,
 }: MessageMarkdownProps & { remarkPlugins?: PluggableList; rehypePlugins?: PluggableList }) {
   const linkedBody = useMemo(
     () => enableLantorLinks ? messageReferenceMarkdown(linkifyMessageBody(body)) : body,
     [body, enableLantorLinks],
   );
+  const githubReferences = useSyncExternalStore(subscribeGithubReferences, getGithubReferenceIndex, getGithubReferenceIndex);
+  const enrichedRemarkPlugins = useMemo<PluggableList>(() => [
+    ...remarkPlugins,
+    [remarkInlineEnrichment, {
+      resolveGithubReference: (prefix: string | null, number: number) => {
+        const repository = resolveGithubRepository(githubReferences, prefix, channelId);
+        return repository ? githubReferenceUrl(githubReferences, repository, number) : null;
+      },
+    }],
+  ], [channelId, githubReferences, remarkPlugins]);
   const tableIndexRef = useRef(0);
   tableIndexRef.current = 0;
   const codeIndexRef = useRef(0);
@@ -281,7 +304,7 @@ export function MarkdownRenderer({
     onOpenReference?.(sourceMessageId, reference);
   }, [onOpenReference, sourceMessageId]);
   const markdownComponents = useMemo<Components>(() => ({
-    a: ({ children, href, node: _node, ...props }) => {
+    a: ({ children, href, node, ...props }) => {
       const [, kind, id] = href?.match(/^\/lantor\/reference\/(message|thread)\/([0-9a-fA-F-]{8,36})/) ?? [];
       if (streamingReferenceStore && (kind === "message" || kind === "thread")) {
         return <StreamingReferenceCard store={streamingReferenceStore} reference={{ kind, id, token: `[[${kind}:${id}]]` }}
@@ -295,6 +318,25 @@ export function MarkdownRenderer({
             compact
             onOpen={sourceMessageId && onOpenReference ? handleOpenReference : undefined}
           />
+        );
+      }
+      const githubLink = parseGithubIssueUrl(href);
+      if (githubLink && href) {
+        // A bare URL autolinks to itself; show it as `rw#123` instead.
+        const bareUrl = node ? hastText(node as HastNode) === href : false;
+        return (
+          <GithubReferenceLink
+            {...props}
+            href={href}
+            link={githubLink}
+            references={githubReferences}
+            compactLabel={bareUrl}
+            onPointerDown={isolateLinkEvent}
+            onContextMenu={isolateLinkEvent}
+            onClick={(event) => handleLinkClick(event, href, false, onLocalAgentLink, null)}
+          >
+            {children}
+          </GithubReferenceLink>
         );
       }
       const isLocalLink = Boolean(href?.startsWith(LOCAL_ENTITY_PATH_PREFIX));
@@ -330,12 +372,12 @@ export function MarkdownRenderer({
       tableIndexRef.current += 1;
       return <MarkdownTableScroll scrollKey={tableScrollKey}>{children}</MarkdownTableScroll>;
     },
-  }), [streamingReferenceStore, references, channels, handleOpenReference, messages, onLocalAgentLink, onOpenReference, scrollKey, sourceMessageId, attachments, streaming]);
+  }), [streamingReferenceStore, references, channels, handleOpenReference, messages, onLocalAgentLink, onOpenReference, scrollKey, sourceMessageId, attachments, streaming, githubReferences]);
 
   return (
     <div className="markdown-body">
       <ReactMarkdown
-        remarkPlugins={remarkPlugins}
+        remarkPlugins={enrichedRemarkPlugins}
         rehypePlugins={rehypePlugins}
         urlTransform={transformMessageUrl}
         components={markdownComponents}

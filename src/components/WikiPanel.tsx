@@ -211,7 +211,7 @@ export function WikiPanel({ channel }: WikiPanelProps) {
               </button>
             </div>
             <div className="wiki-content wiki-content-historic">
-              <MessageMarkdown body={viewedRevision.content} />
+              <MessageMarkdown body={viewedRevision.content} channelId={channel.id} />
             </div>
           </>
         ) : (
@@ -271,7 +271,7 @@ export function WikiPanel({ channel }: WikiPanelProps) {
       {error && <div className="wiki-error">{error}</div>}
       <div className="wiki-meta-row">{revisionMeta(head, true)}</div>
       <div className="wiki-content">
-        <MessageMarkdown body={head.content} />
+        <MessageMarkdown body={head.content} channelId={channel.id} />
       </div>
     </div>
   );

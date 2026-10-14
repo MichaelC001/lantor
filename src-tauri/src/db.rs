@@ -333,6 +333,7 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             issue_queue_synced_at text,
             review_attention_synced_at text,
             review_attention_initialized boolean not null default 0,
+            reference_alias text not null default '',
             created_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
             updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
         )
@@ -834,6 +835,13 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "channel_github_repositories",
         "review_attention_initialized",
         "boolean not null default 0",
+    )
+    .await?;
+    ensure_text_column(
+        pool,
+        "channel_github_repositories",
+        "reference_alias",
+        "text not null default ''",
     )
     .await?;
     ensure_integer_column(

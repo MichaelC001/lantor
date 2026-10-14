@@ -11,6 +11,7 @@ import type {
   ChannelWikiSearchHit,
   Decision,
   GithubChannelOverview,
+  GithubReferences,
   GithubReviewComparisons,
   GithubIssueDetail,
   GithubIssueTaskResult,
@@ -186,6 +187,14 @@ export type ApiContract = {
   load_github_review_queue: {
     args: { channelId: string };
     result: GithubChannelOverview;
+  };
+  load_github_references: {
+    args: undefined;
+    result: GithubReferences;
+  };
+  set_github_reference_alias: {
+    args: { channelId: string; alias: string };
+    result: GithubReferences;
   };
   refresh_github_review_queue: {
     args: { channelId: string };
@@ -399,6 +408,8 @@ const API_COMMAND_NAMES = {
   search_channel_wikis: true,
   load_github_review_comparisons: true,
   load_github_review_queue: true,
+  load_github_references: true,
+  set_github_reference_alias: true,
   refresh_github_review_queue: true,
   refresh_github_issue_queue: true,
   mark_github_review_attention_read: true,

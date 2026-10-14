@@ -81,7 +81,7 @@ export function DecisionCard({ decision, compact = false }: DecisionCardProps) {
       </div>
       {showFull && decision.context && (
         <div className="decision-card-context">
-          <MessageMarkdown body={decision.context} scrollKey={`decision:${decision.id}`} />
+          <MessageMarkdown body={decision.context} scrollKey={`decision:${decision.id}`} channelId={decision.channel_id} />
         </div>
       )}
       {visibleOptions.length > 0 && <div className="decision-options" role={open ? "radiogroup" : "list"} aria-label="Options">

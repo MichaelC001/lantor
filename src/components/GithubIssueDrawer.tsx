@@ -29,6 +29,8 @@ import { MessageMarkdown } from "./MessageMarkdown";
 import { TaskAssigneePicker } from "./TaskAssigneePicker";
 
 type GithubIssueDrawerProps = {
+  /** Channel bound to the issue's repository; resolves `#123` in the description. */
+  channelId: string;
   issue: GithubIssue | null;
   detail: GithubIssueDetail | null;
   loading: boolean;
@@ -66,6 +68,7 @@ function errorMessage(error: unknown) {
 }
 
 export function GithubIssueDrawer({
+  channelId,
   issue,
   detail,
   loading,
@@ -216,6 +219,7 @@ export function GithubIssueDrawer({
                 <MessageMarkdown
                   body={detail.body}
                   enableLantorLinks={false}
+                  channelId={channelId}
                   scrollKey={`github-issue:${issue.number}`}
                 />
               ) : (

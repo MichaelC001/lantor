@@ -3,6 +3,7 @@ import { useSyncExternalStore, type CSSProperties, type KeyboardEvent, type Mous
 import { createRoot } from "react-dom/client";
 import type { Channel, Message } from "../types";
 import { formatTime } from "../ui-utils";
+import { markdownPreviewText } from "../markdown-preview";
 import {
   type ResolvedMessageReference,
   parseMessageReferences,
@@ -19,13 +20,13 @@ type MessageReferenceCardProps = {
 };
 
 export function firstLinePreview(body: string, limit = 140) {
-  const normalized = body.replace(/\s+/g, " ").trim();
+  const normalized = markdownPreviewText(body).replace(/\s+/g, " ").trim();
   if (!normalized) return "Empty message";
   return normalized.length > limit ? `${normalized.slice(0, limit - 1).trimEnd()}...` : normalized;
 }
 
 function firstLinesPreview(body: string, maxLines = 3) {
-  const lines = withoutMessageReferenceTokens(body)
+  const lines = markdownPreviewText(withoutMessageReferenceTokens(body))
     .replace(/\r/g, "")
     .split("\n")
     .map((line) => line.trim())

@@ -6,13 +6,34 @@ use crate::{
     application::github::{
         self as application, BindGithubRepositoryRequest, CreateGithubIssueTaskRequest,
         CreateGithubReviewTaskRequest, GithubChannelRequest, GithubIssueRequest,
-        RereviewGithubPullRequestRequest,
+        RereviewGithubPullRequestRequest, SetGithubReferenceAliasRequest,
     },
     github::{
-        GithubChannelOverview, GithubIssueDetail, GithubIssueTaskResult, GithubRepositoryBinding,
-        GithubRereviewTaskResult, GithubReviewComparisons, GithubReviewTaskResult,
+        GithubChannelOverview, GithubIssueDetail, GithubIssueTaskResult, GithubReferences,
+        GithubRepositoryBinding, GithubRereviewTaskResult, GithubReviewComparisons,
+        GithubReviewTaskResult,
     },
 };
+
+#[tauri::command]
+pub(crate) async fn load_github_references(
+    state: State<'_, AppState>,
+) -> CommandResult<GithubReferences> {
+    application::load_github_references(&state.pool).await
+}
+
+#[tauri::command]
+pub(crate) async fn set_github_reference_alias(
+    channel_id: Uuid,
+    alias: String,
+    state: State<'_, AppState>,
+) -> CommandResult<GithubReferences> {
+    application::set_github_reference_alias(
+        &state.pool,
+        SetGithubReferenceAliasRequest { channel_id, alias },
+    )
+    .await
+}
 
 #[tauri::command]
 pub(crate) async fn load_github_review_queue(
