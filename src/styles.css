@@ -157,7 +157,7 @@ button,
   --shadow-selected-accent:
     inset 0 0 0 1px var(--accent),
     0 0 0 3px rgba(10, 132, 255, 0.12);
-  --bg-code: #101318;
+  --bg-code: #ffffff;
   --ink-primary: #20242b;
   --ink-secondary: #4f5661;
   --ink-muted: #68717d;
@@ -201,29 +201,29 @@ button,
   --ink-on-surface-muted: var(--ink-muted);
   --ink-on-control: var(--ink-control);
   --ink-on-accent: var(--accent-ink);
-  --ink-on-code: #f7f7f8;
-  /* Syntax and diff colors for the always-dark code surface (Shiki css-variables theme). */
+  --ink-on-code: #1f2328;
+  /* Syntax and diff colors on the code surface (Shiki css-variables theme); dark theme overrides. */
   --shiki-foreground: var(--ink-on-code);
   --shiki-background: transparent;
-  --shiki-token-keyword: #ff7b72;
-  --shiki-token-string: #a5d6ff;
-  --shiki-token-string-expression: #7ee787;
-  --shiki-token-comment: #8b949e;
-  --shiki-token-constant: #79c0ff;
-  --shiki-token-function: #d2a8ff;
-  --shiki-token-parameter: #ffa657;
-  --shiki-token-punctuation: #c9d1d9;
-  --shiki-token-link: #a5d6ff;
-  --shiki-token-inserted: #7ee787;
-  --shiki-token-deleted: #ffa198;
-  --shiki-token-changed: #ffa657;
-  --code-gutter-ink: #6e7681;
-  --code-diff-add-bg: rgba(46, 160, 67, 0.18);
-  --code-diff-add-ink: #3fb950;
-  --code-diff-del-bg: rgba(248, 81, 73, 0.16);
-  --code-diff-del-ink: #f85149;
-  --code-diff-hunk-bg: rgba(56, 139, 253, 0.12);
-  --code-diff-hunk-ink: #79c0ff;
+  --shiki-token-keyword: #cf222e;
+  --shiki-token-string: #0a3069;
+  --shiki-token-string-expression: #116329;
+  --shiki-token-comment: #6e7781;
+  --shiki-token-constant: #0550ae;
+  --shiki-token-function: #8250df;
+  --shiki-token-parameter: #953800;
+  --shiki-token-punctuation: #1f2328;
+  --shiki-token-link: #0969da;
+  --shiki-token-inserted: #116329;
+  --shiki-token-deleted: #82071e;
+  --shiki-token-changed: #953800;
+  --code-gutter-ink: #8c959f;
+  --code-diff-add-bg: rgba(45, 164, 78, 0.14);
+  --code-diff-add-ink: #1a7f37;
+  --code-diff-del-bg: rgba(255, 129, 130, 0.2);
+  --code-diff-del-ink: #cf222e;
+  --code-diff-hunk-bg: rgba(84, 174, 255, 0.16);
+  --code-diff-hunk-ink: #0550ae;
   --ink-on-tooltip: #ffffff;
   --border-default: var(--border-subtle);
   --border-emphasis: var(--border-strong);
@@ -499,6 +499,25 @@ button,
   --ink-on-control: var(--ink-control);
   --ink-on-accent: var(--accent-ink);
   --ink-on-code: #eef2f7;
+  --shiki-token-keyword: #ff7b72;
+  --shiki-token-string: #a5d6ff;
+  --shiki-token-string-expression: #7ee787;
+  --shiki-token-comment: #8b949e;
+  --shiki-token-constant: #79c0ff;
+  --shiki-token-function: #d2a8ff;
+  --shiki-token-parameter: #ffa657;
+  --shiki-token-punctuation: #c9d1d9;
+  --shiki-token-link: #a5d6ff;
+  --shiki-token-inserted: #7ee787;
+  --shiki-token-deleted: #ffa198;
+  --shiki-token-changed: #ffa657;
+  --code-gutter-ink: #6e7681;
+  --code-diff-add-bg: rgba(46, 160, 67, 0.18);
+  --code-diff-add-ink: #3fb950;
+  --code-diff-del-bg: rgba(248, 81, 73, 0.16);
+  --code-diff-del-ink: #f85149;
+  --code-diff-hunk-bg: rgba(56, 139, 253, 0.12);
+  --code-diff-hunk-ink: #79c0ff;
   --border-default: var(--border-subtle);
   --border-emphasis: var(--border-strong);
   --border-control: var(--control-border);
@@ -4721,8 +4740,8 @@ a.code-block-title:hover {
   padding: 10px 56px 10px 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: #101318;
-  color: #f7f7f8;
+  background: var(--surface-code);
+  color: var(--ink-on-code);
   min-width: 0;
   max-width: 100%;
 }
@@ -4997,8 +5016,6 @@ a.code-block-title:hover {
 :root[data-theme="dark"] .markdown-body pre,
 :root[data-theme="dark"] .workspace-preview-raw {
   border-color: var(--border-subtle);
-  background: var(--bg-code);
-  color: #eef2f7;
 }
 
 :root[data-theme="dark"] .message-artifact {
@@ -5045,8 +5062,6 @@ a.code-block-title:hover {
 
 :root[data-theme="dark"] .message-artifact pre {
   border-color: var(--border-subtle);
-  background: var(--bg-code);
-  color: #eef2f7;
 }
 
 :root[data-theme="dark"] .message-hover-actions,
@@ -9263,8 +9278,8 @@ body.resizing-column * {
   margin: 0;
   padding: 12px;
   border-radius: 12px;
-  background: #111827;
-  color: #f9fafb;
+  background: var(--surface-code);
+  color: var(--ink-on-code);
   font-size: var(--type-size-meta);
   line-height: 1.5;
   white-space: pre-wrap;

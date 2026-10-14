@@ -147,6 +147,21 @@ try {
   ]);
   assert.notEqual(addBackground, contextBackground);
 
+  const codeTheme = () => rust.locator("pre").evaluate((node) => {
+    const keyword = node.querySelector("span[style*='--shiki-token-keyword']");
+    const [r, g, b] = getComputedStyle(node).backgroundColor.match(/\d+/g).map(Number);
+    return { luminance: (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255, keyword: getComputedStyle(keyword).color };
+  });
+  const setTheme = (theme) => normal.page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+  await setTheme("light");
+  const lightCode = await codeTheme();
+  await setTheme("dark");
+  const darkCode = await codeTheme();
+  await setTheme("light");
+  assert.ok(lightCode.luminance > 0.9, `light theme code surface is light (${lightCode.luminance})`);
+  assert.ok(darkCode.luminance < 0.25, `dark theme code surface is dark (${darkCode.luminance})`);
+  assert.notEqual(lightCode.keyword, darkCode.keyword, "syntax palette follows the theme");
+
   const long = blocks.nth(2);
   const expand = long.getByRole("button", { name: "Show all 45 lines" });
   const collapsedHeight = await long.locator("pre code").evaluate((node) => node.getBoundingClientRect().height);
@@ -163,8 +178,12 @@ try {
     const showMore = normal.page.getByRole("button", { name: "Show more" });
     if (await showMore.count()) await showMore.click();
     await normal.page.screenshot({ path: process.env.CODE_BLOCKS_SCREENSHOT, fullPage: true });
+    await setTheme("dark");
+    await normal.page.mouse.move(0, 0);
+    await normal.page.waitForTimeout(500);
+    await normal.page.screenshot({ path: process.env.CODE_BLOCKS_SCREENSHOT.replace(/(\.png)?$/, "-dark.png"), fullPage: true });
   }
-  console.log("PASS code blocks: lazy highlighting, header/line numbers, diff rows, collapse and streaming");
+  console.log("PASS code blocks: lazy highlighting, header/line numbers, diff rows, theme palette, collapse and streaming");
   await normal.context.close();
 
   const failed = await pageFixture(codeBody, (route) => route.abort());

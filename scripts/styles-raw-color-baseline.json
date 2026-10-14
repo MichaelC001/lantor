@@ -51,18 +51,6 @@
       "n": 0
     },
     {
-      "selector": ":root[data-theme=\"dark\"] .markdown-body pre, :root[data-theme=\"dark\"] .workspace-preview-raw",
-      "prop": "color",
-      "literal": "#eef2f7",
-      "n": 0
-    },
-    {
-      "selector": ":root[data-theme=\"dark\"] .message-artifact pre",
-      "prop": "color",
-      "literal": "#eef2f7",
-      "n": 0
-    },
-    {
       "selector": ":root[data-theme=\"dark\"] .message-card:hover .message-long-preview.collapsed::after, :root[data-theme=\"dark\"] .message-card.focused .message-long-preview.collapsed::after, :root[data-theme=\"dark\"] .message-card.tap-focused .message-long-preview.collapsed::after, :root[data-theme=\"dark\"] .message-card[data-jump-focused=\"true\"] .message-long-preview.collapsed::after",
       "prop": "background",
       "literal": "#1f2631",
@@ -618,18 +606,6 @@
       "selector": ".markdown-body code",
       "prop": "background",
       "literal": "rgba(20, 23, 31, 0.08)",
-      "n": 0
-    },
-    {
-      "selector": ".markdown-body pre",
-      "prop": "background",
-      "literal": "#101318",
-      "n": 0
-    },
-    {
-      "selector": ".markdown-body pre",
-      "prop": "color",
-      "literal": "#f7f7f8",
       "n": 0
     },
     {
@@ -1890,18 +1866,6 @@
       "selector": ".workspace-error",
       "prop": "color",
       "literal": "#c91810",
-      "n": 0
-    },
-    {
-      "selector": ".workspace-preview-raw",
-      "prop": "background",
-      "literal": "#111827",
-      "n": 0
-    },
-    {
-      "selector": ".workspace-preview-raw",
-      "prop": "color",
-      "literal": "#f9fafb",
       "n": 0
     },
     {
