@@ -112,12 +112,18 @@ async fn references_merge_bindings_and_cached_items() {
     let references = set_github_reference_alias(&pool, main, " RW# ")
         .await
         .unwrap();
-    let aliases: Vec<_> = references
-        .repositories
-        .iter()
-        .map(|repository| repository.reference_alias.as_str())
-        .collect();
-    assert_eq!(aliases, ["rw", "", ""]);
+    // Bindings of one repository are ordered by (random) channel id.
+    let alias_of = |channel_id: Uuid| {
+        references
+            .repositories
+            .iter()
+            .find(|repository| repository.channel_id == channel_id)
+            .map(|repository| repository.reference_alias.as_str())
+    };
+    assert_eq!(
+        [alias_of(main), alias_of(mirror), alias_of(other)],
+        [Some("rw"), Some(""), Some("")]
+    );
     // Another channel bound to the same repository may share the alias.
     set_github_reference_alias(&pool, mirror, "rw")
         .await

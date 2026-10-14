@@ -79,6 +79,19 @@ pub(crate) async fn load_github_references(
     crate::github::load_github_references(pool).await
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LookupGithubReferencesRequest {
+    pub(crate) references: Vec<crate::github::GithubReferenceKey>,
+}
+
+pub(crate) async fn lookup_github_references(
+    pool: &SqlitePool,
+    request: LookupGithubReferencesRequest,
+) -> CommandResult<crate::github::GithubReferenceLookup> {
+    crate::github::lookup_github_reference_states(pool, request.references).await
+}
+
 pub(crate) async fn set_github_reference_alias(
     pool: &SqlitePool,
     request: SetGithubReferenceAliasRequest,

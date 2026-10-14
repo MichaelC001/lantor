@@ -7,7 +7,9 @@ import {
   buildGithubReferenceIndex,
   derivedReferenceAlias,
   githubReferenceLabel,
+  lookedUpGithubReference,
   parseGithubIssueUrl,
+  requestGithubReferenceLookup,
   resolveGithubRepository,
   setGithubReferences,
 } from "../src/github-references";
@@ -24,7 +26,7 @@ const references = {
   ],
   items: [{
     name_with_owner: "risingwavelabs/risingwave", number: 27429, kind: "pull" as const, title: "fix(sum): keep NULL",
-    url: "https://github.com/risingwavelabs/risingwave/pull/27429", state: "open", is_draft: false,
+    url: "https://github.com/risingwavelabs/risingwave/pull/27429", state: "open", state_reason: "", is_draft: false,
     checks_status: "failure", updated_at: "2026-10-14T00:00:00Z",
   }],
 };
@@ -86,4 +88,52 @@ test("previews drop Markdown syntax", () => {
   );
   assert.equal(markdownPreviewText("plain snake_case_name and a_b_c"), "plain snake_case_name and a_b_c");
   assert.equal(markdownPreviewText("**unclosed"), "**unclosed");
+});
+
+test("references outside the queues are looked up in one batch", async () => {
+  setGithubReferences(references);
+  const requests: unknown[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    requests.push({ url, body: JSON.parse(String(init?.body)) });
+    const items = [
+      { name_with_owner: "risingwavelabs/risingwave", number: 27251, kind: "pull", title: "fix(stream): wrap",
+        url: "https://github.com/risingwavelabs/risingwave/pull/27251", state: "merged", state_reason: "",
+        is_draft: false, checks_status: "none", updated_at: "2026-10-13T09:46:10Z" },
+      { name_with_owner: "risingwavelabs/iceberg-rust", number: 12, kind: "issue", title: "Crash",
+        url: "https://github.com/risingwavelabs/iceberg-rust/issues/12", state: "closed", state_reason: "not_planned",
+        is_draft: false, checks_status: "none", updated_at: "2026-10-01T00:00:00Z" },
+    ];
+    return new Response(JSON.stringify({ items, error: null }), { headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    requestGithubReferenceLookup({ nameWithOwner: "risingwavelabs/risingwave", number: 27251 });
+    requestGithubReferenceLookup({ nameWithOwner: "RisingWaveLabs/RisingWave", number: 27251 });
+    requestGithubReferenceLookup({ nameWithOwner: "risingwavelabs/iceberg-rust", number: 12 });
+    requestGithubReferenceLookup({ nameWithOwner: "risingwavelabs/iceberg-rust", number: 13 });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.deepEqual(requests, [{
+      url: "/api/lookup_github_references",
+      body: { references: [
+        { nameWithOwner: "risingwavelabs/risingwave", number: 27251 },
+        { nameWithOwner: "risingwavelabs/iceberg-rust", number: 12 },
+        { nameWithOwner: "risingwavelabs/iceberg-rust", number: 13 },
+      ] },
+    }]);
+    assert.equal(lookedUpGithubReference("risingwavelabs/risingwave#27251")?.state, "merged");
+    assert.equal(lookedUpGithubReference("risingwavelabs/iceberg-rust#13"), null);
+
+    // Answers are kept: a merged PR is never asked again, others not within ten minutes.
+    requestGithubReferenceLookup({ nameWithOwner: "risingwavelabs/risingwave", number: 27251 }, Date.now() + 86_400_000);
+    requestGithubReferenceLookup({ nameWithOwner: "risingwavelabs/iceberg-rust", number: 13 });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(requests.length, 1);
+
+    const html = render("Merged rw#27251, closed ir#12.", RW_CHANNEL);
+    assert.match(html, /<a href="https:\/\/github.com\/risingwavelabs\/risingwave\/pull\/27251" class="github-reference" data-status="merged" title="Pull request rw#27251: fix\(stream\): wrap\nMerged"/);
+    assert.match(html, /href="https:\/\/github.com\/risingwavelabs\/iceberg-rust\/issues\/12" class="github-reference" data-status="not_planned" title="Issue iceberg-rust#12: Crash\nClosed as not planned"/);
+    assert.doesNotMatch(html, /github-reference-checks/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

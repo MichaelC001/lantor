@@ -18,8 +18,12 @@ use crate::{
 
 mod comparisons;
 mod pull_requests;
+mod reference_states;
 mod references;
 
+pub(crate) use reference_states::{
+    lookup_github_reference_states, GithubReferenceKey, GithubReferenceLookup,
+};
 pub(crate) use references::{load_github_references, set_github_reference_alias, GithubReferences};
 
 pub(crate) use comparisons::{
@@ -466,22 +470,41 @@ fn compact_cli_error(stderr: &[u8]) -> String {
         .collect()
 }
 
-async fn run_github_cli(args: Vec<String>) -> CommandResult<Vec<u8>> {
+async fn github_cli_output(args: Vec<String>) -> CommandResult<std::process::Output> {
     let mut command = github_command(&args);
     command
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_PAGER", "cat")
         .env("NO_COLOR", "1")
         .kill_on_drop(true);
-    let output = tokio::time::timeout(GITHUB_CLI_TIMEOUT, command.output())
+    tokio::time::timeout(GITHUB_CLI_TIMEOUT, command.output())
         .await
         .map_err(|_| "GitHub CLI request timed out".to_owned())?
         .map_err(|err| {
             format!("GitHub CLI (`gh`) is unavailable: {err}. Install it and run `gh auth login`.")
-        })?;
+        })
+}
+
+async fn run_github_cli(args: Vec<String>) -> CommandResult<Vec<u8>> {
+    let output = github_cli_output(args).await?;
     if output.status.success() {
         return Ok(output.stdout);
     }
+    github_cli_failure(&output)
+}
+
+/// `gh api graphql` exits non-zero when any field errors (for example one
+/// missing issue number) but still prints the partial response; keep it so the
+/// caller can read the per-field errors.
+async fn run_github_graphql_partial(args: Vec<String>) -> CommandResult<Vec<u8>> {
+    let output = github_cli_output(args).await?;
+    if output.status.success() || output.stdout.trim_ascii_start().starts_with(b"{") {
+        return Ok(output.stdout);
+    }
+    github_cli_failure(&output)
+}
+
+fn github_cli_failure(output: &std::process::Output) -> CommandResult<Vec<u8>> {
     let detail = compact_cli_error(&output.stderr);
     if output.status.code() == Some(127) {
         return Err(

@@ -4566,7 +4566,7 @@ mark {
   font-weight: var(--type-weight-semibold);
 }
 
-/* `#123` / `rw#123` references; queued PRs and issues show state and CI. */
+/* `#123` / `rw#123` references with PR/issue state and CI. */
 .markdown-body a.github-reference {
   white-space: nowrap;
 }
@@ -4592,6 +4592,14 @@ mark {
 
 .github-reference[data-status="closed"] .github-reference-icon {
   color: var(--status-danger);
+}
+
+.github-reference[data-status="completed"] .github-reference-icon {
+  color: var(--badge-phase-file-ink);
+}
+
+.github-reference[data-status="not_planned"] .github-reference-icon {
+  color: var(--muted);
 }
 
 .github-reference-checks {

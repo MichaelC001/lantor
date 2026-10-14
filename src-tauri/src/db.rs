@@ -394,6 +394,23 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         )
         "#,
         r#"
+        create table if not exists github_reference_state_cache (
+            repository_key text not null,
+            number integer not null,
+            kind text not null,
+            name_with_owner text not null,
+            title text not null,
+            url text not null,
+            state text not null,
+            state_reason text not null,
+            is_draft boolean not null,
+            checks_status text not null,
+            github_updated_at text not null,
+            fetched_at text not null,
+            primary key (repository_key, number)
+        )
+        "#,
+        r#"
         create table if not exists messages (
             id blob primary key not null default (randomblob(16)),
             channel_id blob not null references channels(id) on delete cascade,

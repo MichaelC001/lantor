@@ -1,6 +1,7 @@
 //! Data for rendering `#123` / `rw#123` references in messages: every channel
 //! binding (with its short alias) plus the state of PRs and issues that are
-//! already in the synced queues. Read-only and local; never calls GitHub.
+//! already in the synced queues. Read-only and local; never calls GitHub
+//! (references outside the queues go through `reference_states`).
 
 use std::collections::HashMap;
 
@@ -20,7 +21,7 @@ pub(crate) struct GithubReferenceRepository {
     pub(crate) reference_alias: String,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct GithubReferenceItem {
     pub(crate) name_with_owner: String,
     pub(crate) number: i64,
@@ -28,7 +29,10 @@ pub(crate) struct GithubReferenceItem {
     pub(crate) kind: &'static str,
     pub(crate) title: String,
     pub(crate) url: String,
+    /// `open`, `closed` or `merged`.
     pub(crate) state: String,
+    /// For closed issues: `completed` or `not_planned`; empty otherwise.
+    pub(crate) state_reason: String,
     pub(crate) is_draft: bool,
     pub(crate) checks_status: String,
     pub(crate) updated_at: String,
@@ -97,6 +101,7 @@ pub(crate) async fn load_github_references(pool: &SqlitePool) -> CommandResult<G
             title: row.get("title"),
             url: row.get("url"),
             state: row.get::<String, _>("state").to_ascii_lowercase(),
+            state_reason: String::new(),
             is_draft: row.get("is_draft"),
             checks_status: row.get("checks_status"),
             updated_at: row.get("github_updated_at"),

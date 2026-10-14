@@ -1,6 +1,8 @@
 import {
   Check,
+  CircleCheck,
   CircleDot,
+  CircleSlash,
   Clock3,
   GitMerge,
   GitPullRequest,
@@ -8,13 +10,18 @@ import {
   GitPullRequestDraft,
   X,
 } from "lucide-react";
-import type { AnchorHTMLAttributes, ReactNode } from "react";
+import { type AnchorHTMLAttributes, type ReactNode, useCallback, useEffect, useSyncExternalStore } from "react";
 import {
   type GithubIssueLink,
   type GithubReferenceIndex,
+  type GithubReferenceStatus,
   githubReferenceItem,
+  githubReferenceKey,
   githubReferenceLabel,
   githubReferenceStatus,
+  lookedUpGithubReference,
+  requestGithubReferenceLookup,
+  subscribeGithubReferenceLookups,
 } from "../github-references";
 
 type GithubReferenceLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
@@ -26,12 +33,23 @@ type GithubReferenceLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
   children?: ReactNode;
 };
 
-const STATUS_LABELS = { open: "Open", draft: "Draft", merged: "Merged", closed: "Closed" } as const;
+const STATUS_LABELS: Record<GithubReferenceStatus, string> = {
+  open: "Open",
+  draft: "Draft",
+  merged: "Merged",
+  closed: "Closed",
+  completed: "Closed as completed",
+  not_planned: "Closed as not planned",
+};
 const CHECK_LABELS: Record<string, string> = { success: "checks passed", failure: "checks failing", pending: "checks running" };
 
-function StatusIcon({ kind, status }: { kind: "pull" | "issue"; status: keyof typeof STATUS_LABELS }) {
+function StatusIcon({ kind, status }: { kind: "pull" | "issue"; status: GithubReferenceStatus }) {
   const props = { size: 12, "aria-hidden": true, className: "github-reference-icon" } as const;
-  if (kind === "issue") return <CircleDot {...props} />;
+  if (kind === "issue") {
+    if (status === "completed") return <CircleCheck {...props} />;
+    if (status === "not_planned") return <CircleSlash {...props} />;
+    return <CircleDot {...props} />;
+  }
   if (status === "draft") return <GitPullRequestDraft {...props} />;
   if (status === "merged") return <GitMerge {...props} />;
   if (status === "closed") return <GitPullRequestClosed {...props} />;
@@ -47,8 +65,10 @@ function ChecksIcon({ status }: { status: string }) {
 }
 
 /**
- * A link to a GitHub PR or issue. Items already in the synced GitHub queues
- * get a state icon, a CI mark and a title tooltip; others stay plain links.
+ * A link to a GitHub PR or issue with a state icon, a CI mark (open PRs) and a
+ * title tooltip. Items in the synced GitHub queues have their state locally;
+ * others are looked up on demand and stay plain links until (or unless) that
+ * lookup finds them.
  */
 export function GithubReferenceLink({
   href,
@@ -59,8 +79,18 @@ export function GithubReferenceLink({
   className,
   ...props
 }: GithubReferenceLinkProps) {
-  const item = githubReferenceItem(references, link);
+  const queued = githubReferenceItem(references, link);
+  const key = githubReferenceKey(link);
+  const getLookedUp = useCallback(() => lookedUpGithubReference(key), [key]);
+  const lookedUp = useSyncExternalStore(subscribeGithubReferenceLookups, getLookedUp, getLookedUp);
+  const { nameWithOwner, number } = link;
+  useEffect(() => {
+    if (!queued) requestGithubReferenceLookup({ nameWithOwner, number });
+  }, [queued, nameWithOwner, number]);
+  const item = queued ?? lookedUp;
   const label = compactLabel ? githubReferenceLabel(references, link) : children;
+  // Links generated from `#123` use /issues/; point them at the real page.
+  const resolvedHref = item && href === `https://github.com/${link.nameWithOwner}/issues/${link.number}` ? item.url || href : href;
   const status = item ? githubReferenceStatus(item) : null;
   const checks = item?.kind === "pull" ? CHECK_LABELS[item.checks_status] : undefined;
   const title = item && status
@@ -70,7 +100,7 @@ export function GithubReferenceLink({
   return (
     <a
       {...props}
-      href={href}
+      href={resolvedHref}
       className={["github-reference", className].filter(Boolean).join(" ")}
       data-status={status ?? undefined}
       title={title ?? props.title}

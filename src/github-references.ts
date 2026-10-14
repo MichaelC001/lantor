@@ -1,9 +1,10 @@
 // Resolves `#123`, `rw#123` and `owner/repo#123` in message text to GitHub
-// links, and looks up the state of PRs/issues that are already in the synced
-// GitHub queues. Data comes from one local read (`load_github_references`);
-// nothing here calls GitHub.
+// links. PRs/issues in the synced GitHub queues get their state from one local
+// read (`load_github_references`); other referenced PRs/issues (usually merged
+// or closed ones) are looked up in batches through `lookup_github_references`,
+// which queries GitHub and caches the answers on the backend.
 import { apiInvoke } from "./apiClient";
-import type { GithubReferenceItem, GithubReferences } from "./types";
+import type { GithubReferenceItem, GithubReferenceLookup, GithubReferences } from "./types";
 
 export type GithubReferenceIndex = {
   /** Lower-cased `owner/repo` by channel id. */
@@ -35,6 +36,8 @@ const REPOSITORY_PART = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 const GITHUB_ISSUE_URL = /^https:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9_.-]+)\/(?:pull|issues)\/([0-9]+)(?:[/?#].*)?$/;
 
 let index = EMPTY_INDEX;
+/** Lookups wait for the first queue read so queued items are not looked up. */
+let referencesLoaded = false;
 let loading: Promise<void> | null = null;
 const listeners = new Set<() => void>();
 
@@ -104,6 +107,12 @@ export function subscribeGithubReferences(listener: () => void) {
 export function setGithubReferences(data: GithubReferences) {
   index = buildGithubReferenceIndex(data);
   listeners.forEach((listener) => listener());
+  markGithubReferencesLoaded();
+}
+
+function markGithubReferencesLoaded() {
+  referencesLoaded = true;
+  if (queuedLookups.size > 0) lookupTimer ??= setTimeout(flushGithubReferenceLookups, LOOKUP_DELAY_MS);
 }
 
 export function loadGithubReferences() {
@@ -111,6 +120,7 @@ export function loadGithubReferences() {
     .then(setGithubReferences)
     .catch((error) => {
       console.warn("Failed to load GitHub references", error);
+      markGithubReferencesLoaded();
     })
     .finally(() => {
       loading = null;
@@ -147,8 +157,88 @@ export function parseGithubIssueUrl(href: string | undefined): GithubIssueLink |
   return { nameWithOwner: `${match[1]}/${match[2]}`, number: Number(match[3]) };
 }
 
+export function githubReferenceKey(link: GithubIssueLink) {
+  return `${link.nameWithOwner.toLowerCase()}#${link.number}`;
+}
+
 export function githubReferenceItem(references: GithubReferenceIndex, link: GithubIssueLink) {
-  return references.items.get(`${link.nameWithOwner.toLowerCase()}#${link.number}`) ?? null;
+  return references.items.get(githubReferenceKey(link)) ?? null;
+}
+
+// On-demand state of references that are not in the synced queues.
+type LookupEntry = { item: GithubReferenceItem | null; checkedAt: number; pending: boolean };
+
+/** Batch window: links rendered together are looked up in one request. */
+const LOOKUP_DELAY_MS = 50;
+const LOOKUP_BATCH_SIZE = 100;
+/** Re-ask the backend (which has its own cache) at most this often per reference. */
+const LOOKUP_RECHECK_MS = 10 * 60_000;
+
+const lookups = new Map<string, LookupEntry>();
+const lookupListeners = new Set<() => void>();
+let queuedLookups = new Map<string, GithubIssueLink>();
+let lookupTimer: ReturnType<typeof setTimeout> | null = null;
+let lookupErrorShown = false;
+
+export function subscribeGithubReferenceLookups(listener: () => void) {
+  lookupListeners.add(listener);
+  return () => {
+    lookupListeners.delete(listener);
+  };
+}
+
+/** The looked-up item for a reference key; a stable object until it changes. */
+export function lookedUpGithubReference(key: string) {
+  return lookups.get(key)?.item ?? null;
+}
+
+/** Queues a state lookup for a reference that is not in the synced queues. */
+export function requestGithubReferenceLookup(link: GithubIssueLink, now = Date.now()) {
+  const key = githubReferenceKey(link);
+  const entry = lookups.get(key);
+  if (entry && (entry.pending || entry.item?.state === "merged" || now - entry.checkedAt < LOOKUP_RECHECK_MS)) return;
+  if (queuedLookups.has(key)) return;
+  queuedLookups.set(key, link);
+  lookupTimer ??= setTimeout(flushGithubReferenceLookups, LOOKUP_DELAY_MS);
+}
+
+function flushGithubReferenceLookups() {
+  lookupTimer = null;
+  if (!referencesLoaded) return;
+  const queued = [...queuedLookups].filter(([key]) => !index.items.has(key));
+  queuedLookups = new Map();
+  for (let start = 0; start < queued.length; start += LOOKUP_BATCH_SIZE) {
+    const batch = queued.slice(start, start + LOOKUP_BATCH_SIZE);
+    for (const [key] of batch) {
+      const previous = lookups.get(key);
+      lookups.set(key, { item: previous?.item ?? null, checkedAt: previous?.checkedAt ?? 0, pending: true });
+    }
+    void apiInvoke("lookup_github_references", {
+      references: batch.map(([, link]) => ({ nameWithOwner: link.nameWithOwner, number: link.number })),
+    })
+      .then((result) => applyGithubReferenceLookup(batch.map(([key]) => key), result))
+      .catch((error) => {
+        applyGithubReferenceLookup(batch.map(([key]) => key), { items: [], error: String(error) });
+      });
+  }
+}
+
+function applyGithubReferenceLookup(keys: string[], result: GithubReferenceLookup) {
+  if (result.error && !lookupErrorShown) {
+    lookupErrorShown = true;
+    console.warn("GitHub reference lookup incomplete:", result.error);
+  }
+  const found = new Map(result.items.map((item) => [`${item.name_with_owner.toLowerCase()}#${item.number}`, item]));
+  const checkedAt = Date.now();
+  for (const key of keys) {
+    const previous = lookups.get(key)?.item ?? null;
+    const item = found.get(key) ?? null;
+    // Keep the previous object when nothing changed so links do not re-render.
+    const unchanged = previous && item && previous.state === item.state && previous.is_draft === item.is_draft
+      && previous.checks_status === item.checks_status && previous.title === item.title;
+    lookups.set(key, { item: unchanged ? previous : item ?? (result.error ? previous : null), checkedAt, pending: false });
+  }
+  lookupListeners.forEach((listener) => listener());
 }
 
 /** `rw#27495` for bound repositories, `owner/repo#27495` otherwise. */
@@ -157,10 +247,14 @@ export function githubReferenceLabel(references: GithubReferenceIndex, link: Git
   return `${shortName ?? link.nameWithOwner}#${link.number}`;
 }
 
-export type GithubReferenceStatus = "open" | "draft" | "merged" | "closed";
+export type GithubReferenceStatus = "open" | "draft" | "merged" | "closed" | "completed" | "not_planned";
 
 export function githubReferenceStatus(item: GithubReferenceItem): GithubReferenceStatus {
   if (item.state === "merged") return "merged";
-  if (item.state === "closed") return "closed";
+  if (item.state === "closed") {
+    if (item.kind !== "issue") return "closed";
+    // GitHub shows issues closed as not planned (or duplicate) in grey, others as completed.
+    return item.state_reason === "not_planned" || item.state_reason === "duplicate" ? "not_planned" : "completed";
+  }
   return item.kind === "pull" && item.is_draft ? "draft" : "open";
 }

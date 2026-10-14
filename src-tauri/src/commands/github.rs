@@ -6,12 +6,13 @@ use crate::{
     application::github::{
         self as application, BindGithubRepositoryRequest, CreateGithubIssueTaskRequest,
         CreateGithubReviewTaskRequest, GithubChannelRequest, GithubIssueRequest,
-        RereviewGithubPullRequestRequest, SetGithubReferenceAliasRequest,
+        LookupGithubReferencesRequest, RereviewGithubPullRequestRequest,
+        SetGithubReferenceAliasRequest,
     },
     github::{
-        GithubChannelOverview, GithubIssueDetail, GithubIssueTaskResult, GithubReferences,
-        GithubRepositoryBinding, GithubRereviewTaskResult, GithubReviewComparisons,
-        GithubReviewTaskResult,
+        GithubChannelOverview, GithubIssueDetail, GithubIssueTaskResult, GithubReferenceKey,
+        GithubReferenceLookup, GithubReferences, GithubRepositoryBinding, GithubRereviewTaskResult,
+        GithubReviewComparisons, GithubReviewTaskResult,
     },
 };
 
@@ -20,6 +21,15 @@ pub(crate) async fn load_github_references(
     state: State<'_, AppState>,
 ) -> CommandResult<GithubReferences> {
     application::load_github_references(&state.pool).await
+}
+
+#[tauri::command]
+pub(crate) async fn lookup_github_references(
+    references: Vec<GithubReferenceKey>,
+    state: State<'_, AppState>,
+) -> CommandResult<GithubReferenceLookup> {
+    application::lookup_github_references(&state.pool, LookupGithubReferencesRequest { references })
+        .await
 }
 
 #[tauri::command]

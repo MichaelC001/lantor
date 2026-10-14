@@ -84,8 +84,13 @@ Message text links GitHub references: `#123` resolves to the repository bound to
 the message's channel, `short-name#123` to the binding with that short name
 (set in the GitHub binding dialog; hyphenated repository names also get their
 initials, e.g. `iceberg-rust` → `ir`), and `owner/repo#123` to any repository.
-PRs and issues already in the synced GitHub queues show their state and CI;
-others are plain links. Absolute UTC times (`2026-10-13T19:00:00+00:00`,
+PRs and issues in the synced GitHub queues show their state and CI from the
+local queue cache. Other referenced items (usually merged or closed ones) are
+looked up in batches through `lookup_github_references`, one `gh api graphql`
+query per repository, and cached in `github_reference_state_cache`: merged PRs
+for good, closed items and unknown numbers for a day, open items for ten
+minutes. Until a lookup answers, or when `gh` is unavailable, they stay plain
+links. Absolute UTC times (`2026-10-13T19:00:00+00:00`,
 `07:46Z`) are shown in local time with the UTC value as a tooltip. Code spans
 and existing links are left alone. List previews (Activity, Saved, threads,
 search, reference chips) show the Markdown as plain text.

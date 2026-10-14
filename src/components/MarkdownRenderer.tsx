@@ -333,7 +333,8 @@ export function MarkdownRenderer({
             compactLabel={bareUrl}
             onPointerDown={isolateLinkEvent}
             onContextMenu={isolateLinkEvent}
-            onClick={(event) => handleLinkClick(event, href, false, onLocalAgentLink, null)}
+            // The link may point at the resolved /pull/ page instead of `href`.
+            onClick={(event) => handleLinkClick(event, event.currentTarget.getAttribute("href") ?? href, false, onLocalAgentLink, null)}
           >
             {children}
           </GithubReferenceLink>

@@ -340,10 +340,18 @@ export type GithubReferenceItem = {
   kind: "pull" | "issue";
   title: string;
   url: string;
+  /** `open`, `closed` or `merged`. */
   state: string;
+  /** Closed issues: `completed`, `not_planned` or `duplicate`; empty otherwise. */
+  state_reason: string;
   is_draft: boolean;
   checks_status: string;
   updated_at: string;
+};
+
+export type GithubReferenceLookup = {
+  items: GithubReferenceItem[];
+  error: string | null;
 };
 
 export type GithubReferences = {
