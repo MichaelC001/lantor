@@ -302,7 +302,7 @@ pub(super) fn claude_streaming_command_text(model: &str, reasoning_effort: &str)
         format!(" --effort {effort}")
     };
     format!(
-        "{CLAUDE_DISABLE_BACKGROUND_TASKS_ENV}=1 {CLAUDE_DISABLE_CRON_ENV}=1 {CLAUDE_MAX_RETRIES_ENV}={DEFAULT_CLAUDE_MAX_RETRIES} claude --model {model}{effort_arg} --output-format stream-json --input-format stream-json --include-partial-messages --verbose --disallowedTools Monitor --permission-mode bypassPermissions"
+        "{CLAUDE_DISABLE_BACKGROUND_TASKS_ENV}=1 {CLAUDE_DISABLE_CRON_ENV}=1 {CLAUDE_MAX_RETRIES_ENV}={DEFAULT_CLAUDE_MAX_RETRIES} claude --model {model}{effort_arg} --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages --verbose --disallowedTools Monitor --permission-mode bypassPermissions"
     )
 }
 
@@ -317,6 +317,24 @@ pub(super) fn claude_user_input(prompt: &str) -> Value {
             }]
         }
     })
+}
+
+/// A user message the CLI replays with the same `uuid` once it consumes it
+/// (`--replay-user-messages`), which tells whether it joined the running turn.
+pub(super) fn claude_user_input_with_uuid(prompt: &str, uuid: &str) -> Value {
+    let mut input = claude_user_input(prompt);
+    input["uuid"] = Value::String(uuid.to_owned());
+    input
+}
+
+/// The uuid of an input the CLI replayed back on stdout, if `value` is one.
+pub(super) fn claude_replayed_input_uuid(value: &Value) -> Option<&str> {
+    if value.get("type").and_then(Value::as_str) != Some("user")
+        || value.get("isReplay").and_then(Value::as_bool) != Some(true)
+    {
+        return None;
+    }
+    value.get("uuid").and_then(Value::as_str)
 }
 
 /// Stream-json control request that aborts the running turn. The CLI answers
@@ -377,6 +395,21 @@ mod tests {
         assert!(command.contains("claude --model sonnet --effort high"));
         assert!(command.contains("--input-format stream-json"));
         assert!(command.contains("--output-format stream-json"));
+        assert!(command.contains("--replay-user-messages"));
+    }
+
+    #[test]
+    fn claude_replayed_input_carries_the_written_uuid() {
+        let input = claude_user_input_with_uuid("follow up", "steer-1");
+        assert_eq!(input["type"], "user");
+        assert_eq!(input["uuid"], "steer-1");
+        assert_eq!(input["message"]["content"][0]["text"], "follow up");
+
+        let replay = json!({"type":"user","isReplay":true,"uuid":"steer-1","message":{"role":"user","content":"follow up"}});
+        assert_eq!(claude_replayed_input_uuid(&replay), Some("steer-1"));
+        // Tool results are user messages too, but never replays.
+        let tool_result = json!({"type":"user","uuid":"tool-1","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}});
+        assert_eq!(claude_replayed_input_uuid(&tool_result), None);
     }
 
     #[test]

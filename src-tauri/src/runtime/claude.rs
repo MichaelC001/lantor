@@ -43,24 +43,32 @@ mod interrupt;
 mod protocol;
 mod reaper;
 mod session;
+mod steer;
 mod text;
 mod turn;
 
 pub(crate) use interrupt::interrupt_warm_claude_run;
+pub(crate) use steer::steerable_claude_turn_surface;
+use steer::{
+    note_claude_input_replayed, steer_warm_claude_turn_if_same_surface, ClaudePendingSteer,
+    ClaudeSteerRequest,
+};
 use text::ClaudeTextState;
 
 #[cfg(test)]
 mod interrupt_tests;
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+mod steer_tests;
 
 use protocol::{
     claude_context_tokens, claude_main_tool_use_started, claude_message_text_blocks,
-    claude_result_error, claude_result_text, claude_resume_session_missing, claude_session_id,
-    claude_stream_event_activity, claude_stream_key, claude_streaming_command_text,
-    claude_surface_boundary_marker, claude_text_delta, claude_user_input, claude_write_input,
-    CLAUDE_DISABLE_BACKGROUND_TASKS_ENV, CLAUDE_DISABLE_CRON_ENV, CLAUDE_MAX_RETRIES_ENV,
-    DEFAULT_CLAUDE_MAX_RETRIES,
+    claude_replayed_input_uuid, claude_result_error, claude_result_text,
+    claude_resume_session_missing, claude_session_id, claude_stream_event_activity,
+    claude_stream_key, claude_streaming_command_text, claude_surface_boundary_marker,
+    claude_text_delta, claude_user_input, claude_write_input, CLAUDE_DISABLE_BACKGROUND_TASKS_ENV,
+    CLAUDE_DISABLE_CRON_ENV, CLAUDE_MAX_RETRIES_ENV, DEFAULT_CLAUDE_MAX_RETRIES,
 };
 use reaper::claude_warm_idle_reaper;
 use session::{
@@ -112,6 +120,16 @@ struct WarmClaudeState {
     last_surface: Option<ClaudeSurface>,
     injected_memory_context: Option<String>,
     last_activity: Instant,
+    /// Follow-ups written to the CLI that it has not replayed yet.
+    pending_steers: Vec<ClaudePendingSteer>,
+}
+
+impl WarmClaudeState {
+    /// A turn is running, or the CLI still owes a turn for a follow-up. A new
+    /// request written now would be answered after that turn, not as its own.
+    fn is_busy(&self) -> bool {
+        self.active.is_some() || !self.pending_steers.is_empty()
+    }
 }
 
 struct ClaudeActiveTurn {
@@ -260,7 +278,7 @@ async fn get_or_spawn_warm_claude_runtime(
             &runtime.environment_variables,
             config.environment_variables,
         );
-        if state.alive && environment_changed && state.active.is_none() {
+        if state.alive && environment_changed && !state.is_busy() {
             state.alive = false;
             drop(state);
             if let Some(pid) = runtime.pid {
@@ -319,6 +337,8 @@ async fn spawn_warm_claude_runtime(
         .arg("--input-format")
         .arg("stream-json")
         .arg("--include-partial-messages")
+        // Echoes each input with its uuid when consumed; follow-ups need it.
+        .arg("--replay-user-messages")
         .arg("--verbose")
         // Monitor has its own enablement gate in Claude Code, independent of
         // CLAUDE_CODE_DISABLE_BACKGROUND_TASKS. It can also emit unsolicited turns.
@@ -388,6 +408,7 @@ async fn spawn_warm_claude_runtime(
             last_surface,
             injected_memory_context: None,
             last_activity: Instant::now(),
+            pending_steers: Vec::new(),
         }),
         pid,
         environment_variables: config.environment_variables.to_owned(),
@@ -517,8 +538,21 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
         if !state.alive {
             return Err("Claude warm runtime is not alive".to_owned());
         }
-        if state.active.is_some() {
+        if state.is_busy() {
             drop(state);
+            if let Some(work_item_id) = work_item_id {
+                let request = ClaudeSteerRequest {
+                    work_item_id,
+                    prompt: &claude_prompt,
+                    rendered_context_max_seq,
+                    command_text: &command_text,
+                    working_directory: &working_directory,
+                };
+                if steer_warm_claude_turn_if_same_surface(pool, agent_id, &runtime, request).await?
+                {
+                    return Ok(());
+                }
+            }
             record_agent_activity_throttled(
                 pool,
                 Some(agent_id),
@@ -692,7 +726,7 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
         let mut state = runtime.state.lock().await;
         if !state.alive {
             Err("Claude warm runtime exited before turn start".to_owned())
-        } else if state.active.is_some() {
+        } else if state.is_busy() {
             Err(CLAUDE_BUSY_BEFORE_TURN_START.to_owned())
         } else {
             state.last_activity = Instant::now();
@@ -825,10 +859,24 @@ async fn handle_claude_warm_stdout_line(
             .as_ref()
             .map(|active| active.run_id)
     };
+    let value = serde_json::from_str::<Value>(line);
+    let replayed_uuid = value
+        .as_ref()
+        .ok()
+        .and_then(claude_replayed_input_uuid)
+        .map(str::to_owned);
     if let Some(run_id) = active_run_id {
-        append_run_log(pool, run_id, format!("[claude] {line}\n")).await?;
+        // A replay repeats the whole prompt; the uuid is enough for the log.
+        let entry = match &replayed_uuid {
+            Some(uuid) => format!("[claude] input replayed uuid={uuid}\n"),
+            None => format!("[claude] {line}\n"),
+        };
+        append_run_log(pool, run_id, entry).await?;
     }
-    let value: Value = serde_json::from_str(line).map_err(to_string)?;
+    let value = value.map_err(to_string)?;
+    if let Some(uuid) = replayed_uuid {
+        return note_claude_input_replayed(pool, agent_id, runtime, &uuid).await;
+    }
 
     // Handle before the session-id capture below, which would store the missing ID again.
     if claude_resume_session_missing(&value) {
@@ -1174,6 +1222,7 @@ mod tests {
                 last_surface: None,
                 injected_memory_context: None,
                 last_activity: Instant::now(),
+                pending_steers: Vec::new(),
             }),
             pid: None,
             environment_variables: String::new(),

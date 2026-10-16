@@ -24,7 +24,7 @@ pub(super) async fn claude_warm_idle_reaper(
         let should_stop = {
             let mut state = runtime.state.lock().await;
             let should_stop = state.alive
-                && state.active.is_none()
+                && !state.is_busy()
                 && state.last_activity.elapsed() >= CLAUDE_IDLE_TIMEOUT;
             if should_stop {
                 state.alive = false;

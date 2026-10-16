@@ -327,7 +327,7 @@ async fn run_supervisor_iteration(
         cleanup_supervisor_commands(pool).await?;
         *last_command_cleanup = Instant::now();
     }
-    schedule_queued_work_items(pool, codex_registry).await?;
+    schedule_queued_work_items(pool, codex_registry, claude_registry).await?;
     let mut processed_command = false;
     loop {
         let Ok(permit) = command_semaphore.clone().try_acquire_owned() else {
@@ -358,11 +358,34 @@ async fn run_supervisor_iteration(
 async fn should_schedule_queued_work_item(
     pool: &SqlitePool,
     registry: &WarmCodexRegistry,
+    claude_registry: &WarmClaudeRegistry,
     agent_id: Uuid,
     channel_id: Option<Uuid>,
     thread_root_id: Option<Uuid>,
 ) -> CommandResult<bool> {
     let runtime = agent_runtime(pool, agent_id).await?;
+    if runtime
+        .as_deref()
+        .is_some_and(|runtime| runtime.eq_ignore_ascii_case("claude"))
+    {
+        // A follow-up for the running turn's surface joins it; others wait.
+        if let Some((active_channel_id, active_thread_root_id)) =
+            claude::steerable_claude_turn_surface(claude_registry, agent_id).await
+        {
+            if same_codex_surface(
+                pool,
+                channel_id,
+                thread_root_id,
+                active_channel_id,
+                active_thread_root_id,
+            )
+            .await?
+            {
+                return Ok(true);
+            }
+        }
+        return Ok(!agent_has_active_or_pending_start(pool, agent_id).await?);
+    }
     if !runtime
         .as_deref()
         .is_some_and(|runtime| runtime.eq_ignore_ascii_case("codex"))
@@ -396,6 +419,7 @@ async fn should_schedule_queued_work_item(
 async fn schedule_queued_work_items(
     pool: &SqlitePool,
     registry: &WarmCodexRegistry,
+    claude_registry: &WarmClaudeRegistry,
 ) -> CommandResult<()> {
     let rows = sqlx::query(
         r#"
@@ -422,8 +446,15 @@ async fn schedule_queued_work_items(
         let agent_id: Uuid = row.get("agent_id");
         let channel_id: Option<Uuid> = row.get("channel_id");
         let thread_root_id: Option<Uuid> = row.get("thread_root_id");
-        if !should_schedule_queued_work_item(pool, registry, agent_id, channel_id, thread_root_id)
-            .await?
+        if !should_schedule_queued_work_item(
+            pool,
+            registry,
+            claude_registry,
+            agent_id,
+            channel_id,
+            thread_root_id,
+        )
+        .await?
         {
             continue;
         }

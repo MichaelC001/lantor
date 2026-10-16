@@ -37,6 +37,7 @@ fn runtime_over(
             last_surface: None,
             injected_memory_context: None,
             last_activity: Instant::now(),
+            pending_steers: Vec::new(),
         }),
         pid,
         environment_variables: String::new(),

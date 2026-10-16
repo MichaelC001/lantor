@@ -3,7 +3,10 @@ use std::{sync::Arc, time::Instant};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use super::{session::store_claude_context_tokens, ClaudeSurface, WarmClaudeRuntime};
+use super::{
+    session::store_claude_context_tokens, steer::settle_claude_follow_ups, ClaudeSurface,
+    WarmClaudeRuntime,
+};
 use crate::events::activity::{record_agent_activity, work_status_title};
 use crate::runtime::{
     process::{terminate_process_group, upsert_runtime_thread_id},
@@ -48,7 +51,8 @@ pub(super) async fn finish_warm_claude_active_turn(
         (active, session_id, state.context_tokens)
     };
     let Some(active) = active else {
-        return Ok(());
+        // A process that died between turns still owes its follow-ups a turn.
+        return settle_claude_follow_ups(pool, agent_id, runtime).await;
     };
     let elapsed_ms = active.started_at.elapsed().as_millis();
     let current_work_status: Option<String> = match active.work_item_id {
@@ -230,6 +234,7 @@ pub(super) async fn finish_warm_claude_active_turn(
         },
     )
     .await?;
+    settle_claude_follow_ups(pool, agent_id, runtime).await?;
     let _ = notify_supervisor_wake(pool).await;
     Ok(())
 }
