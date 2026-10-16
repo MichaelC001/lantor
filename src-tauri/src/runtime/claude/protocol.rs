@@ -319,6 +319,17 @@ pub(super) fn claude_user_input(prompt: &str) -> Value {
     })
 }
 
+/// Stream-json control request that aborts the running turn. The CLI answers
+/// with a `control_response`, ends the turn with an `error_during_execution`
+/// result, and keeps the process and session alive.
+pub(super) fn claude_interrupt_request(request_id: &str) -> Value {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "interrupt" }
+    })
+}
+
 pub(super) async fn claude_write_input(
     stdin: &mut tokio::process::ChildStdin,
     value: Value,

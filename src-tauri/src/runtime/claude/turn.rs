@@ -61,7 +61,10 @@ pub(super) async fn finish_warm_claude_active_turn(
         }
         None => None,
     };
-    let was_cancelled = current_work_status.as_deref() == Some("cancelling");
+    // Runs without a work item have no `cancelling` status to read, so an
+    // interrupted turn's error result must count as a stop on its own.
+    let was_cancelled =
+        active.interrupt_requested || current_work_status.as_deref() == Some("cancelling");
 
     let hidden = if success && !was_cancelled {
         consume_streaming_agent_control_lines(

@@ -39,14 +39,18 @@ use crate::ui_notifications::{
 };
 use crate::usage::{record_run_usage, usage_from_runtime_event};
 
+mod interrupt;
 mod protocol;
 mod reaper;
 mod session;
 mod text;
 mod turn;
 
+pub(crate) use interrupt::interrupt_warm_claude_run;
 use text::ClaudeTextState;
 
+#[cfg(test)]
+mod interrupt_tests;
 #[cfg(test)]
 mod recovery_tests;
 
@@ -120,6 +124,8 @@ struct ClaudeActiveTurn {
     stream_key: String,
     pending_memory_context: Option<Option<String>>,
     text: ClaudeTextState,
+    /// Lantor asked the CLI to interrupt this turn, so its error result is a stop.
+    interrupt_requested: bool,
 }
 
 /// Reconcile complete provider text before finalization flushes the control gate.
@@ -701,6 +707,7 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
                 stream_key,
                 pending_memory_context: next_injected_memory_context,
                 text: ClaudeTextState::default(),
+                interrupt_requested: false,
             });
             Ok(())
         }
@@ -1159,6 +1166,7 @@ mod tests {
                     stream_key,
                     pending_memory_context: None,
                     text: ClaudeTextState::default(),
+                    interrupt_requested: false,
                 }),
                 session_id: Some("test-claude-session".to_owned()),
                 context_tokens: 0,

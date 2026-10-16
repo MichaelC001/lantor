@@ -467,7 +467,14 @@ async fn process_supervisor_command(
             let Some(run_id) = command.run_id else {
                 return Err("stop_run command missing run_id".to_owned());
             };
-            supervisor_stop_run(pool, codex_registry, run_id, command.work_item_id).await
+            supervisor_stop_run(
+                pool,
+                codex_registry,
+                claude_registry,
+                run_id,
+                command.work_item_id,
+            )
+            .await
         }
         other => Err(format!("unknown supervisor command: {other}")),
     }
@@ -773,6 +780,7 @@ async fn finalize_unstoppable_work_item(
 async fn supervisor_stop_run(
     pool: &SqlitePool,
     codex_registry: &WarmCodexRegistry,
+    claude_registry: &WarmClaudeRegistry,
     run_id: Uuid,
     command_work_item_id: Option<Uuid>,
 ) -> CommandResult<()> {
@@ -897,6 +905,21 @@ async fn supervisor_stop_run(
             "run",
             "Stop requested",
             "Codex accepted stop request",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    if runtime.eq_ignore_ascii_case("claude")
+        && claude::interrupt_warm_claude_run(pool, claude_registry, agent_id, run_id).await?
+    {
+        record_agent_activity(
+            pool,
+            Some(agent_id),
+            Some(run_id),
+            "run",
+            "Stop requested",
+            "Claude accepted interrupt request",
         )
         .await?;
         return Ok(());
