@@ -68,6 +68,7 @@ import { ThreadPanel } from "./components/ThreadPanel";
 import { WebAppStatus } from "./components/WebAppStatus";
 import { useWebOnline } from "./hooks/useWebOnline";
 import { useVisibleChannelRead } from "./hooks/useVisibleChannelRead";
+import { useVisibleThreadRead } from "./hooks/useVisibleThreadRead";
 import type { ChannelReadLocation } from "./hooks/useChannelMessageScroll";
 import { UnreadBadge } from "./components/UnreadBadge";
 import { isProgressOnlyMessage, messageHasVisibleContent } from "./message-grouping";
@@ -3221,6 +3222,13 @@ function App() {
     if (!data || !selectedAgentId) return null;
     return data.agents.find((agent) => agent.id === selectedAgentId) ?? null;
   }, [data, selectedAgentId]);
+
+  const visibleThreadId = showThread && !selectedAgent ? activeThreadId : null;
+  const visibleThreadActivity = visibleThreadId ? threadActivitiesByRoot.get(visibleThreadId) : undefined;
+  useVisibleThreadRead({
+    threadId: visibleThreadId, unreadCount: visibleThreadActivity?.unread_count ?? 0,
+    latestActivityAt: visibleThreadActivity?.latest_activity_at ?? null,
+  });
 
   const selectedAgentRun = useMemo(() => {
     if (!selectedAgent) return null;

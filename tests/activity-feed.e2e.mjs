@@ -50,8 +50,14 @@ const initialState = { db_url: "synthetic://activity", web_base_url: null, owner
   thread_activities: initialActivities, saved_messages: [], dismissed_inbox_items: {}, read_inbox_items: {}, artifacts: [],
   agent_runs: [], agent_work_items: [], agent_activities: [], supervisor: { pid: null, status: "stopped", updated_at: null },
   launch_agent: { label: "", plist_path: "", installed: false, loaded: false }, ui_event_cursor: 0 };
-let state, messages, cursor = 0;
+let state, messages, cursor = 0, emulateThreadReceipts = false;
 const clients = new Set(), requests = [];
+const until = async (check, message) => {
+  for (const end = Date.now() + 5_000; Date.now() < end; await new Promise(done => setTimeout(done, 50))) {
+    const value = check(); if (value) return value;
+  }
+  throw new Error(message);
+};
 const publish = event => { cursor++; for (const client of clients) client.write(`id: ${cursor}\nevent: lantor\ndata: ${JSON.stringify(event)}\n\n`); };
 const api = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -81,6 +87,13 @@ const api = createServer(async (req, res) => {
     case "/api/replay_ui_events": result = { cursor, replayGap: false, events: [] }; break;
     case "/api/mark_inbox_items_read":
       for (const item of args.items) state.read_inbox_items[item.itemId] = item.dismissedUntil;
+      if (emulateThreadReceipts) {
+        // Like the backend: a thread receipt clears replies up to its cutoff and refreshes read state.
+        state.thread_activities = state.thread_activities.map(a => args.items.some(item => item.itemId === `thread:${a.thread_root_id}`
+          && Date.parse(item.dismissedUntil) >= Date.parse(a.latest_activity_at))
+          ? { ...a, unread_count: 0, agent_unread_count: 0, first_unread_agent_message_id: null } : a);
+        setTimeout(() => publish({ type: "refresh", reason: "owner_inbox_read" }), 0);
+      }
       break;
     case "/api/mark_channel_read":
       state.channels = state.channels.map(c => c.id === args.channelId ? { ...c, unread_count: 0, agent_unread_count: 0 } : c);
@@ -94,7 +107,7 @@ await new Promise(done => api.listen(0, "127.0.0.1", done));
 let browser;
 try {
   for (const [name, engine, width] of [["desktop", chromium, 1440], ["mobile", webkit, 390]]) {
-    state = structuredClone(initialState); messages = structuredClone(initialMessages); requests.length = 0;
+    state = structuredClone(initialState); messages = structuredClone(initialMessages); requests.length = 0; emulateThreadReceipts = false;
     browser = await engine.launch();
     const page = await browser.newPage({ serviceWorkers: "block", viewport: { width, height: 900 } });
     page.setDefaultTimeout(10_000);
@@ -149,6 +162,31 @@ try {
     await dialog.waitFor({ state: "detached" });
     await page.locator(`.thread [data-message-id="${first.id}"]`).waitFor();
     assert.ok(requests.some(r => r.path === "/api/load_message" && r.args.messageId === first.id), "opens first unread agent reply absent from the initial snapshot");
+
+    if (width >= 1101) {
+      // An expanded thread hides the conversation, whose read watermark was the
+      // only receipt for replies arriving in the open thread.
+      await page.getByRole("button", { name: "Expand thread", exact: true }).click();
+      await page.locator(".app.thread-expanded").waitFor();
+      emulateThreadReceipts = true;
+      const badge = trigger.locator(".unread-badge");
+      const badgeValue = async () => await badge.count() ? Number(await badge.textContent()) : 0;
+      const before = await badgeValue();
+      const late = message(110, "agent", "Late reply in the expanded thread", { thread_root_id: root.id });
+      messages.push(late);
+      state.thread_activities = state.thread_activities.map(a => a.thread_root_id === root.id
+        ? { ...a, reply_count: a.reply_count + 1, unread_count: 1, agent_unread_count: 1, first_unread_agent_message_id: late.id,
+          latest_message_id: late.id, latest_activity_at: late.created_at } : a);
+      const sent = requests.length;
+      publish({ type: "message_upsert", message: late });
+      await page.locator(`.thread [data-message-id="${late.id}"]`).waitFor();
+      await until(() => requests.slice(sent).some(r => r.path === "/api/mark_inbox_items_read"
+        && r.args.items.some(item => item.itemId === `thread:${root.id}` && item.dismissedUntil === late.created_at)),
+        "expanded thread receipts its new reply, fenced to the snapshot's latest activity");
+      for (const end = Date.now() + 5_000; await badgeValue() !== before && Date.now() < end;) await page.waitForTimeout(50);
+      assert.equal(await badgeValue(), before, "Activity unread clears while the thread stays expanded");
+      assert.equal(requests.slice(sent).filter(r => r.path === "/api/mark_channel_read").length, 0, "hidden conversation is not marked read");
+    }
     assert.equal(errors.length, 0, errors.join("\n"));
     console.log(`PASS ${name}: agent-only hydration, no system cards/mentions/unread, live reply, first-unread navigation`);
     await browser.close(); browser = null;
