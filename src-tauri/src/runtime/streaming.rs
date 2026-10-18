@@ -449,7 +449,10 @@ pub(crate) async fn reconcile_streaming_agent_message(
         ensure_streaming_agent_message(pool, agent_id, channel_id, thread_root_id, stream_key)
             .await?;
     let (visible, _) = capped_stream_delta(&visible, 0);
-    let mut transaction = pool.begin().await.map_err(to_string)?;
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
     let stored_len: i64 = sqlx::query_scalar("select length(body) from messages where id = $1")
         .bind(message_id)
         .fetch_one(&mut *transaction)

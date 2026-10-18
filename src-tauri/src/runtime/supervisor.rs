@@ -31,6 +31,7 @@ use crate::{
         build_streaming_work_item_prompt, build_work_item_prompt, load_agent_memory_context,
         prepend_memory_context,
     },
+    provider_auth::{provider_needs_login, start_due_provider_probes},
     ui_notifications::{
         enqueue_ui_agent_run_changed_in_tx, enqueue_ui_work_item_changed_in_tx,
         reconcile_work_item_change,
@@ -42,6 +43,10 @@ const SUPERVISOR_COMMAND_CONCURRENCY: usize = 4;
 const SUPERVISOR_IDLE_SLEEP: Duration = Duration::from_secs(2);
 const SUPERVISOR_ERROR_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const SUPERVISOR_ERROR_BACKOFF_MAX: Duration = Duration::from_secs(10);
+const SUPERVISOR_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+/// A run younger than this may still be starting its process; the orphan
+/// sweep leaves it alone.
+const ORPHAN_RUN_GRACE_SECS: i64 = 120;
 
 pub(crate) async fn load_supervisor_status(pool: &SqlitePool) -> CommandResult<SupervisorStatus> {
     let row = sqlx::query(
@@ -121,6 +126,131 @@ pub(crate) async fn mark_orphaned_agent_runs(pool: &SqlitePool) -> CommandResult
     .await
     .map_err(to_string)?;
 
+    Ok(())
+}
+
+/// The startup sweep, per run and while running: a run still marked live
+/// whose agent has no warm process owning a turn will never be finished by
+/// anyone (its finalization failed, or its process vanished). Close it so the
+/// agent's queue moves again instead of waiting for a supervisor restart.
+pub(crate) async fn close_orphaned_agent_runs(
+    pool: &SqlitePool,
+    codex_registry: &WarmCodexRegistry,
+    claude_registry: &WarmClaudeRegistry,
+) -> CommandResult<()> {
+    let rows = sqlx::query(
+        r#"
+        select r.id, r.agent_id, lower(a.runtime) as runtime
+        from agent_runs r
+        join agents a on a.id = r.agent_id
+        where r.stopped_at is null
+          and r.status in ('starting', 'running', 'stopping')
+          and lower(a.runtime) in ('claude', 'codex')
+          and r.started_at < strftime('%Y-%m-%dT%H:%M:%f+00:00','now', $1)
+          and not exists (
+              select 1 from supervisor_commands c
+              where c.agent_id = r.agent_id and c.status = 'running'
+          )
+        "#,
+    )
+    .bind(format!("-{ORPHAN_RUN_GRACE_SECS} seconds"))
+    .fetch_all(pool)
+    .await
+    .map_err(to_string)?;
+    for row in rows {
+        let run_id: Uuid = row.get("id");
+        let agent_id: Uuid = row.get("agent_id");
+        let runtime: String = row.get("runtime");
+        let owned = if runtime == "claude" {
+            claude::claude_runtime_owns_turn(claude_registry, agent_id).await
+        } else {
+            codex::codex_runtime_owns_turn(codex_registry, agent_id).await
+        };
+        if !owned {
+            close_orphaned_agent_run(pool, agent_id, run_id).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn close_orphaned_agent_run(
+    pool: &SqlitePool,
+    agent_id: Uuid,
+    run_id: Uuid,
+) -> CommandResult<()> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
+    let closed = sqlx::query(
+        r#"
+        update agent_runs
+        set status = 'unknown',
+            log = substr(log || $2, -20000),
+            stopped_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+        where id = $1 and stopped_at is null
+        "#,
+    )
+    .bind(run_id)
+    .bind("[lantor] no live runtime owned this run; closed by the orphan sweep\n")
+    .execute(&mut *transaction)
+    .await
+    .map_err(to_string)?
+    .rows_affected()
+        > 0;
+    if !closed {
+        return Ok(());
+    }
+    let work_items: Vec<(Uuid, String)> = sqlx::query(
+        r#"
+        update agent_work_items
+        set status = case status when 'cancelling' then 'cancelled' else 'failed' end,
+            completed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),
+            updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+        where run_id = $1 and status in ('running', 'cancelling')
+        returning id, status
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(to_string)?
+    .into_iter()
+    .map(|row| (row.get("id"), row.get("status")))
+    .collect();
+    sqlx::query(
+        "update agents set status = 'idle' where id = $1 and status in ('running', 'stopping')",
+    )
+    .bind(agent_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(to_string)?;
+    enqueue_ui_agent_run_changed_in_tx(&mut transaction, run_id, "orphaned_run_closed").await?;
+    for (work_item_id, _) in &work_items {
+        enqueue_ui_work_item_changed_in_tx(&mut transaction, *work_item_id, "work_item_finished")
+            .await?;
+    }
+    transaction.commit().await.map_err(to_string)?;
+    for (work_item_id, status) in &work_items {
+        let _ = crate::mark_task_after_work_item_finished(
+            pool,
+            *work_item_id,
+            agent_id,
+            run_id,
+            status,
+        )
+        .await;
+        reconcile_work_item_change(pool, *work_item_id, "work_item_finished").await?;
+    }
+    record_agent_activity(
+        pool,
+        Some(agent_id),
+        Some(run_id),
+        "run_error",
+        "Closed a run no process owned",
+        format!("run={run_id}; its request was marked failed so the queue can move on"),
+    )
+    .await?;
     Ok(())
 }
 
@@ -282,6 +412,7 @@ pub(crate) async fn run_supervisor() -> CommandResult<()> {
     let claude_registry = WarmClaudeRegistry::default();
     let command_semaphore = Arc::new(Semaphore::new(SUPERVISOR_COMMAND_CONCURRENCY));
     let mut last_command_cleanup = Instant::now() - Duration::from_secs(3600);
+    let mut last_maintenance = Instant::now();
     let mut error_backoff = SUPERVISOR_ERROR_BACKOFF_INITIAL;
 
     loop {
@@ -291,6 +422,7 @@ pub(crate) async fn run_supervisor() -> CommandResult<()> {
             &claude_registry,
             &command_semaphore,
             &mut last_command_cleanup,
+            &mut last_maintenance,
         )
         .await
         {
@@ -321,11 +453,17 @@ async fn run_supervisor_iteration(
     claude_registry: &WarmClaudeRegistry,
     command_semaphore: &Arc<Semaphore>,
     last_command_cleanup: &mut Instant,
+    last_maintenance: &mut Instant,
 ) -> CommandResult<bool> {
     write_supervisor_heartbeat(pool).await?;
     if last_command_cleanup.elapsed() >= Duration::from_secs(3600) {
         cleanup_supervisor_commands(pool).await?;
         *last_command_cleanup = Instant::now();
+    }
+    if last_maintenance.elapsed() >= SUPERVISOR_MAINTENANCE_INTERVAL {
+        *last_maintenance = Instant::now();
+        start_due_provider_probes(pool).await?;
+        close_orphaned_agent_runs(pool, codex_registry, claude_registry).await?;
     }
     schedule_queued_work_items(pool, codex_registry, claude_registry).await?;
     let mut processed_command = false;
@@ -432,6 +570,13 @@ async fn schedule_queued_work_items(
               where c.command_type = 'start_agent'
                 and c.work_item_id = w.id
                 and c.status in ('pending', 'running')
+          )
+          -- A long login outage must not starve other runtimes of the batch.
+          and not exists (
+              select 1
+              from agents a
+              join provider_auth_state p on p.runtime = lower(a.runtime)
+              where a.id = w.agent_id and p.status = 'needs_login'
           )
         order by w.created_at asc
         limit 16
@@ -597,6 +742,26 @@ async fn supervisor_start_agent(
     let environment_variables: String = row.get("environment_variables");
     let working_directory: String = row.get::<String, _>("working_directory").trim().to_owned();
     let avatar: Option<String> = row.get("avatar");
+    // Queued before the login broke: leave the request queued for the resume.
+    if let Some(work_item_id) = work_item_id {
+        if provider_needs_login(pool, Some(&runtime)).await? {
+            sqlx::query("update agents set status = 'idle' where id = $1 and status = 'queued'")
+                .bind(agent_id)
+                .execute(pool)
+                .await
+                .map_err(to_string)?;
+            record_agent_activity(
+                pool,
+                Some(agent_id),
+                None,
+                "dispatch",
+                "Waiting for provider login",
+                work_item_id.to_string(),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
     let is_warm_streaming_runtime =
         runtime.eq_ignore_ascii_case("codex") || runtime.eq_ignore_ascii_case("claude");
     let memory_context = match load_agent_memory_context(&working_directory) {
@@ -1019,10 +1184,94 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        claim_next_supervisor_command, load_channel_agent_roster, mark_orphaned_agent_runs,
-        recover_supervisor_commands_at_startup,
+        claim_next_supervisor_command, close_orphaned_agent_runs, load_channel_agent_roster,
+        mark_orphaned_agent_runs, recover_supervisor_commands_at_startup,
     };
     use crate::db::{db_connect_with_url, migrate};
+    use crate::runtime::{claude::WarmClaudeRegistry, codex::WarmCodexRegistry};
+
+    #[tokio::test]
+    async fn orphan_sweep_closes_live_runs_no_process_owns() {
+        let Some((pool, database_path)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "orphaned").await?;
+            sqlx::query("update agents set runtime = 'claude', status = 'running' where id = $1")
+                .bind(agent_id)
+                .execute(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            let mut runs = Vec::new();
+            for (started_at, work_status) in [
+                ("2000-01-01T00:00:00.000+00:00", "running"),
+                ("2000-01-01T00:00:01.000+00:00", "cancelling"),
+                ("2999-01-01T00:00:00.000+00:00", "running"),
+            ] {
+                let run_id: Uuid = sqlx::query_scalar(
+                    "insert into agent_runs (agent_id, command, status, started_at) values ($1, 'claude', 'running', $2) returning id",
+                )
+                .bind(agent_id)
+                .bind(started_at)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+                let work_item_id: Uuid = sqlx::query_scalar(
+                    "insert into agent_work_items (agent_id, title, status, run_id) values ($1, 'stuck', $2, $3) returning id",
+                )
+                .bind(agent_id)
+                .bind(work_status)
+                .bind(run_id)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+                runs.push((run_id, work_item_id));
+            }
+
+            close_orphaned_agent_runs(
+                &pool,
+                &WarmCodexRegistry::default(),
+                &WarmClaudeRegistry::default(),
+            )
+            .await?;
+
+            let mut states = Vec::new();
+            for (run_id, work_item_id) in &runs {
+                let run_status: String =
+                    sqlx::query_scalar("select status from agent_runs where id = $1")
+                        .bind(run_id)
+                        .fetch_one(&pool)
+                        .await
+                        .map_err(|err| err.to_string())?;
+                let work_status: String =
+                    sqlx::query_scalar("select status from agent_work_items where id = $1")
+                        .bind(work_item_id)
+                        .fetch_one(&pool)
+                        .await
+                        .map_err(|err| err.to_string())?;
+                states.push((run_status, work_status));
+            }
+            assert_eq!(
+                states,
+                [
+                    ("unknown".to_owned(), "failed".to_owned()),
+                    ("unknown".to_owned(), "cancelled".to_owned()),
+                    // Young runs may still be starting their process.
+                    ("running".to_owned(), "running".to_owned()),
+                ]
+            );
+            let agent_status: String = sqlx::query_scalar("select status from agents where id = $1")
+                .bind(agent_id)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            assert_eq!(agent_status, "idle");
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, database_path).await;
+        result.unwrap();
+    }
 
     #[tokio::test]
     async fn startup_sweep_finalizes_work_items_stuck_in_cancelling() {

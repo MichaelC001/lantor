@@ -16,6 +16,7 @@ fn active_turn(run_id: Uuid, interrupt_requested: bool) -> ClaudeActiveTurn {
         pending_memory_context: None,
         text: ClaudeTextState::default(),
         interrupt_requested,
+        auth_required: false,
     }
 }
 

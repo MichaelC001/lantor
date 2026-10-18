@@ -1252,7 +1252,10 @@ pub(crate) async fn set_message_saved_in_pool(
     message_id: Uuid,
     saved: bool,
 ) -> CommandResult<()> {
-    let mut transaction = pool.begin().await.map_err(to_string)?;
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
     let exists: bool = sqlx::query_scalar("select exists(select 1 from messages where id = $1)")
         .bind(message_id)
         .fetch_one(&mut *transaction)

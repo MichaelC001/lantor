@@ -56,10 +56,10 @@ mod reaper;
 mod turn;
 
 use protocol::{
-    apply_codex_thread_options, apply_codex_turn_options, codex_context_rotate_env,
-    codex_context_rotate_input_tokens, codex_error_notification_detail, codex_item_id,
-    codex_item_started_activity, codex_item_type, codex_model_value, codex_pending_stream_key,
-    codex_request_error, codex_stream_key, codex_thread_id_from_response,
+    apply_codex_thread_options, apply_codex_turn_options, codex_auth_failure,
+    codex_context_rotate_env, codex_context_rotate_input_tokens, codex_error_notification_detail,
+    codex_item_id, codex_item_started_activity, codex_item_type, codex_model_value,
+    codex_pending_stream_key, codex_request_error, codex_stream_key, codex_thread_id_from_response,
     codex_tool_completion_activity, codex_turn_id_from_value,
     codex_unattended_server_request_response, codex_write_json, effective_codex_cwd,
 };
@@ -159,6 +159,8 @@ struct CodexActiveTurn {
     steer_requests: HashMap<i64, CodexSteerRequest>,
     steer_disabled: bool,
     interrupt_request_id: Option<i64>,
+    /// The app-server reported that its login is no longer valid.
+    auth_required: bool,
 }
 
 struct CodexSteerRequest {
@@ -603,6 +605,19 @@ async fn spawn_warm_codex_runtime(
     ));
 
     Ok(runtime)
+}
+
+/// Whether the agent's warm Codex process still owns a turn. Runs of an
+/// agent without one are orphans.
+pub(crate) async fn codex_runtime_owns_turn(registry: &WarmCodexRegistry, agent_id: Uuid) -> bool {
+    let runtime = {
+        let runtimes = registry.runtimes.lock().await;
+        runtimes.get(&agent_id).cloned()
+    };
+    match runtime {
+        Some(runtime) => runtime.state.lock().await.active.is_some(),
+        None => false,
+    }
 }
 
 pub(crate) async fn active_codex_turn_surface(
@@ -1142,6 +1157,7 @@ pub(crate) async fn supervisor_start_codex_streaming_agent(
                 steer_requests: HashMap::new(),
                 steer_disabled: false,
                 interrupt_request_id: None,
+                auth_required: false,
             });
             Ok(request_id)
         }
@@ -1277,7 +1293,9 @@ async fn handle_codex_warm_stdout_line(
         }
     };
     if let Some(run_id) = active_run_id {
-        append_run_log(pool, run_id, format!("[codex] {line}\n")).await?;
+        // Best effort: a lost log line must not keep a turn-ending event from
+        // finishing the turn below.
+        let _ = append_run_log(pool, run_id, format!("[codex] {line}\n")).await;
     }
 
     if let (Some(run_id), Some((input_tokens, output_tokens))) =
@@ -1585,11 +1603,25 @@ async fn handle_codex_warm_stdout_line(
             if value.pointer("/params/threadId").and_then(Value::as_str)
                 == Some(runtime.thread_id.as_str())
             {
-                finish_warm_codex_active_turn(pool, agent_id, runtime, true, None).await?;
+                if codex_auth_failure(&value) {
+                    mark_codex_turn_auth_required(runtime).await;
+                    let detail = value
+                        .pointer("/params/turn/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("codex turn failed: unauthorized")
+                        .to_owned();
+                    finish_warm_codex_active_turn(pool, agent_id, runtime, false, Some(detail))
+                        .await?;
+                } else {
+                    finish_warm_codex_active_turn(pool, agent_id, runtime, true, None).await?;
+                }
             }
         }
         Some("error") => {
             if let Some(detail) = codex_error_notification_detail(&value) {
+                if codex_auth_failure(&value) {
+                    mark_codex_turn_auth_required(runtime).await;
+                }
                 finish_warm_codex_active_turn(pool, agent_id, runtime, false, Some(detail)).await?;
             } else {
                 let mut state = runtime.state.lock().await;
@@ -1600,6 +1632,12 @@ async fn handle_codex_warm_stdout_line(
     }
 
     Ok(())
+}
+
+async fn mark_codex_turn_auth_required(runtime: &Arc<WarmCodexRuntime>) {
+    if let Some(active) = runtime.state.lock().await.active.as_mut() {
+        active.auth_required = true;
+    }
 }
 
 async fn codex_warm_stderr_reader<R>(
@@ -1766,6 +1804,7 @@ mod tests {
                     steer_requests: HashMap::new(),
                     steer_disabled: false,
                     interrupt_request_id: None,
+                    auth_required: false,
                 }),
                 next_request_id: 2,
                 pending_rate_limit_request_id: None,
@@ -2162,6 +2201,7 @@ mod tests {
             steer_requests: HashMap::new(),
             steer_disabled: false,
             interrupt_request_id: None,
+            auth_required: false,
         };
 
         let first = track_codex_agent_message_stream(&mut active, "item-1");
@@ -2180,5 +2220,63 @@ mod tests {
             .contains(&first.stream_key));
         assert!(active.stream_keys.contains(&second.stream_key));
         assert!(active.latest_agent_message_stream_key.as_ref() == Some(&second.stream_key));
+    }
+
+    #[tokio::test]
+    async fn unauthorized_codex_turn_requeues_the_request_and_pauses_codex() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let agent_id = insert_test_agent(&pool, "codex-login-agent").await?;
+            let channel_id = insert_test_channel(&pool, "codex-login-channel").await?;
+            let work_item_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_work_items (agent_id, channel_id, title, status)
+                values ($1, $2, 'review', 'running')
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let run_id: uuid::Uuid = sqlx::query_scalar(
+                r#"
+                insert into agent_runs (agent_id, work_item_id, command, status)
+                values ($1, $2, 'codex app-server', 'running')
+                returning id
+                "#,
+            )
+            .bind(agent_id)
+            .bind(work_item_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            let stream_key = format!("{run_id}:warm-codex");
+            let runtime =
+                test_runtime_with_active_turn(run_id, work_item_id, channel_id, stream_key).await?;
+            let line = r#"{"method":"error","params":{"error":{"message":"Provided authentication token is expired. Please try signing in again.","codexErrorInfo":"unauthorized","additionalDetails":null},"willRetry":false,"threadId":"thread-1","turnId":"turn-1"}}"#;
+            super::handle_codex_warm_stdout_line(&pool, agent_id, &runtime, line).await?;
+
+            let work_status: String =
+                sqlx::query_scalar("select status from agent_work_items where id = $1")
+                    .bind(work_item_id)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert_eq!(work_status, "queued");
+            let auth: String =
+                sqlx::query_scalar("select status from provider_auth_state where runtime = 'codex'")
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert_eq!(auth, "needs_login");
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
     }
 }

@@ -1114,6 +1114,12 @@ pub(crate) async fn enqueue_agent_work_if_available(
     if pending_for_work.is_some() {
         return Ok(true);
     }
+    // While the provider login is broken the request waits in the queue.
+    if !joins_active_turn
+        && !crate::provider_auth::provider_allows_start(pool, runtime.as_deref()).await?
+    {
+        return Ok(false);
+    }
 
     let mut transaction = pool.begin().await.map_err(to_string)?;
     sqlx::query(

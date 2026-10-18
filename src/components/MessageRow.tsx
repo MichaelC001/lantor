@@ -62,7 +62,8 @@ export const MessageRow = memo(function MessageRow({
   const decision = useMessageDecision(message.id);
   const channel = variant === "channel";
   const root = variant === "thread-root";
-  const system = message.sender_role === "system";
+  // Lantor raises its own decision cards as system messages; they render as cards.
+  const system = message.sender_role === "system" && !decision;
   const collapsible = !decision && message.delivery_state !== "streaming" && shouldCollapseMessage(message.body);
   const onMount = actions.onMount;
   const setNode = useCallback((node: HTMLElement | null) => onMount?.(message.id, node), [message.id, onMount]);

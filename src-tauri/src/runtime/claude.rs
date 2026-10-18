@@ -48,7 +48,7 @@ mod text;
 mod turn;
 
 pub(crate) use interrupt::interrupt_warm_claude_run;
-pub(crate) use steer::steerable_claude_turn_surface;
+pub(crate) use steer::{claude_runtime_owns_turn, steerable_claude_turn_surface};
 use steer::{
     note_claude_input_replayed, steer_warm_claude_turn_if_same_surface, ClaudePendingSteer,
     ClaudeSteerRequest,
@@ -63,12 +63,13 @@ mod recovery_tests;
 mod steer_tests;
 
 use protocol::{
-    claude_context_tokens, claude_main_tool_use_started, claude_message_text_blocks,
-    claude_replayed_input_uuid, claude_result_error, claude_result_text,
-    claude_resume_session_missing, claude_session_id, claude_stream_event_activity,
-    claude_stream_key, claude_streaming_command_text, claude_surface_boundary_marker,
-    claude_text_delta, claude_user_input, claude_write_input, CLAUDE_DISABLE_BACKGROUND_TASKS_ENV,
-    CLAUDE_DISABLE_CRON_ENV, CLAUDE_MAX_RETRIES_ENV, DEFAULT_CLAUDE_MAX_RETRIES,
+    claude_auth_failure, claude_context_tokens, claude_main_tool_use_started,
+    claude_message_text_blocks, claude_replayed_input_uuid, claude_result_error,
+    claude_result_text, claude_resume_session_missing, claude_session_id,
+    claude_stream_event_activity, claude_stream_key, claude_streaming_command_text,
+    claude_surface_boundary_marker, claude_text_delta, claude_user_input, claude_write_input,
+    CLAUDE_DISABLE_BACKGROUND_TASKS_ENV, CLAUDE_DISABLE_CRON_ENV, CLAUDE_MAX_RETRIES_ENV,
+    DEFAULT_CLAUDE_MAX_RETRIES,
 };
 use reaper::claude_warm_idle_reaper;
 use session::{
@@ -144,6 +145,8 @@ struct ClaudeActiveTurn {
     text: ClaudeTextState,
     /// Lantor asked the CLI to interrupt this turn, so its error result is a stop.
     interrupt_requested: bool,
+    /// The CLI reported that its login is no longer valid during this turn.
+    auth_required: bool,
 }
 
 /// Reconcile complete provider text before finalization flushes the control gate.
@@ -742,6 +745,7 @@ pub(crate) async fn supervisor_start_claude_streaming_agent(
                 pending_memory_context: next_injected_memory_context,
                 text: ClaudeTextState::default(),
                 interrupt_requested: false,
+                auth_required: false,
             });
             Ok(())
         }
@@ -844,12 +848,57 @@ async fn claude_warm_stdout_reader<R>(
     remove_warm_claude_runtime_if_same(&registry, agent_id, &runtime).await;
 }
 
+/// Whether the stdout line still needs the turn-ending check after its
+/// effects were applied.
+enum ClaudeLineFlow {
+    Continue,
+    /// A special line (input replay, missing session) fully handled the turn.
+    Handled,
+}
+
 async fn handle_claude_warm_stdout_line(
     pool: &SqlitePool,
     agent_id: Uuid,
     runtime: &Arc<WarmClaudeRuntime>,
     line: &str,
 ) -> CommandResult<()> {
+    let parsed = serde_json::from_str::<Value>(line).ok();
+    if parsed.as_ref().is_some_and(claude_auth_failure) {
+        if let Some(active) = runtime.state.lock().await.active.as_mut() {
+            active.auth_required = true;
+        }
+    }
+    let applied = apply_claude_warm_stdout_line(pool, agent_id, runtime, line).await;
+    if matches!(applied, Ok(ClaudeLineFlow::Handled)) {
+        return Ok(());
+    }
+    // A `result` line ends the turn even when recording its effects failed;
+    // otherwise the turn would stay active forever and block the agent.
+    let Some(value) =
+        parsed.filter(|value| value.get("type").and_then(Value::as_str) == Some("result"))
+    else {
+        return applied.map(|_| ());
+    };
+    let finished = if let Some(error) = claude_result_error(&value) {
+        finish_warm_claude_active_turn(pool, agent_id, runtime, false, Some(error)).await
+    } else {
+        let dropped = if applied.is_ok() {
+            drop_interim_progress_text(pool, agent_id, runtime).await
+        } else {
+            Ok(())
+        };
+        let finished = finish_warm_claude_active_turn(pool, agent_id, runtime, true, None).await;
+        dropped.and(finished)
+    };
+    applied.and(finished)
+}
+
+async fn apply_claude_warm_stdout_line(
+    pool: &SqlitePool,
+    agent_id: Uuid,
+    runtime: &Arc<WarmClaudeRuntime>,
+    line: &str,
+) -> CommandResult<ClaudeLineFlow> {
     let active_run_id = {
         runtime
             .state
@@ -875,12 +924,16 @@ async fn handle_claude_warm_stdout_line(
     }
     let value = value.map_err(to_string)?;
     if let Some(uuid) = replayed_uuid {
-        return note_claude_input_replayed(pool, agent_id, runtime, &uuid).await;
+        return note_claude_input_replayed(pool, agent_id, runtime, &uuid)
+            .await
+            .map(|_| ClaudeLineFlow::Handled);
     }
 
     // Handle before the session-id capture below, which would store the missing ID again.
     if claude_resume_session_missing(&value) {
-        return restart_after_missing_session(pool, agent_id, runtime, &value).await;
+        return restart_after_missing_session(pool, agent_id, runtime, &value)
+            .await
+            .map(|_| ClaudeLineFlow::Handled);
     }
 
     if let Some(snapshot) = claude_subscription_status_from_event(&value) {
@@ -974,7 +1027,7 @@ async fn handle_claude_warm_stdout_line(
             let mut state = runtime.state.lock().await;
             let (active, first_delta_elapsed) = {
                 let Some(active) = state.active.as_mut() else {
-                    return Ok(());
+                    return Ok(ClaudeLineFlow::Continue);
                 };
                 let first_delta_elapsed = if active.first_delta_at.is_none() {
                     let elapsed = active.started_at.elapsed();
@@ -1010,7 +1063,7 @@ async fn handle_claude_warm_stdout_line(
             append_streaming_agent_message(pool, agent_id, channel_id, active.2, &active.3, delta)
                 .await?;
         }
-        return Ok(());
+        return Ok(ClaudeLineFlow::Continue);
     }
 
     reconcile_final_text(pool, agent_id, runtime, &value).await?;
@@ -1048,14 +1101,7 @@ async fn handle_claude_warm_stdout_line(
         }
     }
 
-    if let Some(error) = claude_result_error(&value) {
-        finish_warm_claude_active_turn(pool, agent_id, runtime, false, Some(error)).await?;
-    } else if value.get("type").and_then(Value::as_str) == Some("result") {
-        drop_interim_progress_text(pool, agent_id, runtime).await?;
-        finish_warm_claude_active_turn(pool, agent_id, runtime, true, None).await?;
-    }
-
-    Ok(())
+    Ok(ClaudeLineFlow::Continue)
 }
 
 async fn claude_warm_stderr_reader<R>(
@@ -1215,6 +1261,7 @@ mod tests {
                     pending_memory_context: None,
                     text: ClaudeTextState::default(),
                     interrupt_requested: false,
+                    auth_required: false,
                 }),
                 session_id: Some("test-claude-session".to_owned()),
                 context_tokens: 0,
@@ -1349,6 +1396,129 @@ mod tests {
             .await
             .map_err(|err| err.to_string())?;
             assert_eq!(run_error_count, 1);
+            Ok(())
+        }
+        .await;
+        drop_test_schema(pool, schema).await;
+        result.unwrap();
+    }
+
+    async fn insert_running_turn_fixture(
+        pool: &sqlx::SqlitePool,
+        handle: &str,
+        runtime: &str,
+    ) -> Result<(Uuid, Uuid, Uuid, Uuid, String), String> {
+        let agent_id = insert_test_agent(pool, handle).await?;
+        sqlx::query("update agents set status = 'running', runtime = $2 where id = $1")
+            .bind(agent_id)
+            .bind(runtime)
+            .execute(pool)
+            .await
+            .map_err(|err| err.to_string())?;
+        let channel_id = insert_test_channel(pool, &format!("{handle}-channel")).await?;
+        let work_item_id: Uuid = sqlx::query_scalar(
+            r#"
+            insert into agent_work_items (agent_id, channel_id, title, status)
+            values ($1, $2, 'daily memory', 'running')
+            returning id
+            "#,
+        )
+        .bind(agent_id)
+        .bind(channel_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        let run_id: Uuid = sqlx::query_scalar(
+            r#"
+            insert into agent_runs (agent_id, work_item_id, command, status)
+            values ($1, $2, 'warm runtime', 'running')
+            returning id
+            "#,
+        )
+        .bind(agent_id)
+        .bind(work_item_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        sqlx::query("update agent_work_items set run_id = $2 where id = $1")
+            .bind(work_item_id)
+            .bind(run_id)
+            .execute(pool)
+            .await
+            .map_err(|err| err.to_string())?;
+        let stream_key = format!("{run_id}:warm");
+        sqlx::query(
+            r#"
+            insert into messages (
+                channel_id, sender_agent_id, sender_name, sender_role,
+                body, delivery_state, stream_key
+            )
+            values ($1, $2, $3, 'agent', '', 'streaming', $4)
+            "#,
+        )
+        .bind(channel_id)
+        .bind(agent_id)
+        .bind(handle)
+        .bind(&stream_key)
+        .execute(pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        Ok((agent_id, channel_id, work_item_id, run_id, stream_key))
+    }
+
+    #[tokio::test]
+    async fn expired_claude_login_requeues_the_request_and_pauses_claude() {
+        let Some((pool, schema)) = test_pool().await else {
+            return;
+        };
+        let result: Result<(), String> = async {
+            let (agent_id, channel_id, work_item_id, run_id, stream_key) =
+                insert_running_turn_fixture(&pool, "claude-login-agent", "claude").await?;
+            let runtime =
+                test_runtime_with_active_turn(run_id, work_item_id, channel_id, stream_key.clone())
+                    .await?;
+            // The lines Claude Code 2.1 prints when its OAuth session expired.
+            for line in [
+                r#"{"type":"assistant","message":{"id":"m1","model":"<synthetic>","role":"assistant","type":"message","content":[{"type":"text","text":"Failed to authenticate: OAuth session expired and could not be refreshed"}]},"session_id":"s1","uuid":"u1","error":"authentication_failed","is_api_error_message":true}"#,
+                r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":null,"terminal_reason":"api_error","result":"Failed to authenticate: OAuth session expired and could not be refreshed","session_id":"s1","uuid":"u2"}"#,
+            ] {
+                super::handle_claude_warm_stdout_line(&pool, agent_id, &runtime, line).await?;
+            }
+
+            let work = sqlx::query("select status, run_id, completed_at from agent_work_items where id = $1")
+                .bind(work_item_id)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            assert_eq!(work.get::<String, _>("status"), "queued");
+            assert!(work.get::<Option<Uuid>, _>("run_id").is_none());
+            assert!(work.get::<Option<String>, _>("completed_at").is_none());
+            let run_status: String = sqlx::query_scalar("select status from agent_runs where id = $1")
+                .bind(run_id)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            assert_eq!(run_status, "failed");
+            let replies: i64 = sqlx::query_scalar("select count(*) from messages where stream_key = $1")
+                .bind(&stream_key)
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| err.to_string())?;
+            assert_eq!(replies, 0, "the CLI's error text is not posted as a reply");
+            let auth: String =
+                sqlx::query_scalar("select status from provider_auth_state where runtime = 'claude'")
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            assert_eq!(auth, "needs_login");
+            let cards: i64 = sqlx::query_scalar(
+                "select count(*) from decisions where status = 'open' and requester_agent_id is null",
+            )
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| err.to_string())?;
+            assert_eq!(cards, 1);
+            assert!(runtime.state.lock().await.active.is_none());
             Ok(())
         }
         .await;

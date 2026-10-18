@@ -153,6 +153,12 @@ pub(super) fn claude_result_text(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The CLI marks a provider reply that failed because its login is no longer
+/// valid (expired OAuth session, revoked token) with this error code.
+pub(super) fn claude_auth_failure(value: &Value) -> bool {
+    value.get("error").and_then(Value::as_str) == Some("authentication_failed")
+}
+
 pub(super) fn claude_result_error(value: &Value) -> Option<String> {
     if value.get("type").and_then(Value::as_str) != Some("result") {
         return None;

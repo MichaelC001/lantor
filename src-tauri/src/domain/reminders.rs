@@ -138,7 +138,10 @@ pub(crate) async fn complete_successful_agent_reminders(
     pool: &SqlitePool,
     work_item_id: Option<Uuid>,
 ) -> CommandResult<()> {
-    let mut transaction = pool.begin().await.map_err(to_string)?;
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(to_string)?;
     let rows = sqlx::query(
         r#"
         with completed_work as materialized (

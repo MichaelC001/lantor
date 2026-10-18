@@ -547,6 +547,18 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         create index if not exists decisions_status_created_idx
             on decisions (status, created_at)
         "#,
+        // Login health per provider CLI (`claude`, `codex`): every agent of a
+        // runtime shares one login, so an expired login pauses them together.
+        r#"
+        create table if not exists provider_auth_state (
+            runtime text primary key not null,
+            status text not null default 'ok',
+            detail text not null default '',
+            decision_id blob references decisions(id) on delete set null,
+            paused_at text,
+            updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
+        )
+        "#,
         r#"
         create table if not exists push_vapid_keys (
             id integer primary key default 1 check (id = 1),

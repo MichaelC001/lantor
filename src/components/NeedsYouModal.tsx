@@ -137,7 +137,7 @@ export function NeedsYouModal({
                 <button type="button" className="needs-you-decision-meta" onClick={() => onOpenDecision(decision)}
                   aria-label={`Open the conversation for ${decision.title}`}>
                   {requester && <AgentAvatar agent={requester} size="sm" showStatus={false} />}
-                  <strong>{decision.requester_handle ? `@${decision.requester_handle}` : "Agent"}</strong>
+                  <strong>{decision.requester_handle ? `@${decision.requester_handle}` : decision.requester_agent_id ? "Agent" : "Lantor"}</strong>
                   <span>#{decision.channel_name}</span>
                   <time dateTime={decision.created_at}>{formatTime(decision.created_at)}</time>
                   <MessageSquare size={14} />
